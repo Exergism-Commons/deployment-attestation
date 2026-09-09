@@ -55,9 +55,13 @@ jobs:
           grep -Fq 'DEPLOYMENT_MANIFEST.json' README.md
           grep -Fq 'transaction.json' agent/ec-deployment-agent.sh
           grep -Fq 'fsync_file_and_dir "$backup"' agent/ec-deployment-agent.sh
+          grep -Fq 'fsync_checkout' agent/ec-deployment-agent.sh
+          grep -Fq 'worktree_clean' agent/ec-deployment-agent.sh
+          grep -Fq -- '--ignored=matching' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
+          grep -Fq 'curl git python3 sha256sum systemctl flock jq install mktemp' install/install-id-exergism.sh
 
       - name: Reject obvious committed secrets
         run: |
