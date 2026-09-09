@@ -11,8 +11,12 @@ It is intentionally not part of the initial host-agent implementation. The host 
 3. Select the expected service-specific HMAC key from trusted receiver configuration, never from request-controlled identity alone.
 4. Verify `X-EC-Signature` over `<timestamp>.<raw-body>` using constant-time comparison.
 5. Validate the JSON payload against `spec/attestation-v0.1.schema.json`.
-6. Independently verify that `expected_commit` is the source revision named by the service's current release metadata.
-7. Project accepted observations into GitHub.
+6. Require `Idempotency-Key` to equal the signed body field `observation_id`.
+7. Persist a deduplication record keyed by trusted service identity plus `observation_id` **before** incrementing failure counters or mutating GitHub. A duplicate submission MUST return the same successful acknowledgement and MUST NOT increment health/failure thresholds, create another Check/Deployment mutation, or create another incident. Retain deduplication state for at least the larger of the replay window and the incident-evaluation window.
+8. Independently verify that `expected_commit`, `expected_runtime_sha256`, and `release_manifest_sha256` correspond to the service's current `DEPLOYMENT_MANIFEST.json` release snapshot.
+9. Project accepted, first-seen observations into GitHub.
+
+The agent may retry an identical POST when a response is lost. Idempotency is therefore a protocol requirement, not an optional receiver optimization.
 
 ## Preferred GitHub surfaces
 
