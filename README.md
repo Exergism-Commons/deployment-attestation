@@ -7,15 +7,18 @@ The repository deliberately separates **deployment authority** from **semantic/a
 ## Goals
 
 - deploy only release-bound, content-verified revisions;
-- record the exact source commit and release observed on a host;
+- bind source revision and architecture-specific runtime digest through one release manifest snapshot;
+- survive process termination/reboot during activation without rebasing rollback onto partial state;
+- record the exact source commit, runtime digest and release manifest observed on a host;
 - perform local, public and service-specific health checks;
 - roll back automatically when activation fails;
-- emit HMAC-authenticated attestations to an external receiver;
+- emit HMAC-authenticated, idempotent attestations to an external receiver;
 - make production state actionable in GitHub without committing heartbeat noise to repositories;
 - reuse the same protocol for `id.exergism.org`, governance, funding and future EC services.
 
 ## Repository layout
 
+- `spec/release-manifest-v0.1.schema.json` — atomic release snapshot binding source commit to runtime digests.
 - `spec/attestation-v0.1.schema.json` — wire contract for host observations.
 - `agent/ec-deployment-agent.sh` — reference release updater + health/attestation agent.
 - `packaging/` — systemd service/timer templates.
@@ -26,12 +29,14 @@ The repository deliberately separates **deployment authority** from **semantic/a
 
 ## Core trust invariant
 
-The production host MUST NOT deploy `git pull main` directly. It deploys only a release that publishes a valid `SOURCE_COMMIT` plus checksum metadata and verifies that the checked-out repository state and installed binary correspond to that release.
+The production host MUST NOT deploy `git pull main` directly and MUST NOT independently combine mutable `SOURCE_COMMIT`, checksum and binary assets. A release channel publishes one `DEPLOYMENT_MANIFEST.json` response that binds the exact source commit and SHA-256 digest of every architecture-specific runtime asset. The agent first snapshots that single manifest, then accepts only a runtime matching the digest in that snapshot and checks out the exact commit named by it. If a rolling release is being republished concurrently, mismatched old/new artifacts fail closed rather than producing a mixed deployment.
 
-The host MUST NOT hold a GitHub token capable of mutating EC repositories. It signs an attestation with a service-specific HMAC key and sends it to a receiver. The receiver owns the GitHub integration and can publish Deployment/Check status or open incidents.
+Activation is a durable transaction. Before mutating source or runtime, the agent verifies the currently recorded source/runtime pair, fsyncs a rollback binary, and atomically persists `transaction.json`. Any later run that finds this file restores the old pair before establishing a new baseline. `current-state.json` is atomically committed only after the new runtime passes mandatory health checks; failure to record that state is itself an activation failure and triggers rollback.
+
+The host MUST NOT hold a GitHub token capable of mutating EC repositories. It signs an attestation with a service-specific HMAC key and sends it to a receiver. Every observation contains a signed `observation_id`; receiver-side deduplication is mandatory so transport retries cannot increment incident thresholds twice. The receiver owns the GitHub integration and can publish Deployment/Check status or open incidents.
 
 ## Initial status
 
-`0.1` is a pre-adoption protocol. The first integration target is `id.exergism.org`. The receiver/GitHub-App implementation is intentionally a separate step from the host agent so its credentials and failure modes remain isolated.
+`0.1` is a pre-adoption protocol. The first integration target is `id.exergism.org`. The service release workflow must publish `DEPLOYMENT_MANIFEST.json` before the updater is enabled. The receiver/GitHub-App implementation is intentionally a separate step from the host agent so its credentials and failure modes remain isolated.
 
 See `docs/ARCHITECTURE.md` before deploying the agent.
