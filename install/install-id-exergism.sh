@@ -10,7 +10,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE="id.exergism.org"
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
 
-for command in curl python3 jq systemctl install mktemp; do
+# Keep this in sync with the commands required by the installed agent and the
+# id-specific semantic smoke check. A successful installation must never leave
+# a timer that can only fail at runtime because a dependency is absent.
+for command in curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
@@ -42,10 +45,11 @@ PY
 rm -f "$tmp_manifest"
 trap - EXIT
 
-# id.exergism.org's semantic smoke script requires jq. Validate the installed
-# dependency before any unit is enabled so a valid deployment cannot enter a
-# rollback loop merely because the host is missing a smoke-test dependency.
 jq --version >/dev/null
+
+git --version >/dev/null
+sha256sum --version >/dev/null
+flock --version >/dev/null
 
 install -d -m 0755 /usr/local/libexec
 install -d -m 0755 /etc/ec-deployment-attestation
