@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre4"
+AGENT_VERSION="0.1.0-pre5"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -81,6 +81,96 @@ finally:
 PY
 }
 
+worktree_clean() {
+  local status
+  status="$(git -C "$EC_APP_DIR" status --porcelain=v1 --untracked-files=all --ignored=matching --ignore-submodules=none 2>/dev/null)" || return 1
+  [[ -z "$status" ]]
+}
+
+# Make the checked-out source durable independently of the runtime/state
+# filesystem. The transaction journal is not allowed to disappear until both
+# tracked worktree bytes and Git metadata needed to identify them have crossed
+# an fsync barrier.
+fsync_checkout() {
+  python3 - "$EC_APP_DIR" <<'PY'
+import os
+import pathlib
+import stat
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+gitdir = pathlib.Path(
+    subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "--absolute-git-dir"],
+        text=True,
+    ).strip()
+).resolve()
+
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+def fsync_regular(path: pathlib.Path) -> None:
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        raise RuntimeError(f"path disappeared during durability barrier: {path}")
+    if not stat.S_ISREG(st.st_mode):
+        return
+    fd = os.open(path, os.O_RDONLY | NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def fsync_dir(path: pathlib.Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+# Persist every tracked worktree file and each containing directory. Symlinks
+# are represented by durable directory entries; their targets are not followed.
+raw = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z"])
+dirs = {root}
+for item in raw.split(b"\0"):
+    if not item:
+        continue
+    rel = pathlib.Path(os.fsdecode(item))
+    path = root / rel
+    try:
+        st = path.lstat()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"tracked path missing during durability barrier: {rel}") from exc
+    if stat.S_ISREG(st.st_mode):
+        fsync_regular(path)
+    parent = path.parent
+    while True:
+        dirs.add(parent)
+        if parent == root:
+            break
+        parent = parent.parent
+for directory in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+    fsync_dir(directory)
+
+# Persist Git metadata/objects as well. Fetch and checkout may update detached
+# HEAD, index, reflogs and object packs; all are part of the recoverable source
+# state and may live on a different filesystem from the runtime/state dirs.
+git_dirs = []
+for dirpath, dirnames, filenames in os.walk(gitdir, topdown=False, followlinks=False):
+    d = pathlib.Path(dirpath)
+    for name in filenames:
+        p = d / name
+        try:
+            fsync_regular(p)
+        except FileNotFoundError:
+            raise RuntimeError(f"git metadata disappeared during durability barrier: {p}")
+    git_dirs.append(d)
+for directory in git_dirs:
+    fsync_dir(directory)
+PY
+}
+
 atomic_write() {
   local target="$1" content="$2" mode="${3:-0600}"
   python3 - "$target" "$content" "$mode" <<'PY'
@@ -155,6 +245,7 @@ bootstrap_state() {
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "Cannot bootstrap deployment revision"
   head="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"
   [[ "$head" == "$commit" ]] || die "Bootstrap refused: checkout differs from recorded revision"
+  worktree_clean || die "Bootstrap refused: source worktree is modified or contains extra files"
   [[ -x "$EC_APP_BIN" ]] || die "Bootstrap refused: runtime missing"
   binary="$(sha256_file "$EC_APP_BIN")"
   [[ "$binary" =~ ^[0-9a-f]{64}$ ]] || die "Bootstrap refused: runtime digest invalid"
@@ -205,7 +296,8 @@ verify_baseline() {
   [[ "$commit" =~ ^[0-9a-f]{40}$ && "$binary" =~ ^[0-9a-f]{64}$ ]] || return 1
   head="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"
   actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
-  [[ "$head" == "$commit" && "$actual" == "$binary" ]]
+  [[ "$head" == "$commit" && "$actual" == "$binary" ]] || return 1
+  worktree_clean
 }
 
 write_transaction() {
@@ -237,6 +329,8 @@ rollback_transaction() {
   git -C "$EC_APP_DIR" reset --hard "$commit" || return 1
   git -C "$EC_APP_DIR" clean -fdx || return 1
   [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$commit" ]] || return 1
+  worktree_clean || return 1
+  fsync_checkout || return 1
   install -o root -g root -m 0755 "$backup" "${EC_APP_BIN}.rollback" || return 1
   [[ "$(sha256_file "${EC_APP_BIN}.rollback" 2>/dev/null || true)" == "$binary" ]] || return 1
   mv -f "${EC_APP_BIN}.rollback" "$EC_APP_BIN" || return 1
@@ -267,7 +361,9 @@ collect_checks() {
   [[ "$deployed" == "$expected" ]] && release_revision=true
   head="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"
   actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
-  [[ "$head" == "$deployed" ]] && source_tree=true
+  if [[ "$head" == "$deployed" ]] && worktree_clean; then
+    source_tree=true
+  fi
   [[ "$actual" == "$state_binary" ]] && state_integrity=true
   [[ "$actual" == "$expected_binary" ]] && runtime_digest=true
   if [[ -n "$EC_SMOKE_SCRIPT" ]]; then
@@ -344,7 +440,10 @@ attest() {
 
 update_release() {
   recover_transaction
-  verify_baseline || die "Current source/runtime pair differs from durable state"
+  if ! verify_baseline; then
+    attest || true
+    die "Current source/runtime pair differs from durable state or source worktree is not exact"
+  fi
 
   local dir current current_binary current_manifest downloaded oldc oldb oldm backup
   dir="$(mktemp -d)"
@@ -415,9 +514,11 @@ update_release() {
      || ! git -C "$EC_APP_DIR" checkout --detach FETCH_HEAD \
      || ! git -C "$EC_APP_DIR" reset --hard "$RELEASE_SOURCE_COMMIT" \
      || ! git -C "$EC_APP_DIR" clean -fdx \
-     || [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" != "$RELEASE_SOURCE_COMMIT" ]]; then
+     || [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" != "$RELEASE_SOURCE_COMMIT" ]] \
+     || ! worktree_clean \
+     || ! fsync_checkout; then
     rm -rf "$dir"
-    rollback_transaction || die "Source switch failed and rollback failed"
+    rollback_transaction || die "Source switch/durability failed and rollback failed"
     attest || true
     return 1
   fi
