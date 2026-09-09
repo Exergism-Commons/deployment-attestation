@@ -60,10 +60,13 @@ jobs:
           grep -Fq 'blob_oid' agent/ec-deployment-agent.sh
           grep -Fq -- '--show-object-format' agent/ec-deployment-agent.sh
           grep -Fq -- '--git-common-dir' agent/ec-deployment-agent.sh
-          grep -Fq 'sync_submodules' agent/ec-deployment-agent.sh
-          grep -Fq 'git -C "$EC_APP_DIR" clean -ffdx' agent/ec-deployment-agent.sh
-          grep -Fq 'fsync_checkout "$RELEASE_SOURCE_COMMIT"' agent/ec-deployment-agent.sh
-          grep -Fq 'source_tree_exact "$RELEASE_SOURCE_COMMIT"' agent/ec-deployment-agent.sh
+          grep -Fq 'clean_populated_submodules' agent/ec-deployment-agent.sh
+          grep -Fq "git clean -ffdx >/dev/null" agent/ec-deployment-agent.sh
+          grep -Fq 'gitlink is not a real directory' agent/ec-deployment-agent.sh
+          grep -Fq 'add_parent_chain(dirs, p, repo)' agent/ec-deployment-agent.sh
+          grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh
+          grep -Fq 'verify_runtime_exact "$binary"' agent/ec-deployment-agent.sh
+          grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
