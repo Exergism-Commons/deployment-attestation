@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre6"
+AGENT_VERSION="0.1.0-pre7"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -18,7 +18,7 @@ required=(EC_SERVICE EC_REPOSITORY EC_ENVIRONMENT EC_RELEASE_TAG EC_APP_DIR EC_A
 for name in "${required[@]}"; do
   [[ -n "${!name:-}" ]] || die "Missing required configuration: $name"
 done
-for command in curl git python3 sha256sum systemctl flock; do
+for command in curl git python3 sha256sum systemctl flock install awk sed tr date hostname uname mv rm; do
   command -v "$command" >/dev/null 2>&1 || die "Required command not found: $command"
 done
 
@@ -36,7 +36,48 @@ TRANSACTION_FILE="$EC_STATE_DIR/transaction.json"
 BACKUP_DIR="$EC_STATE_DIR/backups"
 LOCK_FILE="$EC_STATE_DIR/agent.lock"
 
-install -d -o root -g root -m 0700 "$EC_STATE_DIR" "$BACKUP_DIR"
+# Create state directories one component at a time and fsync the parent after
+# each new directory entry. The transaction journal is not trusted until its
+# containing path itself is crash-durable.
+durable_mkdir_tree() {
+  local target="$1" mode="${2:-0700}"
+  python3 - "$target" "$mode" <<'PY'
+import os, pathlib, sys
+p = pathlib.Path(sys.argv[1]).resolve()
+mode = int(sys.argv[2], 8)
+missing = []
+cur = p
+while not cur.exists():
+    missing.append(cur)
+    cur = cur.parent
+if not cur.is_dir():
+    raise RuntimeError(f"existing ancestor is not a directory: {cur}")
+for d in reversed(missing):
+    os.mkdir(d, mode)
+    os.chmod(d, mode)
+    pfd = os.open(d.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(pfd)
+    finally:
+        os.close(pfd)
+# Match install -d semantics for the requested target while preserving existing
+# ancestor modes.
+os.chmod(p, mode)
+fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+pfd = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(pfd)
+finally:
+    os.close(pfd)
+PY
+}
+
+durable_mkdir_tree "$EC_STATE_DIR" 0700
+durable_mkdir_tree "$BACKUP_DIR" 0700
 exec 9>"$LOCK_FILE"
 flock -n 9 || { log "Another agent invocation holds the lock"; exit 0; }
 
@@ -73,7 +114,7 @@ try:
     os.fsync(fd)
 finally:
     os.close(fd)
-dfd = os.open(p.parent, os.O_DIRECTORY)
+dfd = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
 try:
     os.fsync(dfd)
 finally:
@@ -81,245 +122,13 @@ finally:
 PY
 }
 
-# Verify source bytes independently of Git's index/stat-cache hints. This does
-# not trust `git status`, skip-worktree, assume-unchanged or sparse-index state:
-# each committed blob ID is recomputed directly from the worktree bytes and
-# submodules are recursively checked against their gitlink commit.
-source_tree_exact() {
-  local commit="$1"
-  python3 - "$EC_APP_DIR" "$commit" <<'PY'
-import hashlib
-import os
-import pathlib
-import stat
-import subprocess
-import sys
-
-root = pathlib.Path(sys.argv[1]).resolve()
-root_commit = sys.argv[2]
-
-def git(repo, *args, binary=False):
-    return subprocess.check_output(
-        ["git", "-C", str(repo), *args],
-        stderr=subprocess.DEVNULL,
-        text=not binary,
-    )
-
-def git_blob_oid(data: bytes, algorithm: str) -> str:
-    h = hashlib.new(algorithm)
-    h.update(f"blob {len(data)}\0".encode("ascii"))
-    h.update(data)
-    return h.hexdigest()
-
-def tree_entries(repo, commit):
-    raw = git(repo, "ls-tree", "-rz", "--full-tree", commit, binary=True)
-    for record in raw.split(b"\0"):
-        if not record:
-            continue
-        meta, raw_path = record.split(b"\t", 1)
-        mode, kind, oid = meta.decode("ascii").split()
-        yield mode, kind, oid, os.fsdecode(raw_path)
-
-def filesystem_files(repo, submodules):
-    found = set()
-    for dirpath, dirnames, filenames in os.walk(repo, topdown=True, followlinks=False):
-        current = pathlib.Path(dirpath)
-        rel_dir = os.path.relpath(current, repo)
-        if rel_dir == ".":
-            if ".git" in dirnames:
-                dirnames.remove(".git")
-            filenames = [name for name in filenames if name != ".git"]
-        for name in list(dirnames):
-            child = current / name
-            rel = os.path.relpath(child, repo)
-            if rel in submodules:
-                dirnames.remove(name)
-                continue
-            if child.is_symlink():
-                found.add(rel)
-                dirnames.remove(name)
-        for name in filenames:
-            found.add(os.path.relpath(current / name, repo))
-    return found
-
-def verify_repo(repo, commit):
-    head = git(repo, "rev-parse", "HEAD").strip()
-    if head != commit:
-        raise RuntimeError(f"HEAD mismatch in {repo}: {head} != {commit}")
-    algorithm = git(repo, "rev-parse", "--show-object-format").strip()
-    if algorithm not in {"sha1", "sha256"}:
-        raise RuntimeError(f"unsupported Git object format: {algorithm}")
-
-    expected_files = set()
-    submodules = {}
-    for mode, kind, oid, rel in tree_entries(repo, commit):
-        path = repo / rel
-        if mode == "160000" or kind == "commit":
-            if mode != "160000" or kind != "commit":
-                raise RuntimeError(f"unexpected gitlink entry: {rel}")
-            if not path.is_dir():
-                raise RuntimeError(f"submodule missing: {rel}")
-            submodules[rel] = oid
-            continue
-        if kind != "blob":
-            raise RuntimeError(f"unexpected tree object {kind}: {rel}")
-        expected_files.add(rel)
-        try:
-            st = path.lstat()
-        except FileNotFoundError as exc:
-            raise RuntimeError(f"tracked path missing: {rel}") from exc
-
-        if mode == "120000":
-            if not stat.S_ISLNK(st.st_mode):
-                raise RuntimeError(f"tracked symlink materialized as another type: {rel}")
-            target = os.readlink(os.fsencode(path))
-            data = target if isinstance(target, bytes) else os.fsencode(target)
-        elif mode in {"100644", "100755"}:
-            if not stat.S_ISREG(st.st_mode):
-                raise RuntimeError(f"tracked regular file materialized as another type: {rel}")
-            expected_exec = mode == "100755"
-            actual_exec = bool(st.st_mode & stat.S_IXUSR)
-            if actual_exec != expected_exec:
-                raise RuntimeError(f"tracked executable bit differs from commit: {rel}")
-            data = path.read_bytes()
-        else:
-            raise RuntimeError(f"unsupported tracked mode {mode}: {rel}")
-
-        actual_oid = git_blob_oid(data, algorithm)
-        if actual_oid != oid:
-            raise RuntimeError(f"tracked bytes differ from commit: {rel}")
-
-    actual_files = filesystem_files(repo, set(submodules))
-    if actual_files != expected_files:
-        extra = sorted(actual_files - expected_files)
-        missing = sorted(expected_files - actual_files)
-        raise RuntimeError(f"worktree file set differs; extra={extra!r} missing={missing!r}")
-
-    for rel, oid in submodules.items():
-        verify_repo((repo / rel).resolve(), oid)
-
-verify_repo(root, root_commit)
-PY
-}
-
-# Make the exact checked-out source durable independently of runtime/state.
-# Both linked-worktree Git metadata and its common object/ref directory are
-# synchronized, as are recursively checked submodules.
-fsync_checkout() {
-  local commit="$1"
-  python3 - "$EC_APP_DIR" "$commit" <<'PY'
-import os
-import pathlib
-import stat
-import subprocess
-import sys
-
-root = pathlib.Path(sys.argv[1]).resolve()
-root_commit = sys.argv[2]
-NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-
-def git(repo, *args, binary=False):
-    return subprocess.check_output(
-        ["git", "-C", str(repo), *args],
-        stderr=subprocess.DEVNULL,
-        text=not binary,
-    )
-
-def fsync_regular(path):
-    path = pathlib.Path(path)
-    st = path.lstat()
-    if not stat.S_ISREG(st.st_mode):
-        return
-    fd = os.open(path, os.O_RDONLY | NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-def fsync_dir(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-def absolute_git_path(repo, *args):
-    raw = git(repo, "rev-parse", "--path-format=absolute", *args).strip()
-    return pathlib.Path(raw).resolve()
-
-def sync_git_root(path):
-    path = pathlib.Path(path).resolve()
-    dirs = []
-    for dirpath, dirnames, filenames in os.walk(path, topdown=False, followlinks=False):
-        directory = pathlib.Path(dirpath)
-        for name in filenames:
-            candidate = directory / name
-            try:
-                fsync_regular(candidate)
-            except FileNotFoundError as exc:
-                raise RuntimeError(f"Git metadata disappeared during fsync: {candidate}") from exc
-        dirs.append(directory)
-    for directory in dirs:
-        fsync_dir(directory)
-    fsync_dir(path.parent)
-
-def tree_entries(repo, commit):
-    raw = git(repo, "ls-tree", "-rz", "--full-tree", commit, binary=True)
-    for record in raw.split(b"\0"):
-        if not record:
-            continue
-        meta, raw_path = record.split(b"\t", 1)
-        mode, kind, oid = meta.decode("ascii").split()
-        yield mode, kind, oid, os.fsdecode(raw_path)
-
-def sync_repo(repo, commit):
-    if git(repo, "rev-parse", "HEAD").strip() != commit:
-        raise RuntimeError(f"HEAD changed during fsync barrier: {repo}")
-
-    dirs = {repo}
-    submodules = []
-    for mode, kind, oid, rel in tree_entries(repo, commit):
-        path = repo / rel
-        if mode == "160000" and kind == "commit":
-            submodules.append((path.resolve(), oid))
-            continue
-        if kind != "blob":
-            raise RuntimeError(f"unexpected tree entry during fsync: {rel}")
-        st = path.lstat()
-        if stat.S_ISREG(st.st_mode):
-            fsync_regular(path)
-        parent = path.parent
-        while True:
-            dirs.add(parent)
-            if parent == repo:
-                break
-            parent = parent.parent
-    for directory in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
-        fsync_dir(directory)
-
-    # A linked worktree has a per-worktree gitdir and a distinct common dir
-    # containing objects/refs/shallow metadata. Durability requires both.
-    gitdir = absolute_git_path(repo, "--git-dir")
-    common = absolute_git_path(repo, "--git-common-dir")
-    seen = set()
-    for metadata_root in (gitdir, common):
-        if metadata_root not in seen:
-            sync_git_root(metadata_root)
-            seen.add(metadata_root)
-
-    for subrepo, subcommit in submodules:
-        sync_repo(subrepo, subcommit)
-
-sync_repo(root, root_commit)
-PY
-}
-
 atomic_write() {
   local target="$1" content="$2" mode="${3:-0600}"
   python3 - "$target" "$content" "$mode" <<'PY'
 import os, pathlib, sys, tempfile
-p = pathlib.Path(sys.argv[1]); data = sys.argv[2].encode(); mode = int(sys.argv[3], 8)
-p.parent.mkdir(parents=True, exist_ok=True)
+p = pathlib.Path(sys.argv[1])
+data = sys.argv[2].encode()
+mode = int(sys.argv[3], 8)
 fd, tmp = tempfile.mkstemp(prefix=p.name + '.', dir=p.parent)
 try:
     os.fchmod(fd, mode)
@@ -328,7 +137,7 @@ try:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, p)
-    dfd = os.open(p.parent, os.O_DIRECTORY)
+    dfd = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(dfd)
     finally:
@@ -349,7 +158,7 @@ try:
     p.unlink()
 except FileNotFoundError:
     raise SystemExit(0)
-dfd = os.open(p.parent, os.O_DIRECTORY)
+dfd = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
 try:
     os.fsync(dfd)
 finally:
@@ -362,6 +171,202 @@ json_field() {
 import json, pathlib, sys
 v = json.loads(pathlib.Path(sys.argv[1]).read_text()).get(sys.argv[2])
 print('' if v is None else ('true' if v is True else 'false' if v is False else v))
+PY
+}
+
+# Compare worktree bytes directly with the committed tree. This deliberately
+# ignores index/stat-cache hints such as skip-worktree or assume-unchanged.
+# Gitlinks are validated recursively.
+source_tree_exact() {
+  local commit="$1"
+  python3 - "$EC_APP_DIR" "$commit" <<'PY'
+import hashlib, os, pathlib, stat, subprocess, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+root_commit = sys.argv[2]
+
+def git(repo, *args, binary=False):
+    return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL, text=not binary)
+
+def blob_oid(data, algorithm):
+    h = hashlib.new(algorithm)
+    h.update(f"blob {len(data)}\0".encode("ascii"))
+    h.update(data)
+    return h.hexdigest()
+
+def entries(repo, commit):
+    raw = git(repo, "ls-tree", "-rz", "--full-tree", commit, binary=True)
+    for rec in raw.split(b"\0"):
+        if not rec:
+            continue
+        meta, raw_path = rec.split(b"\t", 1)
+        mode, kind, oid = meta.decode("ascii").split()
+        yield mode, kind, oid, os.fsdecode(raw_path)
+
+def disk_files(repo, submods):
+    found = set()
+    for dirpath, dirnames, filenames in os.walk(repo, topdown=True, followlinks=False):
+        cur = pathlib.Path(dirpath)
+        if cur == repo:
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+            filenames = [n for n in filenames if n != ".git"]
+        for name in list(dirnames):
+            p = cur / name
+            rel = os.path.relpath(p, repo)
+            if rel in submods:
+                dirnames.remove(name)
+                continue
+            if p.is_symlink():
+                found.add(rel)
+                dirnames.remove(name)
+        for name in filenames:
+            found.add(os.path.relpath(cur / name, repo))
+    return found
+
+def verify(repo, commit):
+    head = git(repo, "rev-parse", "HEAD").strip()
+    if head != commit:
+        raise RuntimeError(f"HEAD mismatch in {repo}: {head} != {commit}")
+    algorithm = git(repo, "rev-parse", "--show-object-format").strip()
+    if algorithm not in {"sha1", "sha256"}:
+        raise RuntimeError(f"unsupported object format: {algorithm}")
+    expected = set()
+    submods = {}
+    for mode, kind, oid, rel in entries(repo, commit):
+        p = repo / rel
+        if mode == "160000" and kind == "commit":
+            if not p.is_dir():
+                raise RuntimeError(f"submodule missing: {rel}")
+            submods[rel] = oid
+            continue
+        if kind != "blob":
+            raise RuntimeError(f"unexpected tree object {kind}: {rel}")
+        expected.add(rel)
+        st = p.lstat()
+        if mode == "120000":
+            if not stat.S_ISLNK(st.st_mode):
+                raise RuntimeError(f"expected symlink: {rel}")
+            target = os.readlink(os.fsencode(p))
+            data = target if isinstance(target, bytes) else os.fsencode(target)
+        elif mode in {"100644", "100755"}:
+            if not stat.S_ISREG(st.st_mode):
+                raise RuntimeError(f"expected regular file: {rel}")
+            if bool(st.st_mode & stat.S_IXUSR) != (mode == "100755"):
+                raise RuntimeError(f"executable bit mismatch: {rel}")
+            data = p.read_bytes()
+        else:
+            raise RuntimeError(f"unsupported mode {mode}: {rel}")
+        if blob_oid(data, algorithm) != oid:
+            raise RuntimeError(f"tracked bytes differ: {rel}")
+    actual = disk_files(repo, set(submods))
+    if actual != expected:
+        raise RuntimeError(f"worktree file set differs; extra={sorted(actual-expected)!r} missing={sorted(expected-actual)!r}")
+    for rel, oid in submods.items():
+        verify((repo / rel).resolve(), oid)
+
+verify(root, root_commit)
+PY
+}
+
+# Materialize the gitlinks recorded by the currently checked-out superproject.
+# A double-force clean removes stale nested repositories from removed gitlinks;
+# update --init --recursive then materializes the exact new/old gitlinks.
+sync_submodules() {
+  git -C "$EC_APP_DIR" submodule sync --recursive || return 1
+  git -C "$EC_APP_DIR" submodule update --init --recursive --force || return 1
+}
+
+# Make both worktree bytes and the Git metadata needed to identify them durable.
+# Linked worktrees require both per-worktree --git-dir and --git-common-dir.
+fsync_checkout() {
+  local commit="$1"
+  python3 - "$EC_APP_DIR" "$commit" <<'PY'
+import os, pathlib, stat, subprocess, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+root_commit = sys.argv[2]
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+def git(repo, *args, binary=False):
+    return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL, text=not binary)
+
+def fsync_regular(path):
+    path = pathlib.Path(path)
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode):
+        return
+    fd = os.open(path, os.O_RDONLY | NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def git_path(repo, *args):
+    return pathlib.Path(git(repo, "rev-parse", "--path-format=absolute", *args).strip()).resolve()
+
+def sync_git_root(path):
+    path = pathlib.Path(path).resolve()
+    dirs = []
+    for dirpath, _, filenames in os.walk(path, topdown=False, followlinks=False):
+        d = pathlib.Path(dirpath)
+        for name in filenames:
+            p = d / name
+            try:
+                fsync_regular(p)
+            except FileNotFoundError as exc:
+                raise RuntimeError(f"Git metadata disappeared: {p}") from exc
+        dirs.append(d)
+    for d in dirs:
+        fsync_dir(d)
+    fsync_dir(path.parent)
+
+def entries(repo, commit):
+    raw = git(repo, "ls-tree", "-rz", "--full-tree", commit, binary=True)
+    for rec in raw.split(b"\0"):
+        if not rec:
+            continue
+        meta, raw_path = rec.split(b"\t", 1)
+        mode, kind, oid = meta.decode("ascii").split()
+        yield mode, kind, oid, os.fsdecode(raw_path)
+
+def sync_repo(repo, commit):
+    if git(repo, "rev-parse", "HEAD").strip() != commit:
+        raise RuntimeError(f"HEAD changed during fsync: {repo}")
+    dirs = {repo}
+    submods = []
+    for mode, kind, oid, rel in entries(repo, commit):
+        p = repo / rel
+        if mode == "160000" and kind == "commit":
+            submods.append((p.resolve(), oid))
+            continue
+        if kind != "blob":
+            raise RuntimeError(f"unexpected tree entry: {rel}")
+        st = p.lstat()
+        if stat.S_ISREG(st.st_mode):
+            fsync_regular(p)
+        parent = p.parent
+        while True:
+            dirs.add(parent)
+            if parent == repo:
+                break
+            parent = parent.parent
+    for d in sorted(dirs, key=lambda x: len(x.parts), reverse=True):
+        fsync_dir(d)
+    seen = set()
+    for meta in (git_path(repo, "--git-dir"), git_path(repo, "--git-common-dir")):
+        if meta not in seen:
+            sync_git_root(meta)
+            seen.add(meta)
+    for subrepo, subcommit in submods:
+        sync_repo(subrepo, subcommit)
+
+sync_repo(root, root_commit)
 PY
 }
 
@@ -392,6 +397,8 @@ bootstrap_state() {
   [[ -x "$EC_APP_BIN" ]] || die "Bootstrap refused: runtime missing"
   binary="$(sha256_file "$EC_APP_BIN")"
   [[ "$binary" =~ ^[0-9a-f]{64}$ ]] || die "Bootstrap refused: runtime digest invalid"
+  fsync_checkout "$commit" || die "Bootstrap refused: source durability barrier failed"
+  fsync_file_and_dir "$EC_APP_BIN" || die "Bootstrap refused: runtime durability barrier failed"
   write_current_state "$commit" "$binary" "" || die "Could not bootstrap durable state"
 }
 
@@ -454,6 +461,9 @@ PY
   atomic_write "$TRANSACTION_FILE" "$body" 0600
 }
 
+# Restore the old exact source/runtime pair. If the service mutates EC_APP_DIR
+# while starting, keep the journal and leave the service stopped so recovery is
+# retried rather than falsely finalizing a corrupted baseline.
 rollback_transaction() {
   [[ -f "$TRANSACTION_FILE" ]] || return 0
   local commit binary manifest backup digest
@@ -470,19 +480,27 @@ rollback_transaction() {
   systemctl stop "$EC_SERVICE_UNIT" || return 1
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && return 1
   git -C "$EC_APP_DIR" reset --hard "$commit" || return 1
-  git -C "$EC_APP_DIR" clean -fdx || return 1
+  git -C "$EC_APP_DIR" clean -ffdx || return 1
+  sync_submodules || return 1
   [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$commit" ]] || return 1
   source_tree_exact "$commit" || return 1
   fsync_checkout "$commit" || return 1
+
   install -o root -g root -m 0755 "$backup" "${EC_APP_BIN}.rollback" || return 1
   [[ "$(sha256_file "${EC_APP_BIN}.rollback" 2>/dev/null || true)" == "$binary" ]] || return 1
   mv -f "${EC_APP_BIN}.rollback" "$EC_APP_BIN" || return 1
   fsync_file_and_dir "$EC_APP_BIN" || return 1
   write_current_state "$commit" "$binary" "$manifest" || return 1
+
   systemctl start "$EC_SERVICE_UNIT" || return 1
-  systemctl is-active --quiet "$EC_SERVICE_UNIT" || return 1
-  curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null || return 1
-  run_smoke >/dev/null 2>&1 || return 1
+  if ! systemctl is-active --quiet "$EC_SERVICE_UNIT" \
+     || ! curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null \
+     || ! run_smoke >/dev/null 2>&1 \
+     || ! source_tree_exact "$commit" \
+     || ! fsync_checkout "$commit"; then
+    systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
+    return 1
+  fi
   durable_remove "$TRANSACTION_FILE" || return 1
 }
 
@@ -504,9 +522,7 @@ collect_checks() {
   [[ "$deployed" == "$expected" ]] && release_revision=true
   head="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"
   actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
-  if [[ "$head" == "$deployed" ]] && source_tree_exact "$deployed"; then
-    source_tree=true
-  fi
+  if [[ "$head" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
   [[ "$actual" == "$state_binary" ]] && state_integrity=true
   [[ "$actual" == "$expected_binary" ]] && runtime_digest=true
   if [[ -n "$EC_SMOKE_SCRIPT" ]]; then
@@ -588,7 +604,7 @@ update_release() {
     die "Current source/runtime pair differs from durable state or source tree is not byte-exact"
   fi
 
-  local dir current current_binary current_manifest downloaded oldc oldb oldm backup
+  local dir current current_binary downloaded oldc oldb oldm backup
   dir="$(mktemp -d)"
   if ! load_release_snapshot "$dir"; then
     rm -rf "$dir"
@@ -596,53 +612,28 @@ update_release() {
   fi
   current="$(json_field "$CURRENT_STATE_FILE" source_commit)"
   current_binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
-  current_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256)"
 
   if [[ "$current" == "$RELEASE_SOURCE_COMMIT" && "$current_binary" == "$RELEASE_ASSET_SHA256" ]]; then
     rm -rf "$dir"
-    if [[ "$current_manifest" != "$RELEASE_MANIFEST_SHA256" ]]; then
-      write_current_state "$current" "$current_binary" "$RELEASE_MANIFEST_SHA256" \
-        || die "Could not refresh manifest identity for matching source/runtime"
-    fi
     log "Already running exact source/runtime pair $current"
     attest || true
     return 0
   fi
 
-  if ! download "$RELEASE_ASSET_NAME" "$dir/$RELEASE_ASSET_NAME"; then
-    rm -rf "$dir"
-    die "Runtime download failed"
-  fi
+  download "$RELEASE_ASSET_NAME" "$dir/$RELEASE_ASSET_NAME" || { rm -rf "$dir"; die "Runtime download failed"; }
   downloaded="$(sha256_file "$dir/$RELEASE_ASSET_NAME")"
-  [[ "$downloaded" == "$RELEASE_ASSET_SHA256" ]] || {
-    rm -rf "$dir"
-    die "Runtime does not match manifest digest"
-  }
+  [[ "$downloaded" == "$RELEASE_ASSET_SHA256" ]] || { rm -rf "$dir"; die "Runtime does not match manifest digest"; }
 
   oldc="$(json_field "$CURRENT_STATE_FILE" source_commit)"
   oldb="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
   oldm="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256)"
-  [[ "$oldc" =~ ^[0-9a-f]{40}$ && "$oldb" =~ ^[0-9a-f]{64}$ ]] || {
-    rm -rf "$dir"
-    die "Invalid rollback baseline"
-  }
+  [[ "$oldc" =~ ^[0-9a-f]{40}$ && "$oldb" =~ ^[0-9a-f]{64}$ ]] || { rm -rf "$dir"; die "Invalid rollback baseline"; }
+
   backup="$BACKUP_DIR/runtime-${oldc}-${oldb:0:16}"
-  install -o root -g root -m 0755 "$EC_APP_BIN" "$backup" || {
-    rm -rf "$dir"
-    die "Backup failed"
-  }
-  [[ "$(sha256_file "$backup")" == "$oldb" ]] || {
-    rm -rf "$dir"
-    die "Backup digest mismatch"
-  }
-  fsync_file_and_dir "$backup" || {
-    rm -rf "$dir"
-    die "Could not durably persist rollback binary"
-  }
-  write_transaction "$oldc" "$oldb" "$oldm" "$backup" "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256" || {
-    rm -rf "$dir"
-    die "Could not durably persist transaction"
-  }
+  install -o root -g root -m 0755 "$EC_APP_BIN" "$backup" || { rm -rf "$dir"; die "Backup failed"; }
+  [[ "$(sha256_file "$backup")" == "$oldb" ]] || { rm -rf "$dir"; die "Backup digest mismatch"; }
+  fsync_file_and_dir "$backup" || { rm -rf "$dir"; die "Could not durably persist rollback binary"; }
+  write_transaction "$oldc" "$oldb" "$oldm" "$backup" "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256" || { rm -rf "$dir"; die "Could not durably persist transaction"; }
 
   if ! systemctl stop "$EC_SERVICE_UNIT" || systemctl is-active --quiet "$EC_SERVICE_UNIT"; then
     rm -rf "$dir"
@@ -653,7 +644,8 @@ update_release() {
   if ! git -C "$EC_APP_DIR" fetch --force --depth 1 origin "$RELEASE_SOURCE_COMMIT" \
      || ! git -C "$EC_APP_DIR" checkout --detach FETCH_HEAD \
      || ! git -C "$EC_APP_DIR" reset --hard "$RELEASE_SOURCE_COMMIT" \
-     || ! git -C "$EC_APP_DIR" clean -fdx \
+     || ! git -C "$EC_APP_DIR" clean -ffdx \
+     || ! sync_submodules \
      || [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" != "$RELEASE_SOURCE_COMMIT" ]] \
      || ! source_tree_exact "$RELEASE_SOURCE_COMMIT" \
      || ! fsync_checkout "$RELEASE_SOURCE_COMMIT"; then
@@ -677,8 +669,10 @@ update_release() {
   if ! systemctl start "$EC_SERVICE_UNIT" \
      || ! systemctl is-active --quiet "$EC_SERVICE_UNIT" \
      || ! curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null \
-     || ! run_smoke >/dev/null 2>&1; then
-    rollback_transaction || die "Health failed and rollback failed"
+     || ! run_smoke >/dev/null 2>&1 \
+     || ! source_tree_exact "$RELEASE_SOURCE_COMMIT" \
+     || ! fsync_checkout "$RELEASE_SOURCE_COMMIT"; then
+    rollback_transaction || die "Health/source integrity failed and rollback failed"
     attest || true
     return 1
   fi
@@ -688,7 +682,6 @@ update_release() {
     attest || true
     return 1
   fi
-
   if ! durable_remove "$TRANSACTION_FILE"; then
     rollback_transaction || die "Transaction finalization failed and rollback failed"
     attest || true
