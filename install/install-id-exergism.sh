@@ -8,6 +8,32 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE="id.exergism.org"
+MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
+
+# The updater is unsafe to enable against the legacy rolling release contract.
+# Refuse installation until id/runtime-main publishes the atomic manifest that
+# binds source_commit and architecture-specific runtime digests.
+tmp_manifest="$(mktemp)"
+trap 'rm -f "$tmp_manifest"' EXIT
+curl --retry 3 --retry-all-errors --connect-timeout 10 -fsSL "$MANIFEST_URL" -o "$tmp_manifest" \
+  || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
+python3 - "$tmp_manifest" <<'PY'
+import json, pathlib, re, sys
+m = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert m.get("schema_version") == "0.1"
+assert m.get("repository") == "Exergism-Commons/id"
+assert m.get("release_tag") == "runtime-main"
+assert re.fullmatch(r"[0-9a-f]{40}", m.get("source_commit", ""))
+assets = m.get("assets")
+assert isinstance(assets, dict)
+for arch in ("amd64", "arm64"):
+    a = assets.get(arch)
+    assert isinstance(a, dict)
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", a.get("name", ""))
+    assert re.fullmatch(r"[0-9a-f]{64}", a.get("sha256", ""))
+PY
+rm -f "$tmp_manifest"
+trap - EXIT
 
 install -d -m 0755 /usr/local/libexec
 install -d -m 0755 /etc/ec-deployment-attestation
