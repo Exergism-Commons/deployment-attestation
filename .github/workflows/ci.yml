@@ -54,12 +54,16 @@ jobs:
           set -euo pipefail
           grep -Fq 'DEPLOYMENT_MANIFEST.json' README.md
           grep -Fq 'transaction.json' agent/ec-deployment-agent.sh
+          grep -Fq 'durable_mkdir_tree' agent/ec-deployment-agent.sh
           grep -Fq 'fsync_file_and_dir "$backup"' agent/ec-deployment-agent.sh
           grep -Fq 'source_tree_exact' agent/ec-deployment-agent.sh
-          grep -Fq 'git_blob_oid' agent/ec-deployment-agent.sh
+          grep -Fq 'blob_oid' agent/ec-deployment-agent.sh
           grep -Fq -- '--show-object-format' agent/ec-deployment-agent.sh
           grep -Fq -- '--git-common-dir' agent/ec-deployment-agent.sh
+          grep -Fq 'sync_submodules' agent/ec-deployment-agent.sh
+          grep -Fq 'git -C "$EC_APP_DIR" clean -ffdx' agent/ec-deployment-agent.sh
           grep -Fq 'fsync_checkout "$RELEASE_SOURCE_COMMIT"' agent/ec-deployment-agent.sh
+          grep -Fq 'source_tree_exact "$RELEASE_SOURCE_COMMIT"' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
