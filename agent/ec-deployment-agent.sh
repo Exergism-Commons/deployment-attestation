@@ -204,15 +204,43 @@ attest() {
 rollback() {
   local old_commit="$1" backup_bin="$2"
   warn "Rolling back to $old_commit"
+  systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
   git -C "$EC_APP_DIR" reset --hard "$old_commit"
   git -C "$EC_APP_DIR" clean -fdx
   install -o root -g root -m 0755 "$backup_bin" "$EC_APP_BIN"
   printf '%s\n' "$old_commit" > "$EC_SOURCE_REVISION_FILE"
-  systemctl restart "$EC_SERVICE_UNIT"
+  chmod 0644 "$EC_SOURCE_REVISION_FILE"
+  systemctl start "$EC_SERVICE_UNIT"
+}
+
+activate_release() {
+  local expected="$1" asset_path="$2"
+
+  systemctl stop "$EC_SERVICE_UNIT" || return 1
+  git -C "$EC_APP_DIR" checkout --detach "refs/tags/${EC_RELEASE_TAG}" || return 1
+  git -C "$EC_APP_DIR" reset --hard "refs/tags/${EC_RELEASE_TAG}" || return 1
+  git -C "$EC_APP_DIR" clean -fdx || return 1
+  [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD)" == "$expected" ]] || return 1
+
+  install -o root -g root -m 0755 "$asset_path" "${EC_APP_BIN}.new" || return 1
+  mv -f "${EC_APP_BIN}.new" "$EC_APP_BIN" || return 1
+  systemctl start "$EC_SERVICE_UNIT" || return 1
+
+  local healthy=0
+  for _ in {1..30}; do
+    if systemctl is-active --quiet "$EC_SERVICE_UNIT" \
+       && curl -fsS --max-time 5 "$EC_LOCAL_URL" >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
+    sleep 1
+  done
+  [[ "$healthy" == "1" ]] || return 1
+  run_smoke_script >/dev/null 2>&1 || return 1
 }
 
 update_release() {
-  local tmpdir expected current asset checksum expected_checksum actual_checksum old_commit backup_bin
+  local tmpdir expected current asset expected_checksum actual_checksum old_commit backup_bin tag_commit
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' RETURN
 
@@ -236,28 +264,22 @@ update_release() {
   [[ "$actual_checksum" == "$expected_checksum" ]] || die "Checksum mismatch for $asset"
 
   [[ -d "$EC_APP_DIR/.git" ]] || die "Application directory is not a Git checkout: $EC_APP_DIR"
+
+  # Fetch and prove the target revision before interrupting the running service.
+  log "Fetching release tag $EC_RELEASE_TAG"
+  git -C "$EC_APP_DIR" fetch --force --depth 1 origin \
+    "+refs/tags/${EC_RELEASE_TAG}:refs/tags/${EC_RELEASE_TAG}"
+  tag_commit="$(git -C "$EC_APP_DIR" rev-parse "refs/tags/${EC_RELEASE_TAG}^{commit}")"
+  [[ "$tag_commit" == "$expected" ]] || die "Release tag does not equal SOURCE_COMMIT"
+
   old_commit="$(git -C "$EC_APP_DIR" rev-parse HEAD)"
   [[ "$old_commit" =~ ^[0-9a-f]{40}$ ]] || die "Cannot determine rollback commit"
   backup_bin="$EC_ROLLBACK_DIR/runtime-${old_commit}"
   install -o root -g root -m 0755 "$EC_APP_BIN" "$backup_bin"
 
-  log "Fetching release tag $EC_RELEASE_TAG"
-  git -C "$EC_APP_DIR" fetch --force --depth 1 origin \
-    "+refs/tags/${EC_RELEASE_TAG}:refs/tags/${EC_RELEASE_TAG}"
-  git -C "$EC_APP_DIR" checkout --detach "refs/tags/${EC_RELEASE_TAG}"
-  git -C "$EC_APP_DIR" reset --hard "refs/tags/${EC_RELEASE_TAG}"
-  git -C "$EC_APP_DIR" clean -fdx
-  [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD)" == "$expected" ]] \
-    || die "Release tag checkout does not equal SOURCE_COMMIT"
-
-  install -o root -g root -m 0755 "$tmpdir/$asset" "${EC_APP_BIN}.new"
-  mv -f "${EC_APP_BIN}.new" "$EC_APP_BIN"
-  systemctl restart "$EC_SERVICE_UNIT"
-
-  if ! systemctl is-active --quiet "$EC_SERVICE_UNIT" \
-     || ! curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null \
-     || ! run_smoke_script >/dev/null 2>&1; then
-    rollback "$old_commit" "$backup_bin"
+  log "Activating release source $expected"
+  if ! activate_release "$expected" "$tmpdir/$asset"; then
+    rollback "$old_commit" "$backup_bin" || warn "Rollback itself failed; manual intervention required"
     attest || true
     return 1
   fi
@@ -266,6 +288,9 @@ update_release() {
   printf '%s\n' "$expected" > "$EC_SOURCE_REVISION_FILE"
   chmod 0644 "$EC_SOURCE_REVISION_FILE"
   log "Activated release source $expected"
+
+  # Public reachability is observed after activation. It does not trigger rollback,
+  # because DNS/TLS/network failures may be external to an otherwise healthy host.
   attest || true
 }
 
