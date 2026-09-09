@@ -41,6 +41,7 @@ jobs:
           } <= set(att['required'])
           assert att['properties']['status']['enum'] == ['healthy', 'degraded', 'unhealthy']
           assert att['properties']['observation_id']['pattern'] == '^[0-9a-f]{64}$'
+          assert set(att['properties']['deployed_runtime_sha256']['type']) == {'string', 'null'}
 
           rel = json.loads(Path('spec/release-manifest-v0.1.schema.json').read_text())
           assert rel['properties']['schema_version']['const'] == '0.1'
@@ -64,13 +65,18 @@ jobs:
           grep -Fq "git clean -ffdx >/dev/null" agent/ec-deployment-agent.sh
           grep -Fq 'gitlink is not a real directory' agent/ec-deployment-agent.sh
           grep -Fq 'add_parent_chain(dirs, p, repo)' agent/ec-deployment-agent.sh
+          grep -Fq 'submodule gitfile missing during fsync' agent/ec-deployment-agent.sh
           grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh
+          grep -Fq 'finalize_quiescent' agent/ec-deployment-agent.sh
+          grep -Fq 'resume_committed_service' agent/ec-deployment-agent.sh
+          grep -Fq 'setsid "$EC_SMOKE_SCRIPT"' agent/ec-deployment-agent.sh
           grep -Fq 'verify_runtime_exact "$binary"' agent/ec-deployment-agent.sh
           grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
+          grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
-          grep -Fq 'curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep' install/install-id-exergism.sh
+          grep -Fq 'curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep setsid' install/install-id-exergism.sh
 
       - name: Reject obvious committed secrets
         run: |
