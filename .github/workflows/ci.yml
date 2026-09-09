@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Validate shell syntax
+        run: |
+          bash -n agent/ec-deployment-agent.sh
+          bash -n examples/id.exergism.org-smoke.sh
+          bash -n install/install-id-exergism.sh
+
+      - name: Validate JSON schema document
+        run: python3 -m json.tool spec/attestation-v0.1.schema.json >/dev/null
+
+      - name: Validate protocol contract metadata
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          schema = json.loads(Path('spec/attestation-v0.1.schema.json').read_text())
+          assert schema['$schema'] == 'https://json-schema.org/draft/2020-12/schema'
+          assert schema['properties']['schema_version']['const'] == '0.1'
+          required = set(schema['required'])
+          expected = {
+              'schema_version', 'service', 'repository', 'environment',
+              'release_tag', 'deployed_commit', 'expected_commit', 'status',
+              'checks', 'observed_at', 'agent_version'
+          }
+          assert expected <= required
+          assert schema['properties']['status']['enum'] == ['healthy', 'degraded', 'unhealthy']
+          PY
+
+      - name: Reject obvious committed secrets
+        run: |
+          if git grep -nE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)' -- . ':!README.md'; then
+            echo 'Potential credential material committed to repository.' >&2
+            exit 1
+          fi
