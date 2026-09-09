@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre8"
+AGENT_VERSION="0.1.0-pre9"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -18,7 +18,7 @@ required=(EC_SERVICE EC_REPOSITORY EC_ENVIRONMENT EC_RELEASE_TAG EC_APP_DIR EC_A
 for name in "${required[@]}"; do
   [[ -n "${!name:-}" ]] || die "Missing required configuration: $name"
 done
-for command in curl git python3 sha256sum systemctl flock install awk sed tr date hostname uname mv rm; do
+for command in curl git python3 sha256sum systemctl flock install awk sed tr date hostname uname mv rm setsid; do
   command -v "$command" >/dev/null 2>&1 || die "Required command not found: $command"
 done
 
@@ -358,6 +358,19 @@ def sync_repo(repo, commit):
             if not stat.S_ISDIR(pst.st_mode):
                 raise RuntimeError(f"gitlink is not a real directory during fsync: {rel}")
             add_parent_chain(dirs, p, repo)
+            gitfile = p / ".git"
+            try:
+                gst = gitfile.lstat()
+            except FileNotFoundError as exc:
+                raise RuntimeError(f"submodule gitfile missing during fsync: {rel}") from exc
+            if stat.S_ISREG(gst.st_mode):
+                fsync_regular(gitfile)
+                add_parent_chain(dirs, gitfile, repo)
+            elif stat.S_ISDIR(gst.st_mode):
+                fsync_dir(gitfile)
+                add_parent_chain(dirs, gitfile, repo)
+            else:
+                raise RuntimeError(f"unsafe submodule .git entry during fsync: {rel}")
             submods.append((p, oid))
             continue
         if kind != "blob":
@@ -445,7 +458,15 @@ load_release_snapshot() {
 run_smoke() {
   [[ -z "$EC_SMOKE_SCRIPT" ]] && return 0
   [[ -x "$EC_SMOKE_SCRIPT" ]] || return 1
-  EC_PUBLIC_URL="$EC_PUBLIC_URL" EC_LOCAL_URL="$EC_LOCAL_URL" "$EC_SMOKE_SCRIPT"
+  local pid rc=0
+  EC_PUBLIC_URL="$EC_PUBLIC_URL" EC_LOCAL_URL="$EC_LOCAL_URL" setsid "$EC_SMOKE_SCRIPT" &
+  pid=$!
+  wait "$pid" || rc=$?
+  # Smoke hooks are synchronous. Kill ordinary descendants that attempted to
+  # outlive the hook so they cannot race deployment finalization.
+  kill -TERM -- "-$pid" >/dev/null 2>&1 || true
+  kill -KILL -- "-$pid" >/dev/null 2>&1 || true
+  return "$rc"
 }
 
 verify_baseline() {
@@ -490,6 +511,24 @@ post_start_integrity() {
   verify_runtime_exact "$binary"
 }
 
+# The journal is removed only while the normal service writer is stopped.
+# Source and runtime are checked both before and after the durable state write.
+finalize_quiescent() {
+  local commit="$1" binary="$2" manifest="$3"
+  systemctl stop "$EC_SERVICE_UNIT" || return 1
+  systemctl is-active --quiet "$EC_SERVICE_UNIT" && return 1
+  post_start_integrity "$commit" "$binary" || return 1
+  write_current_state "$commit" "$binary" "$manifest" || return 1
+  post_start_integrity "$commit" "$binary" || return 1
+  durable_remove "$TRANSACTION_FILE" || return 1
+}
+
+resume_committed_service() {
+  systemctl start "$EC_SERVICE_UNIT" || return 1
+  systemctl is-active --quiet "$EC_SERVICE_UNIT" || return 1
+  curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null
+}
+
 rollback_transaction() {
   [[ -f "$TRANSACTION_FILE" ]] || return 0
   local commit binary manifest backup digest
@@ -520,8 +559,15 @@ rollback_transaction() {
     systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
     return 1
   fi
-  write_current_state "$commit" "$binary" "$manifest" || { systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true; return 1; }
-  durable_remove "$TRANSACTION_FILE" || { systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true; return 1; }
+
+  if ! finalize_quiescent "$commit" "$binary" "$manifest"; then
+    systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! resume_committed_service; then
+    warn "Rollback pair was committed exactly, but service restart failed"
+    return 1
+  fi
 }
 
 recover_transaction() {
@@ -531,7 +577,7 @@ recover_transaction() {
 
 collect_checks() {
   local expected="$1" expected_binary="$2" deployed="$3" state_binary="$4"
-  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true source_tree=false state_integrity=false runtime_digest=false
+  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true source_tree=false state_integrity=false runtime_digest=false runtime_present=false
   local actual
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && systemd=true
   curl -fsS --max-time 10 "$EC_LOCAL_URL" >/dev/null 2>&1 && local_http=true
@@ -540,13 +586,14 @@ collect_checks() {
   fi
   [[ "$deployed" == "$expected" ]] && release_revision=true
   actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
+  [[ "$actual" =~ ^[0-9a-f]{64}$ ]] && runtime_present=true
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
   [[ "$actual" == "$state_binary" ]] && state_integrity=true
   [[ "$actual" == "$expected_binary" ]] && runtime_digest=true
   if [[ -n "$EC_SMOKE_SCRIPT" ]]; then service_smoke=false; run_smoke >/dev/null 2>&1 && service_smoke=true; fi
-  python3 - "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$source_tree" "$state_integrity" "$runtime_digest" <<'PY'
+  python3 - "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$source_tree" "$state_integrity" "$runtime_digest" "$runtime_present" <<'PY'
 import json,sys
-n=["systemd","local_http","public_https","release_revision","service_smoke","source_tree","state_integrity","runtime_digest"]
+n=["systemd","local_http","public_https","release_revision","service_smoke","source_tree","state_integrity","runtime_digest","runtime_present"]
 print(json.dumps(dict(zip(n,[x=="true" for x in sys.argv[1:]])),sort_keys=True,separators=(",",":")))
 PY
 }
@@ -554,7 +601,7 @@ PY
 status_from_checks() {
   python3 - "$1" <<'PY'
 import json,sys
-c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","source_tree","state_integrity","runtime_digest")
+c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","source_tree","state_integrity","runtime_digest","runtime_present")
 print("unhealthy" if not all(c.get(k,False) for k in mandatory) else "degraded" if not c.get("public_https",False) else "healthy")
 PY
 }
@@ -563,7 +610,7 @@ build_attestation() {
   python3 - "$AGENT_VERSION" "$EC_SERVICE" "$EC_REPOSITORY" "$EC_ENVIRONMENT" "$EC_RELEASE_TAG" "$1" "$2" "$3" "$4" "$EC_HOST_ID" "$5" "$6" "$7" <<'PY'
 import datetime,hashlib,json,sys
 agent,service,repo,env,tag,deployed,expected,status,checks,host,manifest,actual,expected_runtime=sys.argv[1:]
-p={"schema_version":"0.1","service":service,"repository":repo,"environment":env,"release_tag":tag,"deployed_commit":deployed,"expected_commit":expected,"release_manifest_sha256":manifest,"deployed_runtime_sha256":actual,"expected_runtime_sha256":expected_runtime,"status":status,"checks":json.loads(checks),"observed_at":datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),"agent_version":agent,"host_id":host}
+p={"schema_version":"0.1","service":service,"repository":repo,"environment":env,"release_tag":tag,"deployed_commit":deployed,"expected_commit":expected,"release_manifest_sha256":manifest,"deployed_runtime_sha256":actual or None,"expected_runtime_sha256":expected_runtime,"status":status,"checks":json.loads(checks),"observed_at":datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),"agent_version":agent,"host_id":host}
 p["observation_id"]=hashlib.sha256(json.dumps(p,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 print(json.dumps(p,sort_keys=True,separators=(",",":")))
 PY
@@ -596,7 +643,8 @@ attest() {
   deployed="$(json_field "$CURRENT_STATE_FILE" source_commit)"
   state_binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
   [[ "$deployed" =~ ^[0-9a-f]{40}$ && "$state_binary" =~ ^[0-9a-f]{64}$ ]] || return 2
-  actual="$(sha256_file "$EC_APP_BIN")"
+  actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
+  [[ "$actual" =~ ^[0-9a-f]{64}$ ]] || actual=""
   checks="$(collect_checks "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$deployed" "$state_binary")"
   status="$(status_from_checks "$checks")"
   body="$(build_attestation "$deployed" "$RELEASE_SOURCE_COMMIT" "$status" "$checks" "$RELEASE_MANIFEST_SHA256" "$actual" "$RELEASE_ASSET_SHA256")"
@@ -656,14 +704,16 @@ update_release() {
     rollback_transaction || die "Health/post-start integrity failed and rollback failed"; attest || true; return 1
   fi
 
-  if ! write_current_state "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256"; then
-    rollback_transaction || die "State commit failed and rollback failed"; attest || true; return 1
-  fi
-  if ! durable_remove "$TRANSACTION_FILE"; then
-    rollback_transaction || die "Transaction finalization failed and rollback failed"; attest || true; return 1
-  fi
+if ! finalize_quiescent "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256"; then
+  rollback_transaction || die "Quiescent finalization failed and rollback failed"; attest || true; return 1
+fi
+if ! resume_committed_service; then
+  warn "Release pair was committed exactly, but service restart failed"
+  attest || true
+  return 1
+fi
 
-  log "Activated release source $RELEASE_SOURCE_COMMIT"
+log "Activated release source $RELEASE_SOURCE_COMMIT"
   attest || true
 }
 

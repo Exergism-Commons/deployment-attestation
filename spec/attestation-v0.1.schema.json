@@ -31,7 +31,7 @@
     "deployed_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "expected_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "release_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "deployed_runtime_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "deployed_runtime_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
     "expected_runtime_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "status": {"enum": ["healthy", "degraded", "unhealthy"]},
     "checks": {
