@@ -33,17 +33,8 @@ jobs:
           grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
           grep -Fq 'setsid "$EC_SMOKE_SCRIPT"' agent/ec-deployment-agent.sh
 
-          git rm -f \
-            .github/workflows/apply-codex-p2-fixes.yml \
-            .github/workflows/apply-codex-p2-fixes-v2.yml \
-            .github/workflows/apply-codex-p2-fixes-v3.yml \
-            .github/workflows/apply-codex-p2-fixes-v4.yml \
-            .github/workflows/fix-codex-patch-v4.yml \
-            .github/workflows/run-latest-codex-fix.yml \
-            tools/apply_latest_codex_fixes.py
-
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add agent/ec-deployment-agent.sh spec/attestation-v0.1.schema.json .github/workflows/ci.yml install/install-id-exergism.sh
+          git add agent/ec-deployment-agent.sh spec/attestation-v0.1.schema.json install/install-id-exergism.sh
           git commit -m 'fix: close quiescence and missing-runtime gaps'
           git push origin HEAD:initial-attestation-architecture
