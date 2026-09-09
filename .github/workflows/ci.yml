@@ -19,8 +19,10 @@ jobs:
           bash -n examples/id.exergism.org-smoke.sh
           bash -n install/install-id-exergism.sh
 
-      - name: Validate JSON schema document
-        run: python3 -m json.tool spec/attestation-v0.1.schema.json >/dev/null
+      - name: Validate JSON schema documents
+        run: |
+          python3 -m json.tool spec/attestation-v0.1.schema.json >/dev/null
+          python3 -m json.tool spec/release-manifest-v0.1.schema.json >/dev/null
 
       - name: Validate protocol contract metadata
         run: |
@@ -28,18 +30,34 @@ jobs:
           import json
           from pathlib import Path
 
-          schema = json.loads(Path('spec/attestation-v0.1.schema.json').read_text())
-          assert schema['$schema'] == 'https://json-schema.org/draft/2020-12/schema'
-          assert schema['properties']['schema_version']['const'] == '0.1'
-          required = set(schema['required'])
-          expected = {
-              'schema_version', 'service', 'repository', 'environment',
-              'release_tag', 'deployed_commit', 'expected_commit', 'status',
-              'checks', 'observed_at', 'agent_version'
-          }
-          assert expected <= required
-          assert schema['properties']['status']['enum'] == ['healthy', 'degraded', 'unhealthy']
+          att = json.loads(Path('spec/attestation-v0.1.schema.json').read_text())
+          assert att['$schema'] == 'https://json-schema.org/draft/2020-12/schema'
+          assert att['properties']['schema_version']['const'] == '0.1'
+          assert {
+              'schema_version', 'observation_id', 'service', 'repository', 'environment',
+              'release_tag', 'deployed_commit', 'expected_commit', 'release_manifest_sha256',
+              'deployed_runtime_sha256', 'expected_runtime_sha256', 'status', 'checks',
+              'observed_at', 'agent_version'
+          } <= set(att['required'])
+          assert att['properties']['status']['enum'] == ['healthy', 'degraded', 'unhealthy']
+          assert att['properties']['observation_id']['pattern'] == '^[0-9a-f]{64}$'
+
+          rel = json.loads(Path('spec/release-manifest-v0.1.schema.json').read_text())
+          assert rel['properties']['schema_version']['const'] == '0.1'
+          assert {'schema_version', 'repository', 'release_tag', 'source_commit', 'generated_at', 'assets'} <= set(rel['required'])
+          asset = rel['properties']['assets']['additionalProperties']
+          assert {'name', 'sha256'} <= set(asset['required'])
           PY
+
+      - name: Enforce crash-safe and idempotent implementation hooks
+        run: |
+          set -euo pipefail
+          grep -Fq 'DEPLOYMENT_MANIFEST.json' README.md
+          grep -Fq 'transaction.json' agent/ec-deployment-agent.sh
+          grep -Fq 'fsync_file_and_dir "$backup"' agent/ec-deployment-agent.sh
+          grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
+          grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
+          grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
 
       - name: Reject obvious committed secrets
         run: |
