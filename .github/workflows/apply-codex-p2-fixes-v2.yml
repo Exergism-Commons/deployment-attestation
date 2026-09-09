@@ -1,0 +1,218 @@
+name: Apply latest Codex P2 hardening v2
+
+on:
+  push:
+    branches: [initial-attestation-architecture]
+    paths:
+      - '.github/workflows/apply-codex-p2-fixes-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: initial-attestation-architecture
+          fetch-depth: 0
+      - name: Apply Codex P2 hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def one(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f"{path}: expected exactly one literal match, got {n}: {old[:100]!r}")
+              p.write_text(s.replace(old, new, 1))
+
+          def regex_one(path, pattern, repl):
+              p = Path(path)
+              s = p.read_text()
+              out, n = re.subn(pattern, repl, s, count=1, flags=re.M | re.S)
+              if n != 1:
+                  raise SystemExit(f"{path}: expected exactly one regex match, got {n}: {pattern!r}")
+              p.write_text(out)
+
+          agent = 'agent/ec-deployment-agent.sh'
+          one(agent, 'AGENT_VERSION="0.1.0-pre8"', 'AGENT_VERSION="0.1.0-pre9"')
+          one(agent,
+              'for command in curl git python3 sha256sum systemctl flock install awk sed tr date hostname uname mv rm; do',
+              'for command in curl git python3 sha256sum systemctl flock install awk sed tr date hostname uname mv rm setsid; do')
+
+          regex_one(agent,
+              r'^run_smoke\(\) \{\n.*?^\}\n\nverify_baseline\(\) \{',
+              '''run_smoke() {
+            [[ -z "$EC_SMOKE_SCRIPT" ]] && return 0
+            [[ -x "$EC_SMOKE_SCRIPT" ]] || return 1
+            local pid rc=0
+            EC_PUBLIC_URL="$EC_PUBLIC_URL" EC_LOCAL_URL="$EC_LOCAL_URL" setsid "$EC_SMOKE_SCRIPT" &
+            pid=$!
+            wait "$pid" || rc=$?
+            # Smoke hooks are synchronous. Kill ordinary descendants that try
+            # to outlive the hook so they cannot race deployment finalization.
+            kill -TERM -- "-$pid" >/dev/null 2>&1 || true
+            kill -KILL -- "-$pid" >/dev/null 2>&1 || true
+            return "$rc"
+          }
+
+          verify_baseline() {''')
+
+          one(agent,
+          '''            add_parent_chain(dirs, p, repo)
+            submods.append((p, oid))
+            continue''',
+          '''            add_parent_chain(dirs, p, repo)
+            gitfile = p / ".git"
+            try:
+                gst = gitfile.lstat()
+            except FileNotFoundError as exc:
+                raise RuntimeError(f"submodule gitfile missing during fsync: {rel}") from exc
+            if stat.S_ISREG(gst.st_mode):
+                fsync_regular(gitfile)
+                add_parent_chain(dirs, gitfile, repo)
+            elif stat.S_ISDIR(gst.st_mode):
+                fsync_dir(gitfile)
+                add_parent_chain(dirs, gitfile, repo)
+            else:
+                raise RuntimeError(f"unsafe submodule .git entry during fsync: {rel}")
+            submods.append((p, oid))
+            continue''')
+
+          one(agent,
+          '''post_start_integrity() {
+            local commit="$1" binary="$2"
+            source_tree_exact "$commit" || return 1
+            fsync_checkout "$commit" || return 1
+            verify_runtime_exact "$binary"
+          }
+          ''',
+          '''post_start_integrity() {
+            local commit="$1" binary="$2"
+            source_tree_exact "$commit" || return 1
+            fsync_checkout "$commit" || return 1
+            verify_runtime_exact "$binary"
+          }
+
+          # Finalize only while the service is quiescent. This closes the
+          # verification-to-journal-removal race for the normal service writer.
+          finalize_quiescent() {
+            local commit="$1" binary="$2" manifest="$3"
+            systemctl stop "$EC_SERVICE_UNIT" || return 1
+            systemctl is-active --quiet "$EC_SERVICE_UNIT" && return 1
+            post_start_integrity "$commit" "$binary" || return 1
+            write_current_state "$commit" "$binary" "$manifest" || return 1
+            post_start_integrity "$commit" "$binary" || return 1
+            durable_remove "$TRANSACTION_FILE" || return 1
+          }
+
+          resume_committed_service() {
+            systemctl start "$EC_SERVICE_UNIT" || return 1
+            systemctl is-active --quiet "$EC_SERVICE_UNIT" || return 1
+            curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null
+          }
+          ''')
+
+          one(agent,
+          '''  write_current_state "$commit" "$binary" "$manifest" || { systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true; return 1; }
+            durable_remove "$TRANSACTION_FILE" || { systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true; return 1; }
+          }''',
+          '''  if ! finalize_quiescent "$commit" "$binary" "$manifest"; then
+            systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
+            return 1
+          fi
+            if ! resume_committed_service; then
+              warn "Rollback pair was committed exactly, but service restart failed"
+              return 1
+            fi
+          }''')
+
+          regex_one(agent,
+              r'  if ! write_current_state "\$RELEASE_SOURCE_COMMIT" "\$RELEASE_ASSET_SHA256" "\$RELEASE_MANIFEST_SHA256"; then\n.*?^  log "Activated release source \$RELEASE_SOURCE_COMMIT"',
+              '''  if ! finalize_quiescent "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256"; then
+            rollback_transaction || die "Quiescent finalization failed and rollback failed"; attest || true; return 1
+          fi
+            if ! resume_committed_service; then
+              warn "Release pair was committed exactly, but service restart failed"
+              attest || true
+              return 1
+            fi
+
+            log "Activated release source $RELEASE_SOURCE_COMMIT"''')
+
+          one(agent,
+              '  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true source_tree=false state_integrity=false runtime_digest=false\n  local actual',
+              '  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true source_tree=false state_integrity=false runtime_digest=false runtime_present=false\n  local actual')
+          one(agent,
+          '''  actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
+            if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
+            [[ "$actual" == "$state_binary" ]] && state_integrity=true
+            [[ "$actual" == "$expected_binary" ]] && runtime_digest=true''',
+          '''  actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
+            [[ "$actual" =~ ^[0-9a-f]{64}$ ]] && runtime_present=true
+            if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
+            [[ "$actual" == "$state_binary" ]] && state_integrity=true
+            [[ "$actual" == "$expected_binary" ]] && runtime_digest=true''')
+          one(agent,
+          '''  python3 - "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$source_tree" "$state_integrity" "$runtime_digest" <<'PY'
+          import json,sys
+          n=["systemd","local_http","public_https","release_revision","service_smoke","source_tree","state_integrity","runtime_digest"]''',
+          '''  python3 - "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$source_tree" "$state_integrity" "$runtime_digest" "$runtime_present" <<'PY'
+          import json,sys
+          n=["systemd","local_http","public_https","release_revision","service_smoke","source_tree","state_integrity","runtime_digest","runtime_present"]''')
+          one(agent,
+              'c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","source_tree","state_integrity","runtime_digest")',
+              'c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","source_tree","state_integrity","runtime_digest","runtime_present")')
+          one(agent,
+              '"deployed_runtime_sha256":actual,"expected_runtime_sha256":expected_runtime',
+              '"deployed_runtime_sha256":actual or None,"expected_runtime_sha256":expected_runtime')
+          one(agent,
+          '''  actual="$(sha256_file "$EC_APP_BIN")"
+            checks="$(collect_checks "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$deployed" "$state_binary")"''',
+          '''  actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
+            [[ "$actual" =~ ^[0-9a-f]{64}$ ]] || actual=""
+            checks="$(collect_checks "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$deployed" "$state_binary")"''')
+
+          schema = 'spec/attestation-v0.1.schema.json'
+          one(schema,
+              '"deployed_runtime_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}',
+              '"deployed_runtime_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}')
+
+          installer = 'install/install-id-exergism.sh'
+          one(installer,
+              'curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep',
+              'curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep setsid')
+
+          ci = '.github/workflows/ci.yml'
+          one(ci,
+              "          assert att['properties']['observation_id']['pattern'] == '^[0-9a-f]{64}$'\n",
+              "          assert att['properties']['observation_id']['pattern'] == '^[0-9a-f]{64}$'\n          assert set(att['properties']['deployed_runtime_sha256']['type']) == {'string', 'null'}\n")
+          one(ci,
+              "          grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh\n",
+              "          grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh\n          grep -Fq 'finalize_quiescent' agent/ec-deployment-agent.sh\n          grep -Fq 'resume_committed_service' agent/ec-deployment-agent.sh\n          grep -Fq 'setsid \"$EC_SMOKE_SCRIPT\"' agent/ec-deployment-agent.sh\n          grep -Fq 'submodule gitfile missing during fsync' agent/ec-deployment-agent.sh\n          grep -Fq 'runtime_present' agent/ec-deployment-agent.sh\n")
+          one(ci,
+              "curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep' install/install-id-exergism.sh",
+              "curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep setsid' install/install-id-exergism.sh")
+          PY
+
+          bash -n agent/ec-deployment-agent.sh
+          bash -n install/install-id-exergism.sh
+          python3 -m json.tool spec/attestation-v0.1.schema.json >/dev/null
+          grep -Fq 'finalize_quiescent' agent/ec-deployment-agent.sh
+          grep -Fq 'submodule gitfile missing during fsync' agent/ec-deployment-agent.sh
+          grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
+          grep -Fq '"type": ["string", "null"]' spec/attestation-v0.1.schema.json
+          git diff --check
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add agent/ec-deployment-agent.sh spec/attestation-v0.1.schema.json .github/workflows/ci.yml install/install-id-exergism.sh
+          git commit -m 'fix: close quiescence and missing-runtime gaps'
+          git push origin HEAD:initial-attestation-architecture
