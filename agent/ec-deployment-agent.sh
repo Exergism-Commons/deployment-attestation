@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre3"
+AGENT_VERSION="0.1.0-pre4"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -42,10 +42,19 @@ flock -n 9 || { log "Another agent invocation holds the lock"; exit 0; }
 
 arch() {
   local value
-  if command -v dpkg >/dev/null 2>&1; then value="$(dpkg --print-architecture)"; else
-    case "$(uname -m)" in x86_64) value=amd64;; aarch64|arm64) value=arm64;; *) return 1;; esac
+  if command -v dpkg >/dev/null 2>&1; then
+    value="$(dpkg --print-architecture)"
+  else
+    case "$(uname -m)" in
+      x86_64) value=amd64 ;;
+      aarch64|arm64) value=arm64 ;;
+      *) return 1 ;;
+    esac
   fi
-  case "$value" in amd64|arm64) printf '%s\n' "$value";; *) return 1;; esac
+  case "$value" in
+    amd64|arm64) printf '%s\n' "$value" ;;
+    *) return 1 ;;
+  esac
 }
 
 download() {
@@ -60,11 +69,15 @@ fsync_file_and_dir() {
 import os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 fd = os.open(p, os.O_RDONLY)
-try: os.fsync(fd)
-finally: os.close(fd)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
 dfd = os.open(p.parent, os.O_DIRECTORY)
-try: os.fsync(dfd)
-finally: os.close(dfd)
+try:
+    os.fsync(dfd)
+finally:
+    os.close(dfd)
 PY
 }
 
@@ -78,14 +91,20 @@ fd, tmp = tempfile.mkstemp(prefix=p.name + '.', dir=p.parent)
 try:
     os.fchmod(fd, mode)
     with os.fdopen(fd, 'wb') as f:
-        f.write(data); f.flush(); os.fsync(f.fileno())
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, p)
     dfd = os.open(p.parent, os.O_DIRECTORY)
-    try: os.fsync(dfd)
-    finally: os.close(dfd)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 finally:
-    try: os.unlink(tmp)
-    except FileNotFoundError: pass
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
 PY
 }
 
@@ -93,11 +112,15 @@ durable_remove() {
   python3 - "$1" <<'PY'
 import os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
-try: p.unlink()
-except FileNotFoundError: raise SystemExit(0)
+try:
+    p.unlink()
+except FileNotFoundError:
+    raise SystemExit(0)
 dfd = os.open(p.parent, os.O_DIRECTORY)
-try: os.fsync(dfd)
-finally: os.close(dfd)
+try:
+    os.fsync(dfd)
+finally:
+    os.close(dfd)
 PY
 }
 
@@ -124,7 +147,11 @@ PY
 bootstrap_state() {
   [[ -f "$CURRENT_STATE_FILE" ]] && return 0
   local commit head binary
-  if [[ -r "$EC_SOURCE_REVISION_FILE" ]]; then commit="$(tr -d '\r\n' < "$EC_SOURCE_REVISION_FILE")"; else commit="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"; fi
+  if [[ -r "$EC_SOURCE_REVISION_FILE" ]]; then
+    commit="$(tr -d '\r\n' < "$EC_SOURCE_REVISION_FILE")"
+  else
+    commit="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+  fi
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "Cannot bootstrap deployment revision"
   head="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"
   [[ "$head" == "$commit" ]] || die "Bootstrap refused: checkout differs from recorded revision"
@@ -137,12 +164,15 @@ bootstrap_state() {
 validate_manifest() {
   python3 - "$1" "$EC_REPOSITORY" "$EC_RELEASE_TAG" "$2" <<'PY'
 import json, pathlib, re, sys
-p,repo,tag,arch=sys.argv[1:]; o=json.loads(pathlib.Path(p).read_text())
+p,repo,tag,arch=sys.argv[1:]
+o=json.loads(pathlib.Path(p).read_text())
 assert o.get('schema_version')=='0.1', 'schema'
 assert o.get('repository')==repo, 'repository'
 assert o.get('release_tag')==tag, 'release_tag'
-c=o.get('source_commit',''); assert re.fullmatch(r'[0-9a-f]{40}',c), 'source_commit'
-a=o.get('assets',{}).get(arch); assert isinstance(a,dict), 'asset'
+c=o.get('source_commit','')
+assert re.fullmatch(r'[0-9a-f]{40}',c), 'source_commit'
+a=o.get('assets',{}).get(arch)
+assert isinstance(a,dict), 'asset'
 n=a.get('name',''); d=a.get('sha256','')
 assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*',n), 'asset name'
 assert re.fullmatch(r'[0-9a-f]{64}',d), 'asset digest'
@@ -198,7 +228,8 @@ rollback_transaction() {
   backup="$(json_field "$TRANSACTION_FILE" backup_binary)" || return 1
   [[ "$commit" =~ ^[0-9a-f]{40}$ && "$binary" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$backup" == "$BACKUP_DIR/"* && -f "$backup" ]] || return 1
-  digest="$(sha256_file "$backup" 2>/dev/null || true)"; [[ "$digest" == "$binary" ]] || return 1
+  digest="$(sha256_file "$backup" 2>/dev/null || true)"
+  [[ "$digest" == "$binary" ]] || return 1
 
   warn "Recovering transaction to $commit"
   systemctl stop "$EC_SERVICE_UNIT" || return 1
@@ -209,6 +240,7 @@ rollback_transaction() {
   install -o root -g root -m 0755 "$backup" "${EC_APP_BIN}.rollback" || return 1
   [[ "$(sha256_file "${EC_APP_BIN}.rollback" 2>/dev/null || true)" == "$binary" ]] || return 1
   mv -f "${EC_APP_BIN}.rollback" "$EC_APP_BIN" || return 1
+  fsync_file_and_dir "$EC_APP_BIN" || return 1
   write_current_state "$commit" "$binary" "$manifest" || return 1
   systemctl start "$EC_SERVICE_UNIT" || return 1
   systemctl is-active --quiet "$EC_SERVICE_UNIT" || return 1
@@ -228,13 +260,20 @@ collect_checks() {
   local head actual
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && systemd=true
   curl -fsS --max-time 10 "$EC_LOCAL_URL" >/dev/null 2>&1 && local_http=true
-  if [[ "$EC_CHECK_PUBLIC" == 1 ]]; then public_https=false; curl -fsS --max-time 15 "$EC_PUBLIC_URL" >/dev/null 2>&1 && public_https=true; fi
+  if [[ "$EC_CHECK_PUBLIC" == 1 ]]; then
+    public_https=false
+    curl -fsS --max-time 15 "$EC_PUBLIC_URL" >/dev/null 2>&1 && public_https=true
+  fi
   [[ "$deployed" == "$expected" ]] && release_revision=true
-  head="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"; actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
+  head="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+  actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
   [[ "$head" == "$deployed" ]] && source_tree=true
   [[ "$actual" == "$state_binary" ]] && state_integrity=true
   [[ "$actual" == "$expected_binary" ]] && runtime_digest=true
-  if [[ -n "$EC_SMOKE_SCRIPT" ]]; then service_smoke=false; run_smoke >/dev/null 2>&1 && service_smoke=true; fi
+  if [[ -n "$EC_SMOKE_SCRIPT" ]]; then
+    service_smoke=false
+    run_smoke >/dev/null 2>&1 && service_smoke=true
+  fi
   python3 - "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$source_tree" "$state_integrity" "$runtime_digest" <<'PY'
 import json,sys
 n=['systemd','local_http','public_https','release_revision','service_smoke','source_tree','state_integrity','runtime_digest']
@@ -245,7 +284,8 @@ PY
 status_from_checks() {
   python3 - "$1" <<'PY'
 import json,sys
-c=json.loads(sys.argv[1]); mandatory=('systemd','local_http','release_revision','service_smoke','source_tree','state_integrity','runtime_digest')
+c=json.loads(sys.argv[1])
+mandatory=('systemd','local_http','release_revision','service_smoke','source_tree','state_integrity','runtime_digest')
 print('unhealthy' if not all(c.get(k,False) for k in mandatory) else 'degraded' if not c.get('public_https',False) else 'healthy')
 PY
 }
@@ -269,77 +309,159 @@ send_attestation() {
   oid="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["observation_id"])' <<<"$body")"
   sig="$(python3 - "$EC_HMAC_SECRET_FILE" "$ts" "$body" <<'PY'
 import hashlib,hmac,pathlib,sys
-p,t,b=sys.argv[1:]; key=pathlib.Path(p).read_bytes().strip(); print(hmac.new(key,(t+'.'+b).encode(),hashlib.sha256).hexdigest())
+p,t,b=sys.argv[1:]
+key=pathlib.Path(p).read_bytes().strip()
+print(hmac.new(key,(t+'.'+b).encode(),hashlib.sha256).hexdigest())
 PY
 )"
   curl --retry 3 --retry-all-errors --connect-timeout 10 -fsS \
-    -H 'Content-Type: application/json' -H "X-EC-Timestamp: $ts" -H "X-EC-Signature: sha256=$sig" -H "Idempotency-Key: $oid" \
+    -H 'Content-Type: application/json' \
+    -H "X-EC-Timestamp: $ts" \
+    -H "X-EC-Signature: sha256=$sig" \
+    -H "Idempotency-Key: $oid" \
     --data-binary "$body" "$EC_ATTESTATION_ENDPOINT" >/dev/null
 }
 
 attest() {
   local dir deployed state_binary actual checks status body
   dir="$(mktemp -d)"
-  if ! load_release_snapshot "$dir"; then rm -rf "$dir"; warn "Could not load release manifest"; return 2; fi
+  if ! load_release_snapshot "$dir"; then
+    rm -rf "$dir"
+    warn "Could not load release manifest"
+    return 2
+  fi
   rm -rf "$dir"
-  deployed="$(json_field "$CURRENT_STATE_FILE" source_commit)"; state_binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
+  deployed="$(json_field "$CURRENT_STATE_FILE" source_commit)"
+  state_binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
   [[ "$deployed" =~ ^[0-9a-f]{40}$ && "$state_binary" =~ ^[0-9a-f]{64}$ ]] || return 2
   actual="$(sha256_file "$EC_APP_BIN")"
   checks="$(collect_checks "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$deployed" "$state_binary")"
   status="$(status_from_checks "$checks")"
   body="$(build_attestation "$deployed" "$RELEASE_SOURCE_COMMIT" "$status" "$checks" "$RELEASE_MANIFEST_SHA256" "$actual" "$RELEASE_ASSET_SHA256")"
-  send_attestation "$body"; [[ "$status" == healthy ]]
+  send_attestation "$body"
+  [[ "$status" == healthy ]]
 }
 
 update_release() {
   recover_transaction
   verify_baseline || die "Current source/runtime pair differs from durable state"
 
-  local dir current downloaded oldc oldb oldm backup
+  local dir current current_binary current_manifest downloaded oldc oldb oldm backup
   dir="$(mktemp -d)"
-  if ! load_release_snapshot "$dir"; then rm -rf "$dir"; die "Could not load valid deployment manifest"; fi
+  if ! load_release_snapshot "$dir"; then
+    rm -rf "$dir"
+    die "Could not load valid deployment manifest"
+  fi
   current="$(json_field "$CURRENT_STATE_FILE" source_commit)"
-  if [[ "$current" == "$RELEASE_SOURCE_COMMIT" ]]; then rm -rf "$dir"; log "Already running $current"; attest || true; return 0; fi
+  current_binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
+  current_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256)"
 
-  if ! download "$RELEASE_ASSET_NAME" "$dir/$RELEASE_ASSET_NAME"; then rm -rf "$dir"; die "Runtime download failed"; fi
+  # A rolling release may legitimately rebuild the runtime for the same source
+  # commit. Skip activation only when BOTH source and architecture-specific
+  # runtime digest match the captured manifest snapshot.
+  if [[ "$current" == "$RELEASE_SOURCE_COMMIT" && "$current_binary" == "$RELEASE_ASSET_SHA256" ]]; then
+    rm -rf "$dir"
+    if [[ "$current_manifest" != "$RELEASE_MANIFEST_SHA256" ]]; then
+      write_current_state "$current" "$current_binary" "$RELEASE_MANIFEST_SHA256" \
+        || die "Could not refresh manifest identity for matching source/runtime"
+    fi
+    log "Already running exact source/runtime pair $current"
+    attest || true
+    return 0
+  fi
+
+  if ! download "$RELEASE_ASSET_NAME" "$dir/$RELEASE_ASSET_NAME"; then
+    rm -rf "$dir"
+    die "Runtime download failed"
+  fi
   downloaded="$(sha256_file "$dir/$RELEASE_ASSET_NAME")"
-  [[ "$downloaded" == "$RELEASE_ASSET_SHA256" ]] || { rm -rf "$dir"; die "Runtime does not match manifest digest"; }
+  [[ "$downloaded" == "$RELEASE_ASSET_SHA256" ]] || {
+    rm -rf "$dir"
+    die "Runtime does not match manifest digest"
+  }
 
-  oldc="$(json_field "$CURRENT_STATE_FILE" source_commit)"; oldb="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"; oldm="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256)"
-  [[ "$oldc" =~ ^[0-9a-f]{40}$ && "$oldb" =~ ^[0-9a-f]{64}$ ]] || { rm -rf "$dir"; die "Invalid rollback baseline"; }
+  oldc="$(json_field "$CURRENT_STATE_FILE" source_commit)"
+  oldb="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
+  oldm="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256)"
+  [[ "$oldc" =~ ^[0-9a-f]{40}$ && "$oldb" =~ ^[0-9a-f]{64}$ ]] || {
+    rm -rf "$dir"
+    die "Invalid rollback baseline"
+  }
   backup="$BACKUP_DIR/runtime-${oldc}-${oldb:0:16}"
-  install -o root -g root -m 0755 "$EC_APP_BIN" "$backup" || { rm -rf "$dir"; die "Backup failed"; }
-  [[ "$(sha256_file "$backup")" == "$oldb" ]] || { rm -rf "$dir"; die "Backup digest mismatch"; }
-  fsync_file_and_dir "$backup" || { rm -rf "$dir"; die "Could not durably persist rollback binary"; }
-  write_transaction "$oldc" "$oldb" "$oldm" "$backup" "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256" || { rm -rf "$dir"; die "Could not durably persist transaction"; }
+  install -o root -g root -m 0755 "$EC_APP_BIN" "$backup" || {
+    rm -rf "$dir"
+    die "Backup failed"
+  }
+  [[ "$(sha256_file "$backup")" == "$oldb" ]] || {
+    rm -rf "$dir"
+    die "Backup digest mismatch"
+  }
+  fsync_file_and_dir "$backup" || {
+    rm -rf "$dir"
+    die "Could not durably persist rollback binary"
+  }
+  write_transaction "$oldc" "$oldb" "$oldm" "$backup" "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256" || {
+    rm -rf "$dir"
+    die "Could not durably persist transaction"
+  }
 
-  if ! systemctl stop "$EC_SERVICE_UNIT" || systemctl is-active --quiet "$EC_SERVICE_UNIT"; then rm -rf "$dir"; rollback_transaction || die "Stop failed and rollback failed"; return 1; fi
+  if ! systemctl stop "$EC_SERVICE_UNIT" || systemctl is-active --quiet "$EC_SERVICE_UNIT"; then
+    rm -rf "$dir"
+    rollback_transaction || die "Stop failed and rollback failed"
+    return 1
+  fi
+
   if ! git -C "$EC_APP_DIR" fetch --force --depth 1 origin "$RELEASE_SOURCE_COMMIT" \
      || ! git -C "$EC_APP_DIR" checkout --detach FETCH_HEAD \
      || ! git -C "$EC_APP_DIR" reset --hard "$RELEASE_SOURCE_COMMIT" \
      || ! git -C "$EC_APP_DIR" clean -fdx \
      || [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" != "$RELEASE_SOURCE_COMMIT" ]]; then
-    rm -rf "$dir"; rollback_transaction || die "Source switch failed and rollback failed"; attest || true; return 1
+    rm -rf "$dir"
+    rollback_transaction || die "Source switch failed and rollback failed"
+    attest || true
+    return 1
   fi
+
   if ! install -o root -g root -m 0755 "$dir/$RELEASE_ASSET_NAME" "${EC_APP_BIN}.new" \
      || [[ "$(sha256_file "${EC_APP_BIN}.new" 2>/dev/null || true)" != "$RELEASE_ASSET_SHA256" ]] \
-     || ! mv -f "${EC_APP_BIN}.new" "$EC_APP_BIN"; then
-    rm -rf "$dir"; rollback_transaction || die "Runtime switch failed and rollback failed"; attest || true; return 1
+     || ! mv -f "${EC_APP_BIN}.new" "$EC_APP_BIN" \
+     || ! fsync_file_and_dir "$EC_APP_BIN"; then
+    rm -rf "$dir"
+    rollback_transaction || die "Runtime switch/durability failed and rollback failed"
+    attest || true
+    return 1
   fi
   rm -rf "$dir"
 
-  if ! systemctl start "$EC_SERVICE_UNIT" || ! systemctl is-active --quiet "$EC_SERVICE_UNIT" || ! curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null || ! run_smoke >/dev/null 2>&1; then
-    rollback_transaction || die "Health failed and rollback failed"; attest || true; return 1
+  if ! systemctl start "$EC_SERVICE_UNIT" \
+     || ! systemctl is-active --quiet "$EC_SERVICE_UNIT" \
+     || ! curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null \
+     || ! run_smoke >/dev/null 2>&1; then
+    rollback_transaction || die "Health failed and rollback failed"
+    attest || true
+    return 1
   fi
+
   if ! write_current_state "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256"; then
-    rollback_transaction || die "State commit failed and rollback failed"; attest || true; return 1
+    rollback_transaction || die "State commit failed and rollback failed"
+    attest || true
+    return 1
   fi
+
   if ! durable_remove "$TRANSACTION_FILE"; then
-    rollback_transaction || die "Transaction finalization failed and rollback failed"; attest || true; return 1
+    rollback_transaction || die "Transaction finalization failed and rollback failed"
+    attest || true
+    return 1
   fi
-  log "Activated release source $RELEASE_SOURCE_COMMIT"; attest || true
+
+  log "Activated release source $RELEASE_SOURCE_COMMIT"
+  attest || true
 }
 
 bootstrap_state
 recover_transaction
-case "${1:-run}" in run|update) update_release;; attest|health) attest;; *) die "Usage: $0 [run|update|attest|health]";; esac
+case "${1:-run}" in
+  run|update) update_release ;;
+  attest|health) attest ;;
+  *) die "Usage: $0 [run|update|attest|health]" ;;
+esac
