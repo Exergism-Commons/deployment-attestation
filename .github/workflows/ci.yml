@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -Fq 'DEPLOYMENT_MANIFEST.json' README.md
-          grep -Fq 'AGENT_VERSION="0.1.0-pre10"' agent/ec-deployment-agent.sh
+          grep -Fq 'AGENT_VERSION="0.1.0-pre11"' agent/ec-deployment-agent.sh
           grep -Fq 'transaction.json' agent/ec-deployment-agent.sh
           grep -Fq 'durable_mkdir_tree' agent/ec-deployment-agent.sh
           grep -Fq 'fsync_file_and_dir "$backup"' agent/ec-deployment-agent.sh
@@ -67,6 +67,9 @@ jobs:
           grep -Fq 'gitlink is not a real directory' agent/ec-deployment-agent.sh
           grep -Fq 'add_parent_chain(dirs, p, repo)' agent/ec-deployment-agent.sh
           grep -Fq 'submodule gitfile missing during fsync' agent/ec-deployment-agent.sh
+          grep -Fq 'artifact_write_fence' agent/ec-deployment-agent.sh
+          grep -Fq 'nsenter --target "$pid" --mount -- findmnt -T "$path"' agent/ec-deployment-agent.sh
+          grep -Fq 'artifact_fence' agent/ec-deployment-agent.sh
           grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh
           grep -Fq 'finalize_quiescent' agent/ec-deployment-agent.sh
           grep -Fq 'resume_committed_service' agent/ec-deployment-agent.sh
@@ -85,8 +88,13 @@ jobs:
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
-          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep' install/install-id-exergism.sh
+          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter' install/install-id-exergism.sh
           grep -Fq 'systemd-run --version' install/install-id-exergism.sh
+          grep -Fq 'findmnt --version' install/install-id-exergism.sh
+          grep -Fq 'nsenter --version' install/install-id-exergism.sh
+          grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
+          grep -Fq 'ReadOnlyPaths=/usr/local/bin/idresolver' packaging/id-exergism-artifact-fence.conf
+          grep -Fq '90-ec-deployment-attestation-artifact-fence.conf' install/install-id-exergism.sh
 
       - name: Reject obvious committed secrets
         run: |
