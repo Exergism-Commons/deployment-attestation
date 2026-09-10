@@ -54,6 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -Fq 'DEPLOYMENT_MANIFEST.json' README.md
+          grep -Fq 'AGENT_VERSION="0.1.0-pre10"' agent/ec-deployment-agent.sh
           grep -Fq 'transaction.json' agent/ec-deployment-agent.sh
           grep -Fq 'durable_mkdir_tree' agent/ec-deployment-agent.sh
           grep -Fq 'fsync_file_and_dir "$backup"' agent/ec-deployment-agent.sh
@@ -69,14 +70,23 @@ jobs:
           grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh
           grep -Fq 'finalize_quiescent' agent/ec-deployment-agent.sh
           grep -Fq 'resume_committed_service' agent/ec-deployment-agent.sh
-          grep -Fq 'setsid "$EC_SMOKE_SCRIPT"' agent/ec-deployment-agent.sh
+          grep -Fq 'ExitType=cgroup' agent/ec-deployment-agent.sh
+          grep -Fq 'KillMode=control-group' agent/ec-deployment-agent.sh
+          grep -Fq 'RuntimeMaxSec=${EC_SMOKE_TIMEOUT}s' agent/ec-deployment-agent.sh
+          grep -Fq '"phase":"activating"' agent/ec-deployment-agent.sh
+          grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
+          grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
+          grep -Fq 'snapshot="$(collect_checks' agent/ec-deployment-agent.sh
+          grep -Fq '"runtime_sha256":actual' agent/ec-deployment-agent.sh
+          grep -Fq 'durable_remove "$TRANSACTION_FILE"' agent/ec-deployment-agent.sh
           grep -Fq 'verify_runtime_exact "$binary"' agent/ec-deployment-agent.sh
           grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
-          grep -Fq 'curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep setsid' install/install-id-exergism.sh
+          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep' install/install-id-exergism.sh
+          grep -Fq 'systemd-run --version' install/install-id-exergism.sh
 
       - name: Reject obvious committed secrets
         run: |
