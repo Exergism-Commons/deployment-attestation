@@ -4,7 +4,7 @@ on:
   push:
     branches: [initial-attestation-architecture]
     paths:
-      - 'tools/apply_codex_round3.py'
+      - 'tools/apply_codex_round3_noci.py'
       - '.github/workflows/apply-codex-round3.yml'
 
 permissions:
@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/apply_codex_round3.py
+          python3 tools/apply_codex_round3_noci.py
           bash -n agent/ec-deployment-agent.sh
           bash -n install/install-id-exergism.sh
           git diff --check
@@ -35,6 +35,6 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add agent/ec-deployment-agent.sh install/install-id-exergism.sh packaging/id-exergism-artifact-fence.conf .github/workflows/ci.yml docs/THREAT-MODEL.md
+          git add agent/ec-deployment-agent.sh install/install-id-exergism.sh packaging/id-exergism-artifact-fence.conf docs/THREAT-MODEL.md
           git commit -m 'fix: fence deployment artifacts from service writes'
           git push origin HEAD:initial-attestation-architecture
