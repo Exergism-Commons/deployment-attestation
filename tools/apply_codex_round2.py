@@ -262,7 +262,7 @@ for required in [
     'RuntimeMaxSec=${EC_SMOKE_TIMEOUT}s',
     '"phase":"activating"',
     'mark_transaction_committed',
-    '"phase" == "committed"',
+    'if [[ "$phase" == "committed" ]]',
     '"runtime_sha256":actual',
     'snapshot="$(collect_checks',
     'resume_committed_service "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256"',
