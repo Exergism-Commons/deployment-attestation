@@ -12,6 +12,7 @@ Deployment Attestation is designed to protect these properties:
 - a process crash or host reboot during activation does not silently rebase rollback onto partially switched state;
 - a compromised production host does not automatically gain GitHub repository write access;
 - failed activation can be rolled back to a previously recorded source/runtime pair;
+- the long-lived service is fenced from writing the deployed source tree or runtime while those artifacts are being attested;
 - health observations are authenticated, replay-bounded and idempotently processed.
 
 ## Trust assumptions
@@ -21,6 +22,7 @@ The design currently assumes:
 - GitHub release metadata and HTTPS transport are available and authentic;
 - the service repository release workflow is trusted to publish a correct atomic `DEPLOYMENT_MANIFEST.json` binding source commit to runtime digests;
 - the host root account, local filesystem and systemd configuration are trusted until compromise;
+- the production service runs inside the systemd mount namespace installed by Deployment Attestation, with the deployment source and runtime mounted read-only;
 - the service-specific HMAC secret is readable only by root / the attestation agent;
 - the receiver protects GitHub App credentials independently of the host;
 - receiver-side durable storage can enforce observation deduplication and incident state.
@@ -79,3 +81,9 @@ The updater must fail closed when any of these checks fail:
 - post-restart mandatory local health failure.
 
 A public health failure after successful local activation should be reported as degraded according to service policy, but should not necessarily trigger automatic rollback if the failure can be external to the host (DNS, upstream network, certificate propagation).
+
+## Service artifact write fence
+
+A running service is not considered a stable measurement source merely because the agent hashes an artifact twice. The id deployment installer places the resolver in a systemd mount namespace where both `/srv/id.exergism.org` and `/usr/local/bin/idresolver` are `ReadOnlyPaths`. The agent verifies the *live service namespace* through `MainPID`, `nsenter` and `findmnt` before accepting a running baseline, before post-start finalization, and before declaring an attestation healthy. The root-owned updater remains outside that namespace and can mutate those paths only while carrying out its journaled transaction.
+
+If the live read-only fence is absent, the observation is unhealthy and an active service cannot be accepted as a new rollback baseline. Root-level mutation remains outside the v0.1 threat model.

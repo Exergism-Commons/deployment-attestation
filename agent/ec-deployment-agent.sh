@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre10"
+AGENT_VERSION="0.1.0-pre11"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -18,7 +18,7 @@ required=(EC_SERVICE EC_REPOSITORY EC_ENVIRONMENT EC_RELEASE_TAG EC_APP_DIR EC_A
 for name in "${required[@]}"; do
   [[ -n "${!name:-}" ]] || die "Missing required configuration: $name"
 done
-for command in curl git python3 sha256sum systemctl systemd-run flock install awk sed tr date hostname uname mv rm; do
+for command in curl git python3 sha256sum systemctl systemd-run flock install awk sed tr date hostname uname mv rm findmnt nsenter; do
   command -v "$command" >/dev/null 2>&1 || die "Required command not found: $command"
 done
 
@@ -476,8 +476,33 @@ run_smoke() {
   return "$rc"
 }
 
+artifact_write_fence() {
+  local pid path options
+  systemctl is-active --quiet "$EC_SERVICE_UNIT" || return 1
+  pid="$(systemctl show "$EC_SERVICE_UNIT" -p MainPID --value 2>/dev/null)" || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  # Observe the service's actual mount namespace, not merely unit-file text.
+  # A healthy deployment requires both owner-controlled artifacts to be mounted
+  # read-only for the running service. The root agent remains outside this
+  # namespace and can still perform a later transactional update.
+  for path in "$EC_APP_DIR" "$EC_APP_BIN"; do
+    [[ "$path" == /* && "$path" != *$'\n'* ]] || return 1
+    options="$(nsenter --target "$pid" --mount -- findmnt -T "$path" -n -o OPTIONS 2>/dev/null)" || return 1
+    case ",$options," in
+      *,ro,*) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 verify_baseline() {
   local commit binary
+  # If the service is active, establish the write-stable boundary before
+  # accepting any source/runtime bytes as the rollback baseline.
+  if systemctl is-active --quiet "$EC_SERVICE_UNIT"; then
+    artifact_write_fence || return 1
+  fi
   commit="$(json_field "$CURRENT_STATE_FILE" source_commit)" || return 1
   binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)" || return 1
   [[ "$commit" =~ ^[0-9a-f]{40}$ && "$binary" =~ ^[0-9a-f]{64}$ ]] || return 1
@@ -529,11 +554,20 @@ switch_source() {
   fsync_checkout "$commit"
 }
 
-post_start_integrity() {
+artifact_integrity() {
   local commit="$1" binary="$2"
   source_tree_exact "$commit" || return 1
   fsync_checkout "$commit" || return 1
   verify_runtime_exact "$binary"
+}
+
+post_start_integrity() {
+  local commit="$1" binary="$2"
+  # Once this succeeds, the long-lived service cannot race either the source
+  # traversal or runtime hashing: both deployment artifacts are read-only in
+  # that service's live mount namespace.
+  artifact_write_fence || return 1
+  artifact_integrity "$commit" "$binary"
 }
 
 # Commit candidate state only while the normal service writer is stopped.
@@ -544,9 +578,9 @@ finalize_quiescent() {
   local commit="$1" binary="$2" manifest="$3"
   systemctl stop "$EC_SERVICE_UNIT" || return 1
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && return 1
-  post_start_integrity "$commit" "$binary" || return 1
+  artifact_integrity "$commit" "$binary" || return 1
   write_current_state "$commit" "$binary" "$manifest" || return 1
-  post_start_integrity "$commit" "$binary" || return 1
+  artifact_integrity "$commit" "$binary" || return 1
 }
 
 resume_committed_service() {
@@ -627,18 +661,20 @@ recover_transaction() {
 
 collect_checks() {
   local expected="$1" expected_binary="$2" deployed="$3" state_binary="$4"
-  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true source_tree=false state_integrity=false runtime_digest=false runtime_present=false
+  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true artifact_fence=false source_tree=false state_integrity=false runtime_digest=false runtime_present=false
   local actual
 
-  # The smoke hook runs before *all* observed health/artifact evidence. With
-  # ExitType=cgroup, returning from run_smoke also proves its containment cgroup
-  # is empty, so the following values form one consistent post-hook snapshot.
+  # The smoke hook runs first and cannot leave descendants behind. Before any
+  # artifact evidence is accepted, verify that the running service sees the
+  # source tree and runtime through read-only mounts. This provides one stable
+  # post-smoke view rather than two racy measurements around a writable service.
   if [[ -n "$EC_SMOKE_SCRIPT" ]]; then
     service_smoke=false
     run_smoke >/dev/null 2>&1 && service_smoke=true
   fi
 
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && systemd=true
+  artifact_write_fence && artifact_fence=true
   curl -fsS --max-time 10 "$EC_LOCAL_URL" >/dev/null 2>&1 && local_http=true
   if [[ "$EC_CHECK_PUBLIC" == 1 ]]; then
     public_https=false; curl -fsS --max-time 15 "$EC_PUBLIC_URL" >/dev/null 2>&1 && public_https=true
@@ -649,10 +685,10 @@ collect_checks() {
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
   [[ "$actual" == "$state_binary" ]] && state_integrity=true
   [[ "$actual" == "$expected_binary" ]] && runtime_digest=true
-  python3 - "$actual" "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$source_tree" "$state_integrity" "$runtime_digest" "$runtime_present" <<'PY'
+  python3 - "$actual" "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$artifact_fence" "$source_tree" "$state_integrity" "$runtime_digest" "$runtime_present" <<'PY'
 import json,sys
 actual=sys.argv[1] if len(sys.argv[1]) == 64 else None
-n=["systemd","local_http","public_https","release_revision","service_smoke","source_tree","state_integrity","runtime_digest","runtime_present"]
+n=["systemd","local_http","public_https","release_revision","service_smoke","artifact_fence","source_tree","state_integrity","runtime_digest","runtime_present"]
 checks=dict(zip(n,[x=="true" for x in sys.argv[2:]]))
 print(json.dumps({"runtime_sha256":actual,"checks":checks},sort_keys=True,separators=(",",":")))
 PY
@@ -661,7 +697,7 @@ PY
 status_from_checks() {
   python3 - "$1" <<'PY'
 import json,sys
-c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","source_tree","state_integrity","runtime_digest","runtime_present")
+c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","artifact_fence","source_tree","state_integrity","runtime_digest","runtime_present")
 print("unhealthy" if not all(c.get(k,False) for k in mandatory) else "degraded" if not c.get("public_https",False) else "healthy")
 PY
 }

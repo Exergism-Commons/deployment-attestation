@@ -8,12 +8,15 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE="id.exergism.org"
+TARGET_UNIT="id-exergism.service"
+FENCE_DROPIN_DIR="/etc/systemd/system/${TARGET_UNIT}.d"
+FENCE_DROPIN="${FENCE_DROPIN_DIR}/90-ec-deployment-attestation-artifact-fence.conf"
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
 
 # Keep this in sync with the commands required by the installed agent and the
 # id-specific semantic smoke check. A successful installation must never leave
 # a timer that can only fail at runtime because a dependency is absent.
-for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep; do
+for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
@@ -51,6 +54,8 @@ sha256sum --version >/dev/null
 flock --version >/dev/null
 grep --version >/dev/null
 systemd-run --version >/dev/null
+findmnt --version >/dev/null
+nsenter --version >/dev/null
 
 install -d -m 0755 /usr/local/libexec
 install -d -m 0755 /etc/ec-deployment-attestation
@@ -65,12 +70,20 @@ install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.serv
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" \
   /etc/systemd/system/ec-deployment-attestation@.timer
 
+install -d -o root -g root -m 0755 "$FENCE_DROPIN_DIR"
+install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-artifact-fence.conf" "$FENCE_DROPIN"
+
 if [[ ! -e "/etc/ec-deployment-attestation/${SERVICE}.env" ]]; then
   install -o root -g root -m 0640 "$ROOT/examples/id.exergism.org.env.example" \
     "/etc/ec-deployment-attestation/${SERVICE}.env"
 fi
 
 systemctl daemon-reload
+# Apply the service-local read-only artifact namespace before the updater can
+# accept any running deployment as a stable baseline.
+systemctl restart "$TARGET_UNIT"
+systemctl is-active --quiet "$TARGET_UNIT" || { echo "Target service failed after artifact fence installation" >&2; exit 1; }
+curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || { echo "Target service health failed after artifact fence installation" >&2; exit 1; }
 systemctl enable --now "ec-deployment-attestation@${SERVICE}.timer"
 
 printf '\nInstalled Deployment Attestation agent for %s.\n' "$SERVICE"
