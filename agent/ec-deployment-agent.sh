@@ -593,14 +593,15 @@ rollback_transaction() {
     systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
     return 1
   fi
+  # `committed` means state/source/runtime are durably paired, but the final
+  # long-lived service instance is not yet proven. Keep the rollback journal
+  # across that restart so a crash or failed startup remains recoverable.
+  mark_transaction_committed "$commit" "$binary" "$manifest" || return 1
   if ! resume_committed_service "$commit" "$binary"; then
     systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
     return 1
   fi
-  # Normalize the persistent recovery journal to the restored pair. Keeping a
-  # committed recovery point means a later service-induced artifact drift can
-  # still be repaired automatically instead of becoming an unrecoverable base.
-  mark_transaction_committed "$commit" "$binary" "$manifest" || return 1
+  durable_remove "$TRANSACTION_FILE" || return 1
 }
 
 recover_transaction() {
@@ -615,13 +616,11 @@ recover_transaction() {
     if [[ "$commit" =~ ^[0-9a-f]{40}$ && "$binary" =~ ^[0-9a-f]{64}$ \
        && "$state_commit" == "$commit" && "$state_binary" == "$binary" ]] \
        && verify_baseline \
-       && systemctl is-active --quiet "$EC_SERVICE_UNIT" \
-       && curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null \
-       && run_smoke >/dev/null 2>&1 \
-       && post_start_integrity "$commit" "$binary"; then
+       && resume_committed_service "$commit" "$binary"; then
+      durable_remove "$TRANSACTION_FILE" || return 1
       return 0
     fi
-    warn "Committed deployment failed recovery verification; restoring last-known-good pair"
+    warn "Committed candidate failed final service verification; restoring last-known-good pair"
   fi
   rollback_transaction || die "Interrupted/invalid transaction could not be safely recovered; refusing a new baseline"
 }
@@ -630,21 +629,21 @@ collect_checks() {
   local expected="$1" expected_binary="$2" deployed="$3" state_binary="$4"
   local systemd=false local_http=false public_https=true release_revision=false service_smoke=true source_tree=false state_integrity=false runtime_digest=false runtime_present=false
   local actual
+
+  # The smoke hook runs before *all* observed health/artifact evidence. With
+  # ExitType=cgroup, returning from run_smoke also proves its containment cgroup
+  # is empty, so the following values form one consistent post-hook snapshot.
+  if [[ -n "$EC_SMOKE_SCRIPT" ]]; then
+    service_smoke=false
+    run_smoke >/dev/null 2>&1 && service_smoke=true
+  fi
+
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && systemd=true
   curl -fsS --max-time 10 "$EC_LOCAL_URL" >/dev/null 2>&1 && local_http=true
   if [[ "$EC_CHECK_PUBLIC" == 1 ]]; then
     public_https=false; curl -fsS --max-time 15 "$EC_PUBLIC_URL" >/dev/null 2>&1 && public_https=true
   fi
   [[ "$deployed" == "$expected" ]] && release_revision=true
-
-  # Smoke runs before the artifact snapshot. ExitType=cgroup guarantees the
-  # reviewed hook containment boundary is empty before source/runtime evidence
-  # is sampled for both checks and the attestation payload.
-  if [[ -n "$EC_SMOKE_SCRIPT" ]]; then
-    service_smoke=false
-    run_smoke >/dev/null 2>&1 && service_smoke=true
-  fi
-
   actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
   [[ "$actual" =~ ^[0-9a-f]{64}$ ]] && runtime_present=true
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
@@ -776,11 +775,15 @@ update_release() {
   if ! finalize_quiescent "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256"; then
     rollback_transaction || die "Quiescent state commit failed and rollback failed"; attest || true; return 1
   fi
+  if ! mark_transaction_committed "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256"; then
+    rollback_transaction || die "Could not persist committed recovery phase and rollback failed"; attest || true; return 1
+  fi
   if ! resume_committed_service "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256"; then
     rollback_transaction || die "Final service verification failed and rollback failed"; attest || true; return 1
   fi
-  if ! mark_transaction_committed "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256"; then
-    rollback_transaction || die "Could not persist committed recovery phase and rollback failed"; attest || true; return 1
+  if ! durable_remove "$TRANSACTION_FILE"; then
+    warn "Final service is healthy but recovery journal removal failed; leaving committed recovery state for retry"
+    return 1
   fi
 
   log "Activated release source $RELEASE_SOURCE_COMMIT"
