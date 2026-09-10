@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -Fq 'DEPLOYMENT_MANIFEST.json' README.md
-          grep -Fq 'AGENT_VERSION="0.1.0-pre11"' agent/ec-deployment-agent.sh
+          grep -Fq 'AGENT_VERSION="0.1.0-pre12"' agent/ec-deployment-agent.sh
           grep -Fq 'transaction.json' agent/ec-deployment-agent.sh
           grep -Fq 'durable_mkdir_tree' agent/ec-deployment-agent.sh
           grep -Fq 'fsync_file_and_dir "$backup"' agent/ec-deployment-agent.sh
@@ -76,6 +76,8 @@ jobs:
           grep -Fq 'ExitType=cgroup' agent/ec-deployment-agent.sh
           grep -Fq 'KillMode=control-group' agent/ec-deployment-agent.sh
           grep -Fq 'RuntimeMaxSec=${EC_SMOKE_TIMEOUT}s' agent/ec-deployment-agent.sh
+          grep -Fq -- '--property="ReadOnlyPaths=${EC_APP_DIR}"' agent/ec-deployment-agent.sh
+          grep -Fq -- '--property="ReadOnlyPaths=${EC_APP_BIN}"' agent/ec-deployment-agent.sh
           grep -Fq '"phase":"activating"' agent/ec-deployment-agent.sh
           grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
           grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
