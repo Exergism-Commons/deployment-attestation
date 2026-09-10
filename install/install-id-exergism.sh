@@ -13,7 +13,7 @@ MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-m
 # Keep this in sync with the commands required by the installed agent and the
 # id-specific semantic smoke check. A successful installation must never leave
 # a timer that can only fail at runtime because a dependency is absent.
-for command in curl git python3 sha256sum systemctl flock jq install mktemp awk sed tr date hostname uname mv rm grep setsid; do
+for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
@@ -50,6 +50,7 @@ git --version >/dev/null
 sha256sum --version >/dev/null
 flock --version >/dev/null
 grep --version >/dev/null
+systemd-run --version >/dev/null
 
 install -d -m 0755 /usr/local/libexec
 install -d -m 0755 /etc/ec-deployment-attestation
