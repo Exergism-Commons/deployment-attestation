@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre11"
+AGENT_VERSION="0.1.0-pre12"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -465,11 +465,15 @@ run_smoke() {
   # ExitType=cgroup keeps the transient unit alive until every descendant in
   # the smoke cgroup exits. RuntimeMaxSec fails closed and KillMode=control-group
   # contains daemonizing/new-session descendants within the reviewed boundary.
+  # The transient smoke unit also sees both deployment artifacts read-only, so
+  # health/attestation checks cannot mutate source/runtime after journal removal.
   systemd-run --quiet --wait --collect --unit="$unit" \
     --property=Type=exec \
     --property=ExitType=cgroup \
     --property=KillMode=control-group \
     --property="RuntimeMaxSec=${EC_SMOKE_TIMEOUT}s" \
+    --property="ReadOnlyPaths=${EC_APP_DIR}" \
+    --property="ReadOnlyPaths=${EC_APP_BIN}" \
     --setenv="EC_PUBLIC_URL=${EC_PUBLIC_URL}" \
     --setenv="EC_LOCAL_URL=${EC_LOCAL_URL}" \
     "$EC_SMOKE_SCRIPT" || rc=$?
