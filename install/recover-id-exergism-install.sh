@@ -247,13 +247,20 @@ expected_timer_active() {
 
 restore_rc=0
 
+quiesce_unit() {
+  local unit="$1"
+  systemctl stop "$unit" >/dev/null 2>&1 || {
+    systemctl is-active --quiet "$unit" && return 1 || return 0
+  }
+  systemctl is-active --quiet "$unit" && return 1 || return 0
+}
+
 # Nothing that can execute or mutate the generation may remain live while old
-# bytes and systemd policy are being restored.
-systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
-systemctl stop "$AGENT_RUN_UNIT" >/dev/null 2>&1 || restore_rc=1
-systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || restore_rc=1
-systemctl is-active --quiet "$AGENT_RUN_UNIT" && restore_rc=1 || true
-systemctl is-active --quiet "$TARGET_UNIT" && restore_rc=1 || true
+# bytes and systemd policy are being restored. Missing first-install units count
+# as already quiesced rather than as rollback failures.
+quiesce_unit "$TIMER_UNIT" || restore_rc=1
+quiesce_unit "$AGENT_RUN_UNIT" || restore_rc=1
+quiesce_unit "$TARGET_UNIT" || restore_rc=1
 
 systemctl disable "$TIMER_UNIT" >/dev/null 2>&1 || {
   [[ "$(enabled_state)" == "disabled" || "$(enabled_state)" == "not-found" ]] || restore_rc=1
@@ -324,5 +331,16 @@ fi
 rm -rf "$INSTALL_RECOVERED_DIR"
 mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
+
+# If systemd pulled recovery in for the updater service after an interrupted
+# same-boot install, restore the previously-running resolver asynchronously.
+# The updater's After=id-exergism.service edge then orders it behind that job.
+if [[ "$MODE" == "boot" && "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
+  systemctl --no-block start "$TARGET_UNIT" >/dev/null 2>&1 || {
+    echo "CRITICAL: failed to queue previously active resolver after recovery." >&2
+    exit 1
+  }
+fi
+
 rm -rf "$INSTALL_RECOVERED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
