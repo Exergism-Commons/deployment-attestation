@@ -98,7 +98,9 @@ jobs:
           grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
+          grep -Fq 'ACTION="${1:-run}"' agent/ec-deployment-agent.sh
           grep -Fq 'recover)' agent/ec-deployment-agent.sh
+          grep -Fq 'Cannot coordinate recovery while another agent invocation holds the lock' agent/ec-deployment-agent.sh
           grep -Fq 'Installer coordination path: reconcile only an already-journaled' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
@@ -118,6 +120,7 @@ jobs:
           grep -Fq 'Deployment updater transaction could not be recovered' install/install-id-exergism.sh
           grep -Fq 'pretransaction_journal_published=0' install/install-id-exergism.sh
           grep -Fq 'restore_pretransaction_timer_on_exit()' install/install-id-exergism.sh
+          grep -Fq 'trap restore_pretransaction_timer_on_exit EXIT' install/install-id-exergism.sh
           grep -Fq 'Refusing to capture installer baseline' install/install-id-exergism.sh
           grep -Fq 'ActiveState' install/install-id-exergism.sh
           grep -Fq 'MainPID' install/install-id-exergism.sh
@@ -218,9 +221,10 @@ jobs:
           assert agent.index('recover)') < agent.index('run|update)')
 
           updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover')
+          pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
           target_baseline = text.index('target_was_active="$(capture_active_baseline "$TARGET_UNIT")"')
           journal_publish = text.index('create_install_transaction')
-          assert updater_recover < target_baseline < journal_publish
+          assert updater_recover < pretxn_guard < target_baseline < journal_publish
 
           select_recovered = recovery.index('TXN_PHASE="recovered"')
           phase_to_recovering = recovery.index('mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
