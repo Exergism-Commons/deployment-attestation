@@ -366,6 +366,22 @@ if [[ -r "$ENV_FILE" ]]; then
   }
 fi
 stop_and_wait_quiescent "$AGENT_RUN_UNIT"
+
+pretransaction_journal_published=0
+restore_pretransaction_timer_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$pretransaction_journal_published" == 0 ]]; then
+    if [[ "$timer_was_active" == 1 ]]; then
+      systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || rc=1
+    else
+      stop_and_wait_quiescent "$TIMER_UNIT" || rc=1
+    fi
+  fi
+  exit "$rc"
+}
+trap restore_pretransaction_timer_on_exit EXIT
+
 target_was_active="$(capture_active_baseline "$TARGET_UNIT")"
 
 artifact_path() {
@@ -468,21 +484,6 @@ rollback_install_on_exit() {
   fi
   exit "$rc"
 }
-
-pretransaction_journal_published=0
-restore_pretransaction_timer_on_exit() {
-  local rc=$?
-  trap - EXIT
-  if [[ "$pretransaction_journal_published" == 0 ]]; then
-    if [[ "$timer_was_active" == 1 ]]; then
-      systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || rc=1
-    else
-      stop_and_wait_quiescent "$TIMER_UNIT" || rc=1
-    fi
-  fi
-  exit "$rc"
-}
-trap restore_pretransaction_timer_on_exit EXIT
 
 create_install_transaction
 pretransaction_journal_published=1
