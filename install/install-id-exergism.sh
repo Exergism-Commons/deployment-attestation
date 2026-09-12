@@ -367,32 +367,15 @@ capture_active_baseline() {
 # Capture timer state before quiescing it, but never measure the resolver while
 # a deployment updater may have temporarily stopped it.
 timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"
-stop_and_wait_quiescent "$TIMER_UNIT"
-stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 
-# With the systemd updater quiesced, acquire the cross-process agent lock. A
-# direct/manual agent that is not represented by the unit now makes installation
-# fail closed instead of racing baseline capture or later rollback.
-exec 8>"$AGENT_COORDINATION_LOCK"
-flock -n 8 || {
-  echo "A direct deployment agent invocation is still running; leaving updater/timer quiesced." >&2
-  exit 1
-}
-
-# Reconcile the updater's own durable transaction before measuring target state.
-if [[ -r "$ENV_FILE" ]]; then
-  EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover || {
-    echo "Deployment updater transaction could not be recovered; leaving updater/timer quiesced." >&2
-    exit 1
-  }
-fi
-stop_and_wait_quiescent "$AGENT_RUN_UNIT"
-
+# Arm restoration before the first stop. Failures before a durable installer
+# journal exists must not silently leave a previously-active timer disabled.
 pretransaction_journal_published=0
+pretransaction_restore_timer=1
 restore_pretransaction_timer_on_exit() {
   local rc=$?
   trap - EXIT
-  if [[ "$pretransaction_journal_published" == 0 ]]; then
+  if [[ "$pretransaction_journal_published" == 0 && "$pretransaction_restore_timer" == 1 ]]; then
     if [[ "$timer_was_active" == 1 ]]; then
       systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || rc=1
     else
@@ -402,6 +385,37 @@ restore_pretransaction_timer_on_exit() {
   exit "$rc"
 }
 trap restore_pretransaction_timer_on_exit EXIT
+
+stop_and_wait_quiescent "$TIMER_UNIT"
+if ! stop_and_wait_quiescent "$AGENT_RUN_UNIT"; then
+  pretransaction_restore_timer=0
+  echo "Updater could not be quiesced; leaving timer stopped for safety." >&2
+  exit 1
+fi
+
+# With the systemd updater quiesced, acquire the cross-process agent lock. A
+# direct/manual agent that is not represented by the unit now makes installation
+# fail closed instead of racing baseline capture or later rollback.
+exec 8>"$AGENT_COORDINATION_LOCK"
+if ! flock -n 8; then
+  pretransaction_restore_timer=0
+  echo "A direct deployment agent invocation is still running; leaving updater/timer quiesced." >&2
+  exit 1
+fi
+
+# Reconcile the updater's own durable transaction before measuring target state.
+if [[ -r "$ENV_FILE" ]]; then
+  if ! EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover; then
+    pretransaction_restore_timer=0
+    echo "Deployment updater transaction could not be recovered; leaving updater/timer quiesced." >&2
+    exit 1
+  fi
+fi
+if ! stop_and_wait_quiescent "$AGENT_RUN_UNIT"; then
+  pretransaction_restore_timer=0
+  echo "Updater did not remain quiescent after transaction recovery; leaving timer stopped." >&2
+  exit 1
+fi
 
 target_was_active="$(capture_active_baseline "$TARGET_UNIT")"
 
