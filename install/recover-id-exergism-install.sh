@@ -271,10 +271,18 @@ PY
 unit_is_quiescent() {
   local unit="$1" load active main_pid
   load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
-  [[ "$load" == "not-found" || -z "$load" ]] && return 0
+  [[ "$load" == "not-found" ]] && return 0
+  [[ -n "$load" ]] || {
+    echo "Could not determine LoadState for $unit" >&2
+    return 1
+  }
 
   active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
   main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null || true)"
+  [[ -n "$active" && -n "$main_pid" ]] || {
+    echo "Could not determine runtime state for $unit" >&2
+    return 1
+  }
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
   [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1
   unit_has_processes "$unit" && return 1
@@ -364,14 +372,13 @@ if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
     # Direct installer recovery is not executing as the target's prerequisite,
     # so restore the previously-active production resolver synchronously before
     # returning to preflight/network work.
-    systemctl start "$TARGET_UNIT" || {
-      echo "CRITICAL: failed to restart previously active resolver after direct recovery." >&2
+    if ! systemctl start "$TARGET_UNIT" \
+       || ! systemctl is-active --quiet "$TARGET_UNIT" \
+       || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null \
+       || { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; }; then
+      systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+      echo "CRITICAL: previously active resolver could not be restored healthy after direct recovery; recovered marker retained." >&2
       exit 1
-    }
-    systemctl is-active --quiet "$TARGET_UNIT" || exit 1
-    curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || exit 1
-    if [[ -x "$SMOKE" ]]; then
-      EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || exit 1
     fi
   else
     # Dependency-triggered recovery cannot synchronously start a unit ordered
