@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre13"
+AGENT_VERSION="0.1.0-pre14"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -417,6 +417,12 @@ PY
 bootstrap_state() {
   [[ -f "$CURRENT_STATE_FILE" ]] && return 0
   local commit binary
+  # A first-run baseline is trusted only from a write-stable deployment view.
+  # If the target service is already running, require its live namespace to
+  # expose both deployment artifacts read-only before measuring either one.
+  if systemctl is-active --quiet "$EC_SERVICE_UNIT"; then
+    artifact_write_fence || die "Bootstrap refused: active service lacks the artifact write fence"
+  fi
   if [[ -r "$EC_SOURCE_REVISION_FILE" ]]; then commit="$(tr -d '\r\n' < "$EC_SOURCE_REVISION_FILE")"
   else commit="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"; fi
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "Cannot bootstrap deployment revision"
