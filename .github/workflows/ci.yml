@@ -67,7 +67,10 @@ jobs:
           grep -Fq 'add_parent_chain(dirs, p, repo)' agent/ec-deployment-agent.sh
           grep -Fq 'submodule gitfile missing during fsync' agent/ec-deployment-agent.sh
           grep -Fq 'artifact_write_fence' agent/ec-deployment-agent.sh
-          grep -Fq 'Bootstrap refused: active service lacks the artifact write fence' agent/ec-deployment-agent.sh
+          grep -Fq 'service_main_pid()' agent/ec-deployment-agent.sh
+          grep -Fq 'Bootstrap refused: live service process lacks the artifact write fence' agent/ec-deployment-agent.sh
+          grep -Fq 'Bootstrap refused: semantic smoke check failed' agent/ec-deployment-agent.sh
+          grep -Fq 'Bootstrap refused: target service is in transitional state' agent/ec-deployment-agent.sh
           grep -Fq 'nsenter --target "$pid" --mount -- findmnt -T "$path"' agent/ec-deployment-agent.sh
           grep -Fq 'artifact_fence' agent/ec-deployment-agent.sh
           grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh
@@ -82,7 +85,7 @@ jobs:
           grep -Fq -- '--property=NoNewPrivileges=yes' agent/ec-deployment-agent.sh
           grep -Fq -- '--property=ProtectSystem=strict' agent/ec-deployment-agent.sh
           grep -Fq -- '--property=ProtectControlGroups=yes' agent/ec-deployment-agent.sh
-          grep -Fq 'AGENT_VERSION="0.1.0-pre14"' agent/ec-deployment-agent.sh
+          grep -Fq 'AGENT_VERSION="0.1.0-pre15"' agent/ec-deployment-agent.sh
           grep -Fq '"phase":"activating"' agent/ec-deployment-agent.sh
           grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
           grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
