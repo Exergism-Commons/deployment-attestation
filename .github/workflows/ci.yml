@@ -105,6 +105,9 @@ jobs:
           grep -Fq 'ACTION="${1:-run}"' agent/ec-deployment-agent.sh
           grep -Fq 'recover)' agent/ec-deployment-agent.sh
           grep -Fq 'AGENT_COORDINATION_LOCK=' agent/ec-deployment-agent.sh
+          grep -Fq 'INSTALL_TRANSACTION_ROOT=' agent/ec-deployment-agent.sh
+          grep -Fq 'for phase in pending validated recovering recovered' agent/ec-deployment-agent.sh
+          grep -Fq "Installer transaction phase '" agent/ec-deployment-agent.sh
           grep -Fq 'EC_AGENT_COORDINATION_LOCK_HELD' agent/ec-deployment-agent.sh
           grep -Fq 'Cannot coordinate recovery while another agent invocation holds the lock' agent/ec-deployment-agent.sh
           grep -Fq 'Installer coordination path: reconcile only an already-journaled' agent/ec-deployment-agent.sh
@@ -236,6 +239,11 @@ jobs:
 
           agent = Path('agent/ec-deployment-agent.sh').read_text()
           assert agent.index('recover)') < agent.index('run|update)')
+          global_lock = agent.index('if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]] && ! flock -n 8; then')
+          state_lock = agent.index('if ! flock -n 9; then')
+          installer_phase_guard = agent.index('for phase in pending validated recovering recovered; do')
+          dispatch = agent.index('case "$ACTION" in')
+          assert global_lock < state_lock < installer_phase_guard < dispatch
           stop_helper = agent.index('stop_service_quiescent()')
           rollback_call = agent.index('stop_service_quiescent || return 1', stop_helper)
           rollback_switch = agent.index('switch_source "$commit" 0 || return 1')
