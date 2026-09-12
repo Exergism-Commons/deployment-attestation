@@ -104,6 +104,9 @@ jobs:
           grep -Fq 'Publish the complete recovery core durably *before* exposing any' install/install-id-exergism.sh
           grep -Fq 'Only now expose resolver/updater dependencies' install/install-id-exergism.sh
           grep -Fq 'unit_is_quiescent()' install/install-id-exergism.sh
+          grep -Fq 'Could not determine LoadState for $unit' install/install-id-exergism.sh
+          grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
+          grep -Fq 'Refusing to capture installer baseline' install/install-id-exergism.sh
           grep -Fq 'ActiveState' install/install-id-exergism.sh
           grep -Fq 'MainPID' install/install-id-exergism.sh
           grep -Fq 'ControlGroup' install/install-id-exergism.sh
@@ -146,6 +149,8 @@ jobs:
           grep -Fq 'RECOVERY_MODE="boot"' install/recover-id-exergism-install.sh
           grep -Fq 'restore_artifact "$key"' install/recover-id-exergism-install.sh
           grep -Fq 'unit_is_quiescent()' install/recover-id-exergism-install.sh
+          grep -Fq 'Could not determine LoadState for $unit' install/recover-id-exergism-install.sh
+          grep -Fq 'recovered marker retained' install/recover-id-exergism-install.sh
           grep -Fq 'ActiveState' install/recover-id-exergism-install.sh
           grep -Fq 'MainPID' install/recover-id-exergism-install.sh
           grep -Fq 'ControlGroup' install/recover-id-exergism-install.sh
