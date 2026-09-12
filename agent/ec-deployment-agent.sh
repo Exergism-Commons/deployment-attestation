@@ -33,6 +33,7 @@ EC_SMOKE_TIMEOUT="${EC_SMOKE_TIMEOUT:-60}"
 [[ "$EC_SMOKE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "EC_SMOKE_TIMEOUT must be a positive integer number of seconds"
 EC_STATE_DIR="${EC_STATE_DIR:-/var/lib/ec-deployment-attestation/${EC_SERVICE}}"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${EC_SERVICE//[^A-Za-z0-9_.-]/-}.agent.lock"
+INSTALL_TRANSACTION_ROOT="/var/lib/ec-deployment-attestation/install"
 EC_CHECK_PUBLIC="${EC_CHECK_PUBLIC:-1}"
 
 CURRENT_STATE_FILE="$EC_STATE_DIR/current-state.json"
@@ -94,6 +95,16 @@ if ! flock -n 9; then
   log "Another agent invocation holds the lock"
   exit 0
 fi
+
+# The systemd recovery dependency protects unit-started agents, but direct CLI
+# invocations can bypass that dependency. Durable installer phases therefore
+# remain an independent fail-closed admission gate after all volatile locks are
+# acquired.
+for phase in pending validated recovering recovered; do
+  if [[ -d "${INSTALL_TRANSACTION_ROOT}/${EC_SERVICE}.${phase}" ]]; then
+    die "Installer transaction phase '${phase}' is still actionable; run installer recovery before deployment-agent work"
+  fi
+done
 
 arch() {
   local value
