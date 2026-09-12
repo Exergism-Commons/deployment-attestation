@@ -9,19 +9,87 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE="id.exergism.org"
 TARGET_UNIT="id-exergism.service"
+TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
+RECOVERY_UNIT="id-exergism-install-recovery.service"
 FENCE_DROPIN_DIR="/etc/systemd/system/${TARGET_UNIT}.d"
 FENCE_DROPIN="${FENCE_DROPIN_DIR}/90-ec-deployment-attestation-artifact-fence.conf"
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
+SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
+RECOVERY_HELPER="/usr/local/libexec/ec-deployment-install-recovery"
+INSTALL_STATE_ROOT="/var/lib/ec-deployment-attestation/install"
+INSTALL_TXN_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
 
-# Keep this in sync with the commands required by the installed agent and the
-# id-specific semantic smoke check. A successful installation must never leave
-# a timer that can only fail at runtime because a dependency is absent.
-for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp; do
+# Keep this in sync with the commands required by the installed agent, recovery
+# helper and id-specific semantic smoke check. Fail before mutating the host.
+for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
   }
 done
+
+jq --version >/dev/null
+git --version >/dev/null
+sha256sum --version >/dev/null
+flock --version >/dev/null
+grep --version >/dev/null
+systemd-run --version >/dev/null
+
+# Query the running manager through systemctl. The systemd-run client package
+# can be newer than PID 1 after an upgrade, so its package version is not a safe
+# feature gate for ExitType=cgroup.
+manager_version="$(systemctl show --property=Version --value 2>/dev/null || true)"
+systemd_version="$(printf '%s\n' "$manager_version" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
+if [[ ! "$systemd_version" =~ ^[0-9]+$ ]] || (( systemd_version < 250 )); then
+  echo "Running systemd manager >= 250 is required for ExitType=cgroup smoke containment (found: ${manager_version:-unknown})." >&2
+  exit 1
+fi
+findmnt --version >/dev/null
+nsenter --version >/dev/null
+
+install -d -m 0755 /usr/local/libexec
+install -d -m 0755 /etc/ec-deployment-attestation
+install -d -m 0700 /etc/ec-deployment-attestation/secrets
+install -d -o root -g root -m 0700 /var/lib/ec-deployment-attestation
+install -d -o root -g root -m 0700 "$INSTALL_STATE_ROOT"
+
+# Install and enable crash recovery before any fence mutation can happen.
+# A pending durable journal is recovered on the next installer invocation and,
+# independently, at boot before the resolver or updater timer can start.
+install -o root -g root -m 0755 "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER"
+install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery.service" \
+  "/etc/systemd/system/${RECOVERY_UNIT}"
+systemctl daemon-reload
+systemctl enable "$RECOVERY_UNIT" >/dev/null
+
+# Make the boot recovery path itself durable before a transaction may be
+# published. This covers the helper, unit file, enablement symlink and parents.
+python3 - "$RECOVERY_HELPER" "/etc/systemd/system/${RECOVERY_UNIT}" \
+  /usr/local/libexec /etc/systemd/system /etc/systemd/system/multi-user.target.wants <<'PY'
+import os
+import pathlib
+import sys
+
+for raw in sys.argv[1:]:
+    p = pathlib.Path(raw)
+    if p.exists() and p.is_file() and not p.is_symlink():
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    if p.exists() and p.is_dir():
+        fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+PY
+
+if [[ -d "$INSTALL_TXN_DIR" ]]; then
+  echo "Recovering interrupted Deployment Attestation installation before continuing." >&2
+  "$RECOVERY_HELPER" normal
+fi
 
 # The updater is unsafe to enable against the legacy rolling release contract.
 # Refuse installation until id/runtime-main publishes the atomic manifest that
@@ -48,99 +116,137 @@ PY
 rm -f "$tmp_manifest"
 trap - EXIT
 
-jq --version >/dev/null
-git --version >/dev/null
-sha256sum --version >/dev/null
-flock --version >/dev/null
-grep --version >/dev/null
-systemd-run --version >/dev/null
-# Query the running manager through systemctl. The systemd-run client package
-# can be newer than PID 1 after an upgrade, so its package version is not a
-# safe feature gate for ExitType=cgroup.
-manager_version="$(systemctl show --property=Version --value 2>/dev/null || true)"
-systemd_version="$(printf '%s\n' "$manager_version" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
-if [[ ! "$systemd_version" =~ ^[0-9]+$ ]] || (( systemd_version < 250 )); then
-  echo "Running systemd manager >= 250 is required for ExitType=cgroup smoke containment (found: ${manager_version:-unknown})." >&2
-  exit 1
-fi
-findmnt --version >/dev/null
-nsenter --version >/dev/null
-
-install -d -m 0755 /usr/local/libexec
-install -d -m 0755 /etc/ec-deployment-attestation
-install -d -m 0700 /etc/ec-deployment-attestation/secrets
-
 install -o root -g root -m 0755 "$ROOT/agent/ec-deployment-agent.sh" \
   /usr/local/libexec/ec-deployment-agent
-install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" \
-  /usr/local/libexec/id.exergism.org-smoke.sh
+install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" \
   /etc/systemd/system/ec-deployment-attestation@.service
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" \
   /etc/systemd/system/ec-deployment-attestation@.timer
-
 install -d -o root -g root -m 0755 "$FENCE_DROPIN_DIR"
+systemctl daemon-reload
 
-fence_backup_dir="$(mktemp -d)"
-fence_backup="${fence_backup_dir}/fence"
-had_fence_dropin=0
-# -e is false for a dangling symlink, so test -L as well. cp -a preserves the
-# prior object type, symlink target, ownership, mode and timestamps.
-if [[ -e "$FENCE_DROPIN" || -L "$FENCE_DROPIN" ]]; then
-  cp -a -- "$FENCE_DROPIN" "$fence_backup"
-  had_fence_dropin=1
-fi
+create_install_transaction() {
+  local stage had_fence_dropin=0 timer_was_enabled=0 timer_was_active=0
 
-restore_previous_fence() {
-  local restore_rc=0
-  rm -f "$FENCE_DROPIN" || restore_rc=1
-  if [[ "$had_fence_dropin" == 1 ]]; then
-    cp -a -- "$fence_backup" "$FENCE_DROPIN" || restore_rc=1
-  fi
-  systemctl daemon-reload || restore_rc=1
-  systemctl restart "$TARGET_UNIT" || restore_rc=1
-  systemctl is-active --quiet "$TARGET_UNIT" || restore_rc=1
-  curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || restore_rc=1
-  if (( restore_rc != 0 )); then
-    echo "CRITICAL: failed to restore the previous target-service configuration after fence installation failure." >&2
+  [[ ! -e "$INSTALL_TXN_DIR" ]] || {
+    echo "Refusing to overwrite an existing installer recovery journal: $INSTALL_TXN_DIR" >&2
     return 1
+  }
+
+  if [[ -e "$FENCE_DROPIN" || -L "$FENCE_DROPIN" ]]; then
+    had_fence_dropin=1
   fi
+  if systemctl is-enabled --quiet "$TIMER_UNIT" 2>/dev/null; then
+    timer_was_enabled=1
+  fi
+  if systemctl is-active --quiet "$TIMER_UNIT" 2>/dev/null; then
+    timer_was_active=1
+  fi
+
+  stage="$(mktemp -d "${INSTALL_STATE_ROOT}/.${SERVICE}.pending.XXXXXX")"
+  printf '%s\n' "$had_fence_dropin" > "${stage}/had_fence_dropin"
+  printf '%s\n' "$timer_was_enabled" > "${stage}/timer_was_enabled"
+  printf '%s\n' "$timer_was_active" > "${stage}/timer_was_active"
+  if [[ "$had_fence_dropin" == 1 ]]; then
+    cp -a -- "$FENCE_DROPIN" "${stage}/fence.backup"
+  fi
+
+  # Fsync every regular journal payload plus the staging directory before the
+  # atomic rename publishes the rollback marker.
+  python3 - "$stage" <<'PY'
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for p in root.iterdir():
+    if p.is_file() and not p.is_symlink():
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+
+  mv "$stage" "$INSTALL_TXN_DIR"
+  python3 - "$INSTALL_STATE_ROOT" <<'PY'
+import os
+import sys
+
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
 }
 
-fence_mutated=0
+commit_install_transaction() {
+  rm -rf "$INSTALL_TXN_DIR"
+  python3 - "$INSTALL_STATE_ROOT" <<'PY'
+import os
+import sys
+
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
 install_complete=0
-rollback_fence_on_exit() {
+rollback_install_on_exit() {
   local rc=$?
   trap - EXIT
-  if [[ "$fence_mutated" == 1 && "$install_complete" == 0 ]]; then
-    echo "Installation failed after artifact fence mutation; restoring previous configuration." >&2
-    restore_previous_fence || rc=1
+  if [[ "$install_complete" == 0 && -d "$INSTALL_TXN_DIR" ]]; then
+    echo "Installation failed after transactional mutation; restoring durable previous state." >&2
+    "$RECOVERY_HELPER" normal || rc=1
   fi
-  rm -rf "$fence_backup_dir"
   exit "$rc"
 }
-trap rollback_fence_on_exit EXIT
 
-# Arm rollback before the first command that can alter the drop-in.
-fence_mutated=1
+create_install_transaction
+trap rollback_install_on_exit EXIT
+
+# The durable journal is now the commit predecessor. From this point onward,
+# SIGKILL/reboot is recovered by the boot unit; ordinary failures use the EXIT
+# handler above.
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-artifact-fence.conf" "$FENCE_DROPIN"
 
 if [[ ! -e "/etc/ec-deployment-attestation/${SERVICE}.env" ]]; then
-  install -o root -g root -m 0640 "$ROOT/examples/id.exergism.org.env.example" "/etc/ec-deployment-attestation/${SERVICE}.env"
+  install -o root -g root -m 0640 "$ROOT/examples/id.exergism.org.env.example" \
+    "/etc/ec-deployment-attestation/${SERVICE}.env"
 fi
 
 systemctl daemon-reload
-# Any failure from the first fence mutation through timer activation is covered
-# by the EXIT rollback guard.
 systemctl restart "$TARGET_UNIT"
 systemctl is-active --quiet "$TARGET_UNIT"
 curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
 
-systemctl enable --now "ec-deployment-attestation@${SERVICE}.timer"
+# The agent treats this semantic smoke as mandatory, so the installer must not
+# commit a fence that passes only the root endpoint.
+EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
 
+# Preserve the pre-install timer state in the journal until *both* enablement and
+# activation succeed. If --now partially succeeds, rollback disables/stops it
+# and restores the exact prior enabled/active booleans.
+systemctl enable --now "$TIMER_UNIT"
+systemctl is-enabled --quiet "$TIMER_UNIT"
+systemctl is-active --quiet "$TIMER_UNIT"
+
+# Removing the durable journal is the installation commit point. A crash before
+# this removal rolls back on boot; a crash after it leaves a fully validated
+# fence and active updater.
+commit_install_transaction
 install_complete=1
 trap - EXIT
-rm -rf "$fence_backup_dir"
 
 printf '\nInstalled Deployment Attestation agent for %s.\n' "$SERVICE"
 printf 'Config: /etc/ec-deployment-attestation/%s.env\n' "$SERVICE"
