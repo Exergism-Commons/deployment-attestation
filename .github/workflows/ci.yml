@@ -18,6 +18,7 @@ jobs:
           bash -n agent/ec-deployment-agent.sh
           bash -n examples/id.exergism.org-smoke.sh
           bash -n install/install-id-exergism.sh
+          bash -n install/recover-id-exergism-install.sh
 
       - name: Validate JSON schema documents
         run: |
@@ -98,20 +99,30 @@ jobs:
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
-          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp' install/install-id-exergism.sh
+          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat' install/install-id-exergism.sh
           grep -Fq 'systemd-run --version' install/install-id-exergism.sh
           grep -Fq 'systemctl show --property=Version --value' install/install-id-exergism.sh
           grep -Fq 'systemd_version < 250' install/install-id-exergism.sh
-          grep -Fq 'restore_previous_fence()' install/install-id-exergism.sh
-          grep -Fq 'rollback_fence_on_exit()' install/install-id-exergism.sh
-          grep -Fq 'trap rollback_fence_on_exit EXIT' install/install-id-exergism.sh
-          grep -Fq '[[ -e "$FENCE_DROPIN" || -L "$FENCE_DROPIN" ]]' install/install-id-exergism.sh
-          grep -Fq 'cp -a -- "$FENCE_DROPIN" "$fence_backup"' install/install-id-exergism.sh
-          grep -Fq 'cp -a -- "$fence_backup" "$FENCE_DROPIN"' install/install-id-exergism.sh
-          grep -Fq 'restoring previous configuration' install/install-id-exergism.sh
-          grep -Fq 'failed to restore the previous target-service configuration' install/install-id-exergism.sh
+          grep -Fq 'INSTALL_TXN_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"' install/install-id-exergism.sh
+          grep -Fq 'create_install_transaction()' install/install-id-exergism.sh
+          grep -Fq 'commit_install_transaction()' install/install-id-exergism.sh
+          grep -Fq 'rollback_install_on_exit()' install/install-id-exergism.sh
+          grep -Fq 'trap rollback_install_on_exit EXIT' install/install-id-exergism.sh
+          grep -Fq '"$RECOVERY_HELPER" normal' install/install-id-exergism.sh
+          grep -Fq 'EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"' install/install-id-exergism.sh
+          grep -Fq 'systemctl enable --now "$TIMER_UNIT"' install/install-id-exergism.sh
+          grep -Fq 'timer_was_enabled' install/install-id-exergism.sh
+          grep -Fq 'timer_was_active' install/install-id-exergism.sh
+          grep -Fq 'fsync(fd)' install/install-id-exergism.sh
           grep -Fq 'findmnt --version' install/install-id-exergism.sh
           grep -Fq 'nsenter --version' install/install-id-exergism.sh
+          grep -Fq 'ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.pending' packaging/id-exergism-install-recovery.service
+          grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.timer' packaging/id-exergism-install-recovery.service
+          grep -Fq 'ExecStart=/usr/local/libexec/ec-deployment-install-recovery boot' packaging/id-exergism-install-recovery.service
+          grep -Fq 'cp -a -- "$FENCE_BACKUP" "$FENCE_DROPIN"' install/recover-id-exergism-install.sh
+          grep -Fq 'systemctl disable "$TIMER_UNIT"' install/recover-id-exergism-install.sh
+          grep -Fq 'systemctl --no-block start "$TIMER_UNIT"' install/recover-id-exergism-install.sh
+          grep -Fq 'durable_remove_journal' install/recover-id-exergism-install.sh
           grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
           grep -Fq 'ReadOnlyPaths=/usr/local/bin/idresolver' packaging/id-exergism-artifact-fence.conf
           grep -Fq '90-ec-deployment-attestation-artifact-fence.conf' install/install-id-exergism.sh
