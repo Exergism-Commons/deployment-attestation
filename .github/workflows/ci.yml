@@ -101,6 +101,13 @@ jobs:
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
           grep -Fq 'systemd-analyze' install/install-id-exergism.sh
+          grep -Fq 'Publish the complete recovery core durably *before* exposing any' install/install-id-exergism.sh
+          grep -Fq 'Only now expose resolver/updater dependencies' install/install-id-exergism.sh
+          grep -Fq 'unit_is_quiescent()' install/install-id-exergism.sh
+          grep -Fq 'ActiveState' install/install-id-exergism.sh
+          grep -Fq 'MainPID' install/install-id-exergism.sh
+          grep -Fq 'ControlGroup' install/install-id-exergism.sh
+          grep -Fq 'stop_and_wait_quiescent "$AGENT_RUN_UNIT"' install/install-id-exergism.sh
           grep -Fq 'flock -n 9' install/install-id-exergism.sh
           grep -Fq 'INSTALL_PENDING_DIR=' install/install-id-exergism.sh
           grep -Fq 'INSTALL_VALIDATED_DIR=' install/install-id-exergism.sh
@@ -111,11 +118,8 @@ jobs:
           grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
           grep -Fq 'INSTALL_COMMITTED_DIR=' install/install-id-exergism.sh
           grep -Fq 'mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
-          grep -Fq '! systemctl is-active --quiet "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
-          grep -Fq 'systemctl stop "$AGENT_RUN_UNIT"' install/install-id-exergism.sh
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
-          grep -Fq '! systemctl is-active --quiet "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
           grep -Fq 'Recovery retained a blocking journal' install/install-id-exergism.sh
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
@@ -140,13 +144,17 @@ jobs:
           grep -Fq 'origin_boot_id=' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="normal"' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="boot"' install/recover-id-exergism-install.sh
-          grep -Fq 'systemctl stop "$AGENT_RUN_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'restore_artifact "$key"' install/recover-id-exergism-install.sh
+          grep -Fq 'unit_is_quiescent()' install/recover-id-exergism-install.sh
+          grep -Fq 'ActiveState' install/recover-id-exergism-install.sh
+          grep -Fq 'MainPID' install/recover-id-exergism-install.sh
+          grep -Fq 'ControlGroup' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_unit()' install/recover-id-exergism-install.sh
-          grep -Fq 'Missing first-install units count' install/recover-id-exergism-install.sh
+          grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
+          grep -Fq 'failed to restart previously active resolver after direct recovery' install/recover-id-exergism-install.sh
+          grep -Fq 'Restore timer activation only after the old generation is fully restored' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Timer enablement restore mismatch' install/recover-id-exergism-install.sh
-          grep -Fq 'Timer active-state restore mismatch' install/recover-id-exergism-install.sh
           grep -Fq '"$VALIDATOR" || restore_rc=1' install/recover-id-exergism-install.sh
           grep -Fq 'services remain quiesced and recovery journal is retained' install/recover-id-exergism-install.sh
           grep -Fq 'mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
@@ -157,6 +165,27 @@ jobs:
           grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
           grep -Fq 'ReadOnlyPaths=/usr/local/bin/idresolver' packaging/id-exergism-artifact-fence.conf
           grep -Fq '90-ec-deployment-attestation-artifact-fence.conf' install/install-id-exergism.sh
+
+      - name: Validate recovery publication ordering
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          text = Path('install/install-id-exergism.sh').read_text()
+          recovery_unit = text.index('install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery.service"')
+          core_barrier = text.index('# The enablement link is part of the recovery core')
+          target_interlock = text.index('install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf"')
+          agent_interlock = text.index('install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf"')
+          assert recovery_unit < core_barrier < target_interlock
+          assert recovery_unit < core_barrier < agent_interlock
+
+          recovery = Path('install/recover-id-exergism-install.sh').read_text()
+          validate = recovery.index('"$VALIDATOR" || restore_rc=1')
+          retire = recovery.index('mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
+          direct_restart = recovery.index('failed to restart previously active resolver after direct recovery')
+          timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
+          assert validate < retire < direct_restart < timer_restore
+          PY
 
       - name: Reject obvious committed secrets
         run: |
