@@ -876,10 +876,22 @@ update_release() {
   attest || true
 }
 
-bootstrap_state
-recover_transaction
 case "${1:-run}" in
-  run|update) update_release ;;
-  attest|health) attest ;;
-  *) die "Usage: $0 [run|update|attest|health]" ;;
+  recover)
+    # Installer coordination path: reconcile only an already-journaled
+    # deployment transaction. Do not bootstrap or contact release/attestation
+    # endpoints, so the installer can establish a stable baseline first.
+    recover_transaction
+    ;;
+  run|update)
+    bootstrap_state
+    recover_transaction
+    update_release
+    ;;
+  attest|health)
+    bootstrap_state
+    recover_transaction
+    attest
+    ;;
+  *) die "Usage: $0 [run|update|attest|health|recover]" ;;
 esac
