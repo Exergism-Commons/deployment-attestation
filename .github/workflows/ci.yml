@@ -143,6 +143,9 @@ jobs:
           grep -Fq 'systemctl --runtime enable "$TIMER_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/recover-id-exergism-install.sh
           grep -Fq 'restore_artifact "$key"' install/recover-id-exergism-install.sh
+          grep -Fq 'if ! systemctl stop "$TARGET_UNIT"; then' install/recover-id-exergism-install.sh
+          grep -Fq 'target remains stopped and journal is retained' install/recover-id-exergism-install.sh
+          grep -Fq 'restored target generation failed health validation; target left stopped' install/recover-id-exergism-install.sh
           grep -Fq 'persist_restored_generation' install/recover-id-exergism-install.sh
           grep -Fq 'durable_remove_journal' install/recover-id-exergism-install.sh
           grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
