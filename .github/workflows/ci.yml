@@ -106,6 +106,7 @@ jobs:
           grep -Fq 'INSTALL_TXN_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"' install/install-id-exergism.sh
           grep -Fq 'create_install_transaction()' install/install-id-exergism.sh
           grep -Fq 'commit_install_transaction()' install/install-id-exergism.sh
+          grep -Fq 'local committed="${INSTALL_TXN_DIR}.committed"' install/install-id-exergism.sh
           grep -Fq 'rollback_install_on_exit()' install/install-id-exergism.sh
           grep -Fq 'trap rollback_install_on_exit EXIT' install/install-id-exergism.sh
           grep -Fq '"$RECOVERY_HELPER" normal' install/install-id-exergism.sh
@@ -123,6 +124,7 @@ jobs:
           grep -Fq 'systemctl disable "$TIMER_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$TIMER_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'durable_remove_journal' install/recover-id-exergism-install.sh
+          grep -Fq 'local recovered="${INSTALL_TXN_DIR}.recovered"' install/recover-id-exergism-install.sh
           grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
           grep -Fq 'ReadOnlyPaths=/usr/local/bin/idresolver' packaging/id-exergism-artifact-fence.conf
           grep -Fq '90-ec-deployment-attestation-artifact-fence.conf' install/install-id-exergism.sh
