@@ -616,7 +616,65 @@ artifact_write_fence() {
   local pid pid_after
   pid="$(service_main_pid)" || return 1
 
-  [[ "$EC_APP_DIR" == /* && "$EC_APP_DIR" != *
+  # Audit the service's complete mount topology, not only the mount that covers
+  # each root path. Writable ReadWritePaths/bind mounts nested below APP_DIR
+  # violate the artifact fence even when the outer source mount remains ro.
+  nsenter --target "$pid" --mount -- python3 - "$EC_APP_DIR" "$EC_APP_BIN" <<'PY' || return 1
+import os
+import re
+import sys
+
+app_dir = os.path.normpath(sys.argv[1])
+app_bin = os.path.normpath(sys.argv[2])
+if not (app_dir.startswith("/") and app_bin.startswith("/")):
+    raise SystemExit(1)
+if "\n" in app_dir or "\n" in app_bin:
+    raise SystemExit(1)
+
+_octal = re.compile(r"\\([0-7]{3})")
+def unescape(value):
+    return _octal.sub(lambda m: chr(int(m.group(1), 8)), value)
+
+mounts = []
+with open("/proc/self/mountinfo", "r", encoding="utf-8") as fh:
+    for raw in fh:
+        left, sep, _right = raw.rstrip("\n").partition(" - ")
+        if not sep:
+            raise SystemExit(1)
+        fields = left.split()
+        if len(fields) < 6:
+            raise SystemExit(1)
+        mounts.append((os.path.normpath(unescape(fields[4])), set(fields[5].split(","))))
+
+def contains(root, path):
+    try:
+        return os.path.commonpath((root, path)) == root
+    except ValueError:
+        return False
+
+def deepest(path):
+    candidates = [(target, opts) for target, opts in mounts if contains(target, path)]
+    if not candidates:
+        raise SystemExit(1)
+    return max(candidates, key=lambda item: len(item[0]))
+
+_source_target, source_opts = deepest(app_dir)
+if "ro" not in source_opts or "rw" in source_opts:
+    raise SystemExit(1)
+
+for target, opts in mounts:
+    if target == app_dir or (target != app_dir and contains(app_dir, target)):
+        if "ro" not in opts or "rw" in opts:
+            raise SystemExit(1)
+
+_binary_target, binary_opts = deepest(app_bin)
+if "ro" not in binary_opts or "rw" in binary_opts:
+    raise SystemExit(1)
+PY
+
+  pid_after="$(service_main_pid)" || return 1
+  [[ "$pid_after" == "$pid" ]] || return 1
+}
 verify_baseline() {
   local commit binary
   # If the service is active, establish the write-stable boundary before
