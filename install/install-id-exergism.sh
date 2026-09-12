@@ -300,8 +300,13 @@ rollback_install_on_exit() {
   trap - EXIT
   if [[ "$install_complete" == 0 ]] &&      [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" ]]; then
     echo "Installation failed; restoring the durable previous generation." >&2
-    EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal || rc=1
-    restore_prior_runtime_state || rc=1
+    if EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal; then
+      restore_prior_runtime_state || rc=1
+    else
+      # Recovery retained a blocking journal and deliberately left services
+      # quiesced. Never bypass that fail-closed state by starting the resolver.
+      rc=1
+    fi
   fi
   exit "$rc"
 }
