@@ -96,6 +96,8 @@ jobs:
           grep -Fq '"runtime_sha256":actual' agent/ec-deployment-agent.sh
           grep -Fq 'durable_remove "$TRANSACTION_FILE"' agent/ec-deployment-agent.sh
           grep -Fq 'verify_runtime_exact "$binary"' agent/ec-deployment-agent.sh
+          grep -Fq 'Determine service state explicitly.' agent/ec-deployment-agent.sh
+          grep -Fq 'active="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value' agent/ec-deployment-agent.sh
           grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
@@ -142,6 +144,7 @@ jobs:
           grep -Fq 'unit_is_quiescent()' install/install-id-exergism.sh
           grep -Fq 'Could not determine LoadState for $unit' install/install-id-exergism.sh
           grep -Fq 'query_timer_enablement_state()' install/install-id-exergism.sh
+          grep -Fq 'Timer did not remain provably quiescent after enablement.' install/install-id-exergism.sh
           grep -Fq 'Could not determine exact timer enablement state' install/install-id-exergism.sh
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover' install/install-id-exergism.sh
