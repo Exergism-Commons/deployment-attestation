@@ -28,6 +28,7 @@ INSTALL_STATE_ROOT="/var/lib/ec-deployment-attestation/install"
 INSTALL_TXN_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
 INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
+BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
 if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
   exec 9>"$INSTALL_LOCK"
@@ -60,6 +61,17 @@ schema_version="$(read_value schema_version)"
   echo "Unsupported installer recovery journal schema: $schema_version" >&2
   exit 1
 }
+origin_boot_id="$(read_value origin_boot_id)"
+current_boot_id="$(cat "$BOOT_ID_FILE")"
+[[ "$origin_boot_id" =~ ^[0-9a-fA-F-]{36}$ && "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+  echo "Recovery journal or kernel exposes an invalid boot ID." >&2
+  exit 1
+}
+if [[ "$origin_boot_id" == "$current_boot_id" ]]; then
+  RECOVERY_MODE="normal"
+else
+  RECOVERY_MODE="boot"
+fi
 
 timer_enablement_state="$(read_value timer_enablement_state)"
 case "$timer_enablement_state" in
@@ -197,7 +209,7 @@ done
 persist_restored_generation || restore_rc=1
 systemctl daemon-reload || restore_rc=1
 
-case "$MODE:$timer_enablement_state" in
+case "$RECOVERY_MODE:$timer_enablement_state" in
   normal:enabled)
     systemctl enable "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
     ;;
@@ -215,7 +227,7 @@ case "$MODE:$timer_enablement_state" in
     ;;
 esac
 
-if [[ "$MODE" == "normal" ]]; then
+if [[ "$RECOVERY_MODE" == "normal" ]]; then
   systemctl restart "$TARGET_UNIT" || restore_rc=1
   systemctl is-active --quiet "$TARGET_UNIT" || restore_rc=1
   curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || restore_rc=1
