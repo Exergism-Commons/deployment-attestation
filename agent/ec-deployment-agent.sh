@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre12"
+AGENT_VERSION="0.1.0-pre13"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -465,12 +465,23 @@ run_smoke() {
   # ExitType=cgroup keeps the transient unit alive until every descendant in
   # the smoke cgroup exits. RuntimeMaxSec fails closed and KillMode=control-group
   # contains daemonizing/new-session descendants within the reviewed boundary.
-  # The transient smoke unit also sees both deployment artifacts read-only, so
-  # health/attestation checks cannot mutate source/runtime after journal removal.
+  # The transient smoke unit also sees both deployment artifacts read-only and
+  # executes as a DynamicUser with no privilege escalation. It therefore cannot
+  # ask PID 1 to create/start system units that escape this cgroup/mount fence,
+  # while ordinary descendants remain contained until ExitType=cgroup completes.
   systemd-run --quiet --wait --collect --unit="$unit" \
     --property=Type=exec \
     --property=ExitType=cgroup \
     --property=KillMode=control-group \
+    --property=DynamicUser=yes \
+    --property=NoNewPrivileges=yes \
+    --property=ProtectSystem=strict \
+    --property=ProtectHome=yes \
+    --property=ProtectControlGroups=yes \
+    --property=ProtectKernelTunables=yes \
+    --property=ProtectKernelModules=yes \
+    --property=PrivateDevices=yes \
+    --property=RestrictSUIDSGID=yes \
     --property="RuntimeMaxSec=${EC_SMOKE_TIMEOUT}s" \
     --property="ReadOnlyPaths=${EC_APP_DIR}" \
     --property="ReadOnlyPaths=${EC_APP_BIN}" \
