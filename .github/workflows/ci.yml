@@ -111,6 +111,9 @@ jobs:
           grep -Fq 'rollback_install_on_exit()' install/install-id-exergism.sh
           grep -Fq 'trap rollback_install_on_exit EXIT' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
+          grep -Fq 'BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"' install/install-id-exergism.sh
+          grep -Fq 'current_boot_id="$(cat "$BOOT_ID_FILE")"' install/install-id-exergism.sh
+          grep -Fq 'origin_boot_id' install/install-id-exergism.sh
           grep -Fq 'timer_enablement_state=' install/install-id-exergism.sh
           grep -Fq 'enabled|enabled-runtime|disabled|not-found' install/install-id-exergism.sh
           grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/install-id-exergism.sh
@@ -130,6 +133,10 @@ jobs:
           grep -Fq 'EC_INSTALL_LOCK_HELD' install/recover-id-exergism-install.sh
           grep -Fq 'if ! flock -n 9; then' install/recover-id-exergism-install.sh
           grep -Fq 'if [[ "$MODE" == "boot" && -d "$INSTALL_TXN_DIR" ]]; then' install/recover-id-exergism-install.sh
+          grep -Fq 'origin_boot_id="$(read_value origin_boot_id)"' install/recover-id-exergism-install.sh
+          grep -Fq 'RECOVERY_MODE="normal"' install/recover-id-exergism-install.sh
+          grep -Fq 'RECOVERY_MODE="boot"' install/recover-id-exergism-install.sh
+          grep -Fq 'case "$RECOVERY_MODE:$timer_enablement_state" in' install/recover-id-exergism-install.sh
           grep -Fq 'timer_enablement_state' install/recover-id-exergism-install.sh
           grep -Fq 'normal:enabled-runtime' install/recover-id-exergism-install.sh
           grep -Fq 'boot:enabled-runtime' install/recover-id-exergism-install.sh
