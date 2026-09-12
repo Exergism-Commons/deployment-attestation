@@ -915,6 +915,92 @@ def git_process_references_checkout(proc, argv):
             if key.lower() == "core.worktree" and points_into_protected(value, cwd):
                 return True
 
+    # Resolve Git's effective worktree using the same repository/config
+    # selectors as the live process. This covers ordinary repository config,
+    # include/includeIf, GIT_CONFIG_PARAMETERS and config supplied through
+    # global Git options without reimplementing Git's config grammar.
+    probe_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    for key in (
+        "HOME", "XDG_CONFIG_HOME", "GIT_DIR", "GIT_WORK_TREE",
+        "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM", "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ):
+        if key in env:
+            probe_env[key] = env[key]
+    for key, value in env.items():
+        if key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"):
+            probe_env[key] = value
+
+    probe_args = ["git"]
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            break
+        if arg in ("-C", "-c", "--git-dir", "--work-tree"):
+            if i + 1 >= len(argv):
+                raise RuntimeError(f"malformed Git global selector in process {proc.name}")
+            probe_args.extend((arg, argv[i + 1]))
+            i += 2
+            continue
+        if ((arg.startswith("-C") and arg != "-C")
+                or (arg.startswith("-c") and arg != "-c")
+                or arg.startswith("--git-dir=")
+                or arg.startswith("--work-tree=")):
+            probe_args.append(arg)
+            i += 1
+            continue
+        if arg.startswith("--config-env="):
+            spec = arg.split("=", 1)[1]
+            if "=" not in spec:
+                raise RuntimeError(f"malformed --config-env in process {proc.name}")
+            _config_key, env_name = spec.split("=", 1)
+            if not env_name or env_name not in env:
+                raise RuntimeError(f"unresolvable --config-env in process {proc.name}")
+            probe_env[env_name] = env[env_name]
+            probe_args.append(arg)
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        break
+
+    try:
+        probe = subprocess.run(
+            [
+                *probe_args,
+                "-c", "safe.directory=*",
+                "rev-parse", "--path-format=absolute", "--show-toplevel",
+            ],
+            cwd=str(cwd),
+            env=probe_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"timed out resolving Git worktree for process {proc.name}") from exc
+    if probe.returncode == 0:
+        effective_worktree = probe.stdout.strip()
+        if not effective_worktree:
+            raise RuntimeError(f"Git returned an empty worktree for process {proc.name}")
+        if points_into_protected(effective_worktree, cwd):
+            return True
+    elif "GIT_CONFIG_PARAMETERS" in env:
+        # This source is intentionally left to Git to parse. If Git cannot
+        # resolve it, fail closed instead of assuming it cannot select us.
+        raise RuntimeError(f"cannot resolve GIT_CONFIG_PARAMETERS for process {proc.name}")
+
     try:
         fds = list((proc / "fd").iterdir())
     except (FileNotFoundError, ProcessLookupError):
