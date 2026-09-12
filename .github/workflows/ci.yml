@@ -19,6 +19,7 @@ jobs:
           bash -n examples/id.exergism.org-smoke.sh
           bash -n install/install-id-exergism.sh
           bash -n install/recover-id-exergism-install.sh
+          bash -n install/validate-id-exergism-generation.sh
 
       - name: Validate JSON schema documents
         run: |
@@ -99,55 +100,53 @@ jobs:
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
-          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat readlink' install/install-id-exergism.sh
-          grep -Fq 'systemctl show --property=Version --value' install/install-id-exergism.sh
-          grep -Fq 'systemd_version < 250' install/install-id-exergism.sh
-          grep -Fq 'INSTALL_TXN_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"' install/install-id-exergism.sh
+          grep -Fq 'systemd-analyze' install/install-id-exergism.sh
           grep -Fq 'flock -n 9' install/install-id-exergism.sh
-          grep -Fq 'durable_sync_ancestor_chain()' install/install-id-exergism.sh
+          grep -Fq 'INSTALL_PENDING_DIR=' install/install-id-exergism.sh
+          grep -Fq 'INSTALL_VALIDATED_DIR=' install/install-id-exergism.sh
+          grep -Fq 'INSTALL_RECOVERING_DIR=' install/install-id-exergism.sh
           grep -Fq 'create_install_transaction()' install/install-id-exergism.sh
-          grep -Fq 'persist_installed_generation()' install/install-id-exergism.sh
-          grep -Fq 'commit_install_transaction()' install/install-id-exergism.sh
-          grep -Fq 'rollback_install_on_exit()' install/install-id-exergism.sh
-          grep -Fq 'trap rollback_install_on_exit EXIT' install/install-id-exergism.sh
+          grep -Fq 'mark_generation_validated()' install/install-id-exergism.sh
+          grep -Fq 'mv "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"' install/install-id-exergism.sh
+          grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
+          grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
+          grep -Fq 'systemctl stop "$AGENT_RUN_UNIT"' install/install-id-exergism.sh
+          grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
+          grep -Fq '! systemctl is-active --quiet "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
-          grep -Fq 'BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"' install/install-id-exergism.sh
-          grep -Fq 'current_boot_id="$(cat "$BOOT_ID_FILE")"' install/install-id-exergism.sh
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
-          grep -Fq 'timer_enablement_state=' install/install-id-exergism.sh
-          grep -Fq 'enabled|enabled-runtime|disabled|not-found' install/install-id-exergism.sh
+          grep -Fq 'target_was_active' install/install-id-exergism.sh
           grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/install-id-exergism.sh
           grep -Fq 'cp -a -- "$path" "$stage/backups/$key"' install/install-id-exergism.sh
-          grep -Fq 'EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"' install/install-id-exergism.sh
-          grep -Fq 'systemctl enable --now "$TIMER_UNIT"' install/install-id-exergism.sh
-          grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
-          grep -Fq 'durable_sync_paths "$INSTALL_STATE_ROOT"' install/install-id-exergism.sh
-          ! grep -Fq 'ConditionPathExists=' packaging/id-exergism-install-recovery.service
-          grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.timer' packaging/id-exergism-install-recovery.service
-          grep -Fq 'ExecStart=/usr/local/libexec/ec-deployment-install-recovery boot' packaging/id-exergism-install-recovery.service
-          grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
-          grep -Fq 'After=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
           grep -Fq 'TARGET_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
-          grep -Fq 'TIMER_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
-          grep -Fq 'id-exergism-install-recovery-interlock.conf' install/install-id-exergism.sh
-          grep -Fq 'EC_INSTALL_LOCK_HELD' install/recover-id-exergism-install.sh
-          grep -Fq 'if ! flock -n 9; then' install/recover-id-exergism-install.sh
-          grep -Fq 'if [[ "$MODE" == "boot" && -d "$INSTALL_TXN_DIR" ]]; then' install/recover-id-exergism-install.sh
-          grep -Fq 'origin_boot_id="$(read_value origin_boot_id)"' install/recover-id-exergism-install.sh
+          grep -Fq 'AGENT_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
+          grep -Fq 'id-exergism-agent-recovery-interlock.conf' install/install-id-exergism.sh
+          grep -Fq 'LEGACY_TIMER_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
+          ! grep -Fq 'ConditionPathExists=' packaging/id-exergism-install-recovery.service
+          grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.service' packaging/id-exergism-install-recovery.service
+          grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
+          grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
+          grep -Fq 'After=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
+          grep -Fq 'TXN_PHASE="pending"' install/recover-id-exergism-install.sh
+          grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
+          grep -Fq 'TXN_PHASE="recovering"' install/recover-id-exergism-install.sh
+          grep -Fq 'if [[ "$MODE" == "boot" && "$TXN_PHASE" == "validated" ]]' install/recover-id-exergism-install.sh
+          grep -Fq 'mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
+          grep -Fq '[[ "$schema_version" == 2 ]]' install/recover-id-exergism-install.sh
+          grep -Fq 'origin_boot_id=' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="normal"' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="boot"' install/recover-id-exergism-install.sh
-          grep -Fq 'case "$RECOVERY_MODE:$timer_enablement_state" in' install/recover-id-exergism-install.sh
-          grep -Fq 'timer_enablement_state' install/recover-id-exergism-install.sh
-          grep -Fq 'normal:enabled-runtime' install/recover-id-exergism-install.sh
-          grep -Fq 'boot:enabled-runtime' install/recover-id-exergism-install.sh
-          grep -Fq 'systemctl --runtime enable "$TIMER_UNIT"' install/recover-id-exergism-install.sh
-          grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/recover-id-exergism-install.sh
+          grep -Fq 'systemctl stop "$AGENT_RUN_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'restore_artifact "$key"' install/recover-id-exergism-install.sh
-          grep -Fq 'if ! systemctl stop "$TARGET_UNIT"; then' install/recover-id-exergism-install.sh
-          grep -Fq 'target remains stopped and journal is retained' install/recover-id-exergism-install.sh
-          grep -Fq 'restored target generation failed health validation; target left stopped' install/recover-id-exergism-install.sh
-          grep -Fq 'persist_restored_generation' install/recover-id-exergism-install.sh
-          grep -Fq 'durable_remove_journal' install/recover-id-exergism-install.sh
+          grep -Fq 'Timer enablement restore mismatch' install/recover-id-exergism-install.sh
+          grep -Fq 'Timer active-state restore mismatch' install/recover-id-exergism-install.sh
+          grep -Fq '"$VALIDATOR" || restore_rc=1' install/recover-id-exergism-install.sh
+          grep -Fq 'services remain quiesced and recovery journal is retained' install/recover-id-exergism-install.sh
+          grep -Fq 'mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
+          grep -Fq 'RuntimeMaxSec=90s' install/validate-id-exergism-generation.sh
+          grep -Fq 'ReadOnlyPaths=$APP_DIR' install/validate-id-exergism-generation.sh
+          grep -Fq 'governance/profile/0.1-DRAFT' install/validate-id-exergism-generation.sh
+          grep -Fq 'if [[ -x "$SMOKE" ]]; then' install/validate-id-exergism-generation.sh
           grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
           grep -Fq 'ReadOnlyPaths=/usr/local/bin/idresolver' packaging/id-exergism-artifact-fence.conf
           grep -Fq '90-ec-deployment-attestation-artifact-fence.conf' install/install-id-exergism.sh
