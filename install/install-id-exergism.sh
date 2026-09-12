@@ -454,39 +454,39 @@ finalize_install_transaction() {
   durable_sync_paths "$INSTALL_STATE_ROOT"
 }
 
-restore_prior_runtime_state() {
-  local rc=0
-  if [[ "$target_was_active" == 1 ]]; then
-    systemctl start "$TARGET_UNIT" || rc=1
-    systemctl is-active --quiet "$TARGET_UNIT" || rc=1
-    curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || rc=1
-    if [[ -x "$SMOKE" ]]; then
-      EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || rc=1
-    fi
-  else
-    systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
-  fi
-  return "$rc"
-}
-
 install_complete=0
 rollback_install_on_exit() {
   local rc=$?
   trap - EXIT
-  if [[ "$install_complete" == 0 ]] &&      [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" ]]; then
+  if [[ "$install_complete" == 0 ]] &&      [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" || -d "$INSTALL_RECOVERED_DIR" ]]; then
     echo "Installation failed; restoring the durable previous generation." >&2
-    if EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal; then
-      restore_prior_runtime_state || rc=1
-    else
-      # Recovery retained a blocking journal and deliberately left services
-      # quiesced. Never bypass that fail-closed state by starting the resolver.
+    if ! EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal; then
+      # Recovery retained an actionable journal and deliberately left services
+      # quiesced. Never bypass that fail-closed state.
       rc=1
     fi
   fi
   exit "$rc"
 }
 
+pretransaction_journal_published=0
+restore_pretransaction_timer_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$pretransaction_journal_published" == 0 ]]; then
+    if [[ "$timer_was_active" == 1 ]]; then
+      systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || rc=1
+    else
+      stop_and_wait_quiescent "$TIMER_UNIT" || rc=1
+    fi
+  fi
+  exit "$rc"
+}
+trap restore_pretransaction_timer_on_exit EXIT
+
 create_install_transaction
+pretransaction_journal_published=1
+trap - EXIT
 trap rollback_install_on_exit EXIT
 
 # Quiesce every actor that could observe or mutate the generation while it is
