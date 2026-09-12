@@ -41,7 +41,7 @@ BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
 
-for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat; do
+for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat sleep; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
@@ -127,20 +127,33 @@ if [[ ! "$systemd_version" =~ ^[0-9]+$ ]] || (( systemd_version < 250 )); then
 fi
 
 # Recovery and isolated validation infrastructure are outside the generation
-# transaction. They are inert/safe without a journal and must survive a crash
-# before any mutable generation artifact is touched.
+# transaction. Publish the complete recovery core durably *before* exposing any
+# interlock that can make production units depend on it.
 install -o root -g root -m 0755 "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER"
 install -o root -g root -m 0755 "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR"
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH"
-install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK"
-install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK"
-rm -f "$LEGACY_TIMER_RECOVERY_INTERLOCK"
+
+durable_sync_paths   "$RECOVERY_HELPER"   "$VALIDATOR"   "$RECOVERY_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
+durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
 
 systemctl daemon-reload
 systemctl enable "$RECOVERY_UNIT" >/dev/null
 
-durable_sync_paths   "$RECOVERY_HELPER"   "$VALIDATOR"   "$RECOVERY_UNIT_PATH"   "$TARGET_RECOVERY_INTERLOCK"   "$AGENT_RECOVERY_INTERLOCK"   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system   /etc/systemd/system/multi-user.target.wants
-durable_sync_ancestor_chain   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system/multi-user.target.wants
+# The enablement link is part of the recovery core: make it durable before an
+# interlock can require this unit on the next boot.
+durable_sync_paths   /etc/systemd/system   /etc/systemd/system/multi-user.target.wants
+durable_sync_ancestor_chain   /etc/systemd/system/multi-user.target.wants
+
+# Only now expose resolver/updater dependencies on the already-durable recovery
+# core. A power loss can no longer persist an interlock without its prerequisite.
+install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK"
+install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK"
+rm -f "$LEGACY_TIMER_RECOVERY_INTERLOCK"
+
+durable_sync_paths   "$TARGET_RECOVERY_INTERLOCK"   "$AGENT_RECOVERY_INTERLOCK"   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system
+durable_sync_ancestor_chain   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system
+
+systemctl daemon-reload
 
 # Any old transaction from a failed invocation must be resolved before a new
 # baseline can be captured. The helper recognizes pending/validated/recovering.
@@ -187,6 +200,51 @@ case "$timer_enablement_state" in
     exit 1
     ;;
 esac
+
+unit_has_processes() {
+  local unit="$1" cgroup
+  cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null || true)"
+  [[ -n "$cgroup" ]] || return 1
+  python3 - "$cgroup" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path("/sys/fs/cgroup") / sys.argv[1].lstrip("/")
+if not root.exists():
+    raise SystemExit(1)
+for procs in root.rglob("cgroup.procs"):
+    try:
+        if procs.read_text().strip():
+            raise SystemExit(0)
+    except (FileNotFoundError, PermissionError):
+        continue
+raise SystemExit(1)
+PY
+}
+
+unit_is_quiescent() {
+  local unit="$1" load active main_pid
+  load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
+  [[ "$load" == "not-found" || -z "$load" ]] && return 0
+
+  active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+  main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null || true)"
+  [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
+  [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1
+  unit_has_processes "$unit" && return 1
+  return 0
+}
+
+stop_and_wait_quiescent() {
+  local unit="$1" i
+  systemctl stop "$unit" >/dev/null 2>&1 || true
+  for i in {1..30}; do
+    unit_is_quiescent "$unit" && return 0
+    sleep 1
+  done
+  echo "Unit did not become quiescent: $unit" >&2
+  return 1
+}
 
 timer_was_active=0
 systemctl is-active --quiet "$TIMER_UNIT" 2>/dev/null && timer_was_active=1
@@ -315,17 +373,11 @@ create_install_transaction
 trap rollback_install_on_exit EXIT
 
 # Quiesce every actor that could observe or mutate the generation while it is
-# pending. The triggered updater service itself is stopped, not just its timer.
-systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || {
-  systemctl is-active --quiet "$TIMER_UNIT" && exit 1 || true
-}
-systemctl stop "$AGENT_RUN_UNIT" >/dev/null 2>&1 || {
-  systemctl is-active --quiet "$AGENT_RUN_UNIT" && exit 1 || true
-}
-systemctl stop "$TARGET_UNIT"
-! systemctl is-active --quiet "$TIMER_UNIT"
-! systemctl is-active --quiet "$TARGET_UNIT"
-! systemctl is-active --quiet "$AGENT_RUN_UNIT"
+# pending. Do not trust is-active alone: activating/deactivating units can still
+# own live processes. Require a terminal state, MainPID=0 and an empty cgroup.
+stop_and_wait_quiescent "$TIMER_UNIT"
+stop_and_wait_quiescent "$AGENT_RUN_UNIT"
+stop_and_wait_quiescent "$TARGET_UNIT"
 
 install -o root -g root -m 0755 "$ROOT/agent/ec-deployment-agent.sh" "$AGENT"
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
