@@ -291,7 +291,9 @@ expected_active="$(expected_timer_active)"
 if [[ "$expected_active" == 1 ]]; then
   systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
 else
-  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
+  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || {
+    systemctl is-active --quiet "$TIMER_UNIT" && restore_rc=1 || true
+  }
 fi
 actual_active=0
 systemctl is-active --quiet "$TIMER_UNIT" && actual_active=1
