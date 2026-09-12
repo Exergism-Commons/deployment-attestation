@@ -230,6 +230,8 @@ jobs:
           grep -Fq 'Restore timer activation only after the old generation is fully restored' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Timer enablement restore mismatch' install/recover-id-exergism-install.sh
+          grep -Fq 'Could not determine timer ActiveState after synchronous recovery.' install/recover-id-exergism-install.sh
+          grep -Fq 'Timer did not remain provably quiescent after synchronous recovery.' install/recover-id-exergism-install.sh
           grep -Fq '"$VALIDATOR" || restore_rc=1' install/recover-id-exergism-install.sh
           grep -Fq 'services remain quiesced and recovery journal is retained' install/recover-id-exergism-install.sh
           grep -Fq 'mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
