@@ -31,10 +31,17 @@ INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 
 if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
   exec 9>"$INSTALL_LOCK"
-  flock -n 9 || {
+  if ! flock -n 9; then
+    if [[ "$MODE" == "boot" && -d "$INSTALL_TXN_DIR" ]]; then
+      # A live installer owns the transaction lock and may intentionally start
+      # the guarded resolver/timer while validating the pending generation.
+      # Exiting successfully lets that owner proceed; if it dies, the lock is
+      # released and the next guarded activation performs real recovery.
+      exit 0
+    fi
     echo "Another Deployment Attestation installation/recovery is already running." >&2
     exit 1
-  }
+  fi
 fi
 
 [[ -d "$INSTALL_TXN_DIR" ]] || exit 0
