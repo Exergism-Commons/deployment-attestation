@@ -2,7 +2,7 @@
 Description=Recover interrupted Exergism Commons Deployment Attestation installation
 DefaultDependencies=no
 After=local-fs.target
-Before=id-exergism.service ec-deployment-attestation@id.exergism.org.timer
+Before=id-exergism.service ec-deployment-attestation@id.exergism.org.service
 
 [Service]
 Type=oneshot
