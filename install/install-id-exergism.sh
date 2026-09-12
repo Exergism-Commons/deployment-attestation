@@ -225,10 +225,18 @@ PY
 unit_is_quiescent() {
   local unit="$1" load active main_pid
   load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
-  [[ "$load" == "not-found" || -z "$load" ]] && return 0
+  [[ "$load" == "not-found" ]] && return 0
+  [[ -n "$load" ]] || {
+    echo "Could not determine LoadState for $unit" >&2
+    return 1
+  }
 
   active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
   main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null || true)"
+  [[ -n "$active" && -n "$main_pid" ]] || {
+    echo "Could not determine runtime state for $unit" >&2
+    return 1
+  }
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
   [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1
   unit_has_processes "$unit" && return 1
@@ -246,10 +254,31 @@ stop_and_wait_quiescent() {
   return 1
 }
 
-timer_was_active=0
-systemctl is-active --quiet "$TIMER_UNIT" 2>/dev/null && timer_was_active=1
-target_was_active=0
-systemctl is-active --quiet "$TARGET_UNIT" 2>/dev/null && target_was_active=1
+capture_active_baseline() {
+  local unit="$1" state load
+  load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
+  if [[ "$load" == "not-found" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  [[ -n "$load" ]] || {
+    echo "Could not determine LoadState for baseline unit $unit" >&2
+    return 1
+  }
+
+  state="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+  case "$state" in
+    active) printf '1\n' ;;
+    inactive|failed) printf '0\n' ;;
+    *)
+      echo "Refusing to capture installer baseline while $unit is in ActiveState=${state:-unknown}." >&2
+      return 1
+      ;;
+  esac
+}
+
+timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"
+target_was_active="$(capture_active_baseline "$TARGET_UNIT")"
 
 artifact_path() {
   case "$1" in
