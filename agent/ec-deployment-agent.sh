@@ -19,7 +19,7 @@ required=(EC_SERVICE EC_REPOSITORY EC_ENVIRONMENT EC_RELEASE_TAG EC_APP_DIR EC_A
 for name in "${required[@]}"; do
   [[ -n "${!name:-}" ]] || die "Missing required configuration: $name"
 done
-for command in curl git python3 sha256sum systemctl systemd-run flock install awk sed tr date hostname uname mv rm findmnt nsenter; do
+for command in curl git python3 sha256sum systemctl systemd-run flock install awk sed tr date hostname uname mv rm findmnt nsenter sleep; do
   command -v "$command" >/dev/null 2>&1 || die "Required command not found: $command"
 done
 
@@ -545,6 +545,62 @@ service_main_pid() {
   printf '%s\n' "$pid"
 }
 
+service_cgroup_has_processes() {
+  local cgroup
+  if ! cgroup="$(systemctl show "$EC_SERVICE_UNIT" -p ControlGroup --value 2>/dev/null)"; then
+    return 2
+  fi
+  [[ -n "$cgroup" ]] || return 1
+  python3 - "$cgroup" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path("/sys/fs/cgroup") / sys.argv[1].lstrip("/")
+if not root.exists():
+    raise SystemExit(1)
+for procs in root.rglob("cgroup.procs"):
+    try:
+        if procs.read_text().strip():
+            raise SystemExit(0)
+    except FileNotFoundError:
+        continue
+    except PermissionError:
+        raise SystemExit(2)
+raise SystemExit(1)
+PY
+}
+
+service_is_quiescent() {
+  local load active main_pid cgroup_rc
+  if ! load="$(systemctl show "$EC_SERVICE_UNIT" -p LoadState --value 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$load" == "loaded" ]] || return 1
+  if ! active="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value 2>/dev/null)"      || ! main_pid="$(systemctl show "$EC_SERVICE_UNIT" -p MainPID --value 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
+  [[ "$main_pid" == 0 ]] || return 1
+  if service_cgroup_has_processes; then
+    return 1
+  else
+    cgroup_rc=$?
+    (( cgroup_rc == 1 )) || return 1
+  fi
+  return 0
+}
+
+stop_service_quiescent() {
+  local i
+  systemctl stop "$EC_SERVICE_UNIT" >/dev/null 2>&1 || true
+  for i in {1..30}; do
+    service_is_quiescent && return 0
+    sleep 1
+  done
+  warn "Target service did not become provably quiescent"
+  return 1
+}
+
 artifact_write_fence() {
   local pid path options
   pid="$(service_main_pid)" || return 1
@@ -642,8 +698,7 @@ post_start_integrity() {
 # recovery point instead of being deleted before that final instance is proven.
 finalize_quiescent() {
   local commit="$1" binary="$2" manifest="$3"
-  systemctl stop "$EC_SERVICE_UNIT" || return 1
-  systemctl is-active --quiet "$EC_SERVICE_UNIT" && return 1
+  stop_service_quiescent || return 1
   artifact_integrity "$commit" "$binary" || return 1
   write_current_state "$commit" "$binary" "$manifest" || return 1
   artifact_integrity "$commit" "$binary" || return 1
@@ -671,8 +726,7 @@ rollback_transaction() {
   [[ "$digest" == "$binary" ]] || return 1
 
   warn "Recovering transaction to $commit"
-  systemctl stop "$EC_SERVICE_UNIT" || return 1
-  systemctl is-active --quiet "$EC_SERVICE_UNIT" && return 1
+  stop_service_quiescent || return 1
   switch_source "$commit" 0 || return 1
 
   install -o root -g root -m 0755 "$backup" "${EC_APP_BIN}.rollback" || return 1
@@ -850,8 +904,8 @@ update_release() {
   fsync_file_and_dir "$backup" || { rm -rf "$dir"; die "Could not durably persist rollback binary"; }
   write_transaction "$oldc" "$oldb" "$oldm" "$backup" "$RELEASE_SOURCE_COMMIT" "$RELEASE_ASSET_SHA256" "$RELEASE_MANIFEST_SHA256" || { rm -rf "$dir"; die "Could not durably persist transaction"; }
 
-  if ! systemctl stop "$EC_SERVICE_UNIT" || systemctl is-active --quiet "$EC_SERVICE_UNIT"; then
-    rm -rf "$dir"; rollback_transaction || die "Stop failed and rollback failed"; return 1
+  if ! stop_service_quiescent; then
+    rm -rf "$dir"; rollback_transaction || die "Stop/quiescence failed and rollback failed"; return 1
   fi
 
   if ! switch_source "$RELEASE_SOURCE_COMMIT" 1; then
