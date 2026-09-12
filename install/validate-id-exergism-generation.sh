@@ -7,7 +7,7 @@ APP_DIR="/srv/id.exergism.org"
 APP_BIN="/usr/local/bin/idresolver"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 
-for command in systemd-run systemctl curl python3; do
+for command in systemd-run systemctl curl python3 grep jq mktemp; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Validation dependency missing: $command" >&2
     exit 1
@@ -16,7 +16,8 @@ done
 
 [[ -x "$APP_BIN" ]] || { echo "Resolver binary is not executable: $APP_BIN" >&2; exit 1; }
 [[ -d "$APP_DIR" ]] || { echo "Resolver source tree is missing: $APP_DIR" >&2; exit 1; }
-[[ -x "$SMOKE" ]] || { echo "Semantic smoke is not executable: $SMOKE" >&2; exit 1; }
+# The validator must also be able to prove a pre-attestation generation during
+# first-install rollback, where the installed smoke helper did not yet exist.
 
 port="$(python3 - <<'PY'
 import os
@@ -45,4 +46,19 @@ for _ in {1..30}; do
 done
 
 curl -fsS --max-time 5 "http://127.0.0.1:$port/" >/dev/null
-EC_LOCAL_URL="http://127.0.0.1:$port" "$SMOKE"
+
+# Built-in id.exergism.org semantic probes keep rollback validation independent
+# of whether the previous generation already had the attestation smoke helper.
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"; cleanup' EXIT
+curl -fsS --max-time 10 -H 'Accept: text/turtle'   "http://127.0.0.1:$port/ontology/commons/0.1-PRE2" -o "$tmpdir/commons.ttl"
+grep -Fq 'owl:versionIRI <https://id.exergism.org/ontology/commons/0.1-PRE2>' "$tmpdir/commons.ttl"
+curl -fsS --max-time 10 -H 'Accept: text/turtle'   "http://127.0.0.1:$port/ontology/governance/0.1-PRE2" -o "$tmpdir/governance.ttl"
+grep -Fq 'owl:versionIRI <https://id.exergism.org/ontology/governance/0.1-PRE2>' "$tmpdir/governance.ttl"
+curl -fsS --max-time 10 "http://127.0.0.1:$port/governance/profile/0.1-DRAFT" | jq -e '.operative == false' >/dev/null
+curl -fsS --max-time 10 "http://127.0.0.1:$port/catalog/namespaces" | jq -e . >/dev/null
+curl -fsS --max-time 10 "http://127.0.0.1:$port/catalog/terms" | jq -e . >/dev/null
+
+if [[ -x "$SMOKE" ]]; then
+  EC_LOCAL_URL="http://127.0.0.1:$port" "$SMOKE"
+fi
