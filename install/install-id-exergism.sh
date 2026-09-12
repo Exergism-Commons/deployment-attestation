@@ -37,6 +37,7 @@ INSTALL_RECOVERING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovering"
 INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
 INSTALL_COMMITTED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.committed"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
+AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
@@ -205,6 +206,12 @@ PY
 rm -f "$tmp_manifest"
 trap - EXIT
 
+exec 8>"$AGENT_COORDINATION_LOCK"
+flock -n 8 || {
+  echo "A deployment agent invocation is already running; refusing to capture an unstable installer baseline." >&2
+  exit 1
+}
+
 current_boot_id="$(cat "$BOOT_ID_FILE")"
 [[ "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
   echo "Could not read a valid kernel boot ID." >&2
@@ -302,6 +309,9 @@ unit_is_quiescent() {
     return 1
   }
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
+  # Timer units own scheduling state, not service processes/cgroups. The
+  # concrete updater service is quiesced separately.
+  [[ "$unit" == *.timer ]] && return 0
   [[ "$main_pid" == 0 ]] || return 1
   if unit_has_processes "$unit"; then
     return 1
@@ -360,7 +370,7 @@ stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 
 # Reconcile the updater's own durable transaction before measuring target state.
 if [[ -r "$ENV_FILE" ]]; then
-  EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover || {
+  EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover || {
     echo "Deployment updater transaction could not be recovered; leaving updater/timer quiesced." >&2
     exit 1
   }
