@@ -675,8 +675,9 @@ PY
 
 reconcile_stale_git_locks() {
   # A deployment transaction plus both exclusive agent locks establishes that
-  # no legitimate updater-owned Git writer may still be active. Refuse cleanup
-  # if an external Git process still appears to be operating on this checkout.
+  # no updater-owned Git writer may still be active. External/manual Git is not
+  # lock-aware, so inspect every supported checkout selector, relevant GIT_*
+  # environment variable and open fd before deleting any stale lock.
   python3 - "$EC_APP_DIR" <<'PY'
 import os
 import pathlib
@@ -688,38 +689,10 @@ app = pathlib.Path(sys.argv[1]).resolve()
 
 def under(child, parent):
     try:
-        child.relative_to(parent)
+        pathlib.Path(child).resolve(strict=False).relative_to(pathlib.Path(parent).resolve(strict=False))
         return True
-    except ValueError:
+    except (ValueError, OSError):
         return False
-
-for proc in pathlib.Path("/proc").iterdir():
-    if not proc.name.isdigit():
-        continue
-    try:
-        raw = (proc / "cmdline").read_bytes()
-        if not raw:
-            continue
-        argv = [os.fsdecode(x) for x in raw.split(b"\0") if x]
-        if not argv or pathlib.Path(argv[0]).name != "git":
-            continue
-        relevant = False
-        try:
-            cwd = (proc / "cwd").resolve()
-            relevant = under(cwd, app)
-        except (FileNotFoundError, PermissionError, OSError):
-            pass
-        if not relevant:
-            for arg in argv[1:]:
-                if arg == str(app) or arg.startswith(str(app) + os.sep):
-                    relevant = True
-                    break
-        if relevant:
-            raise RuntimeError(f"live git process {proc.name} still references deployment checkout")
-    except (FileNotFoundError, ProcessLookupError):
-        continue
-    except PermissionError as exc:
-        raise RuntimeError(f"cannot inspect process {proc.name} while reconciling git locks") from exc
 
 def git_path(flag):
     out = subprocess.check_output(
@@ -727,7 +700,7 @@ def git_path(flag):
         stderr=subprocess.DEVNULL,
         text=True,
     ).strip()
-    return pathlib.Path(out)
+    return pathlib.Path(out).resolve(strict=False)
 
 roots = []
 for flag in ("--git-dir", "--git-common-dir"):
@@ -735,12 +708,167 @@ for flag in ("--git-dir", "--git-common-dir"):
     if root not in roots:
         roots.append(root)
 
+protected = [app, *roots]
+
+def resolve_from(value, cwd):
+    p = pathlib.Path(value)
+    if not p.is_absolute():
+        p = cwd / p
+    return p.resolve(strict=False)
+
+def points_into_protected(value, cwd):
+    try:
+        p = resolve_from(value, cwd)
+    except (OSError, RuntimeError):
+        return True
+    return any(under(p, root) or under(root, p) for root in protected)
+
+def process_is_git(proc):
+    names = []
+    try:
+        raw = (proc / "cmdline").read_bytes()
+        argv = [os.fsdecode(x) for x in raw.split(b"\0") if x]
+    except (FileNotFoundError, ProcessLookupError):
+        return None, None
+    except PermissionError as exc:
+        raise RuntimeError(f"cannot inspect cmdline for process {proc.name}") from exc
+
+    if argv:
+        names.append(pathlib.Path(argv[0]).name)
+    try:
+        names.append((proc / "exe").resolve().name)
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+    except PermissionError as exc:
+        raise RuntimeError(f"cannot inspect executable for process {proc.name}") from exc
+
+    is_git = any(name == "git" or name.startswith("git-") for name in names)
+    return is_git, argv
+
+def git_process_references_checkout(proc, argv):
+    try:
+        cwd = (proc / "cwd").resolve()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except PermissionError as exc:
+        raise RuntimeError(f"cannot inspect cwd for git process {proc.name}") from exc
+
+    if any(under(cwd, root) or under(root, cwd) for root in protected):
+        return True
+
+    # Git accepts both --opt=value and --opt value forms; -C is also a global
+    # checkout selector and may be repeated.
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        value = None
+        if arg.startswith("--git-dir="):
+            value = arg.split("=", 1)[1]
+        elif arg.startswith("--work-tree="):
+            value = arg.split("=", 1)[1]
+        elif arg in ("--git-dir", "--work-tree", "-C"):
+            if i + 1 >= len(argv):
+                raise RuntimeError(f"malformed git selector in process {proc.name}")
+            value = argv[i + 1]
+            i += 1
+        elif arg.startswith("-C") and arg != "-C":
+            value = arg[2:]
+        elif not arg.startswith("-"):
+            # Conservatively treat absolute/relative path operands that resolve
+            # into the checkout or metadata roots as relevant.
+            if points_into_protected(arg, cwd):
+                return True
+        if value is not None and points_into_protected(value, cwd):
+            return True
+        i += 1
+
+    try:
+        raw_env = (proc / "environ").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except PermissionError as exc:
+        raise RuntimeError(f"cannot inspect environment for git process {proc.name}") from exc
+
+    env = {}
+    for item in raw_env.split(b"\0"):
+        if b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        env[os.fsdecode(key)] = os.fsdecode(value)
+
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
+        value = env.get(key)
+        if value and points_into_protected(value, cwd):
+            return True
+    alt = env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+    if alt:
+        for value in alt.split(os.pathsep):
+            if value and points_into_protected(value, cwd):
+                return True
+
+    fd_dir = proc / "fd"
+    try:
+        fds = list(fd_dir.iterdir())
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except PermissionError as exc:
+        raise RuntimeError(f"cannot inspect fds for git process {proc.name}") from exc
+    for fd in fds:
+        try:
+            target = fd.resolve(strict=False)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError as exc:
+            raise RuntimeError(f"cannot resolve fd for git process {proc.name}") from exc
+        if any(under(target, root) for root in protected):
+            return True
+
+    return False
+
+def assert_no_related_git():
+    for proc in pathlib.Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        result = process_is_git(proc)
+        if result == (None, None):
+            continue
+        is_git, argv = result
+        if not is_git:
+            continue
+        if git_process_references_checkout(proc, argv):
+            raise RuntimeError(f"live git process {proc.name} still references deployment checkout")
+
+def lock_is_open(lock):
+    try:
+        lst = lock.stat()
+    except FileNotFoundError:
+        return False
+    wanted = (lst.st_dev, lst.st_ino)
+    for proc in pathlib.Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        fd_dir = proc / "fd"
+        try:
+            fds = list(fd_dir.iterdir())
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError as exc:
+            raise RuntimeError(f"cannot inspect process {proc.name} fds before lock cleanup") from exc
+        for fd in fds:
+            try:
+                st = fd.stat()
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if (st.st_dev, st.st_ino) == wanted:
+                return True
+    return False
+
+assert_no_related_git()
+
 for root in roots:
     st = root.lstat()
     if not stat.S_ISDIR(st.st_mode):
         raise RuntimeError(f"git metadata root is not a directory: {root}")
-    # This includes root index.lock as well as refs/*.lock, shallow.lock and
-    # nested .git/modules/** lockfiles for populated submodules.
     for lock in sorted(root.rglob("*.lock")):
         try:
             st = lock.lstat()
@@ -748,12 +876,20 @@ for root in roots:
             continue
         if not stat.S_ISREG(st.st_mode):
             raise RuntimeError(f"refusing to remove non-regular git lock: {lock}")
+
+        # Re-evaluate immediately before each unlink so a newly appeared writer
+        # or an open lock fd makes recovery fail closed rather than racing it.
+        assert_no_related_git()
+        if lock_is_open(lock):
+            raise RuntimeError(f"refusing to remove open git lock: {lock}")
         lock.unlink()
         fd = os.open(lock.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+assert_no_related_git()
 PY
 }
 
