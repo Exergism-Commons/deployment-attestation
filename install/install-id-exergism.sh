@@ -175,12 +175,13 @@ durable_sync_ancestor_chain   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"
 systemctl daemon-reload
 
 # Any old transaction from a failed invocation must be resolved before a new
-# baseline can be captured. The helper recognizes pending/validated/recovering.
-if [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" ]]; then
+# baseline can be captured. Every non-final phase, including .recovered, is
+# actionable until recorded runtime-state restoration has completed.
+if [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" || -d "$INSTALL_RECOVERED_DIR" ]]; then
   echo "Recovering interrupted Deployment Attestation installation before continuing." >&2
   EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal
 fi
-rm -rf "$INSTALL_RECOVERED_DIR" "$INSTALL_COMMITTED_DIR"
+rm -rf "$INSTALL_COMMITTED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
 tmp_manifest="$(mktemp)"
@@ -210,19 +211,55 @@ current_boot_id="$(cat "$BOOT_ID_FILE")"
   exit 1
 }
 
-timer_enablement_state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true)"
-[[ -n "$timer_enablement_state" ]] || timer_enablement_state="not-found"
-case "$timer_enablement_state" in
-  enabled|enabled-runtime|disabled|not-found) ;;
-  *)
-    echo "Unsupported pre-install timer enablement state '$timer_enablement_state'; refusing mutation." >&2
-    exit 1
-    ;;
-esac
+query_timer_enablement_state() {
+  local load state rc
+  if ! load="$(systemctl show "$TIMER_UNIT" --property=LoadState --value 2>/dev/null)"; then
+    echo "Could not query timer LoadState; refusing mutation." >&2
+    return 1
+  fi
+  if [[ "$load" == "not-found" ]]; then
+    printf 'not-found\n'
+    return 0
+  fi
+  [[ -n "$load" ]] || {
+    echo "Timer LoadState query returned no value; refusing mutation." >&2
+    return 1
+  }
+
+  if state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$state" in
+    enabled|enabled-runtime)
+      (( rc == 0 )) || {
+        echo "Timer enablement query returned $state with rc=$rc; refusing mutation." >&2
+        return 1
+      }
+      ;;
+    disabled)
+      (( rc != 0 )) || {
+        echo "Timer enablement query returned disabled with unexpected rc=0; refusing mutation." >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "Could not determine exact timer enablement state (value=$state, rc=$rc); refusing mutation." >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$state"
+}
+
+timer_enablement_state="$(query_timer_enablement_state)"
 
 unit_has_processes() {
   local unit="$1" cgroup
-  cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null || true)"
+  if ! cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)"; then
+    echo "Could not determine ControlGroup for $unit" >&2
+    return 2
+  fi
   [[ -n "$cgroup" ]] || return 1
   python3 - "$cgroup" <<'PY'
 import pathlib
@@ -235,30 +272,43 @@ for procs in root.rglob("cgroup.procs"):
     try:
         if procs.read_text().strip():
             raise SystemExit(0)
-    except (FileNotFoundError, PermissionError):
+    except FileNotFoundError:
         continue
+    except PermissionError:
+        raise SystemExit(2)
 raise SystemExit(1)
 PY
 }
 
 unit_is_quiescent() {
-  local unit="$1" load active main_pid
-  load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
+  local unit="$1" load active main_pid cgroup_rc
+  if ! load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
+    echo "Could not determine LoadState for $unit" >&2
+    return 1
+  fi
   [[ "$load" == "not-found" ]] && return 0
   [[ -n "$load" ]] || {
     echo "Could not determine LoadState for $unit" >&2
     return 1
   }
 
-  active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
-  main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null || true)"
+  if ! active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" \
+     || ! main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)"; then
+    echo "Could not determine runtime state for $unit" >&2
+    return 1
+  fi
   [[ -n "$active" && -n "$main_pid" ]] || {
     echo "Could not determine runtime state for $unit" >&2
     return 1
   }
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
-  [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1
-  unit_has_processes "$unit" && return 1
+  [[ "$main_pid" == 0 ]] || return 1
+  if unit_has_processes "$unit"; then
+    return 1
+  else
+    cgroup_rc=$?
+    (( cgroup_rc == 1 )) || return 1
+  fi
   return 0
 }
 
@@ -275,7 +325,10 @@ stop_and_wait_quiescent() {
 
 capture_active_baseline() {
   local unit="$1" state load
-  load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
+  if ! load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
+    echo "Could not determine LoadState for baseline unit $unit" >&2
+    return 1
+  fi
   if [[ "$load" == "not-found" ]]; then
     printf '0\n'
     return 0
@@ -285,7 +338,10 @@ capture_active_baseline() {
     return 1
   }
 
-  state="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+  if ! state="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)"; then
+    echo "Could not determine ActiveState for baseline unit $unit" >&2
+    return 1
+  fi
   case "$state" in
     active) printf '1\n' ;;
     inactive|failed) printf '0\n' ;;
@@ -296,7 +352,20 @@ capture_active_baseline() {
   esac
 }
 
+# Capture timer state before quiescing it, but never measure the resolver while
+# a deployment updater may have temporarily stopped it.
 timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"
+stop_and_wait_quiescent "$TIMER_UNIT"
+stop_and_wait_quiescent "$AGENT_RUN_UNIT"
+
+# Reconcile the updater's own durable transaction before measuring target state.
+if [[ -r "$ENV_FILE" ]]; then
+  EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover || {
+    echo "Deployment updater transaction could not be recovered; leaving updater/timer quiesced." >&2
+    exit 1
+  }
+fi
+stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 target_was_active="$(capture_active_baseline "$TARGET_UNIT")"
 
 artifact_path() {
@@ -313,7 +382,7 @@ artifact_path() {
 
 create_install_transaction() {
   local stage key path present
-  [[ ! -e "$INSTALL_PENDING_DIR" && ! -e "$INSTALL_VALIDATED_DIR" && ! -e "$INSTALL_RECOVERING_DIR" ]] || return 1
+  [[ ! -e "$INSTALL_PENDING_DIR" && ! -e "$INSTALL_VALIDATED_DIR" && ! -e "$INSTALL_RECOVERING_DIR" && ! -e "$INSTALL_RECOVERED_DIR" ]] || return 1
 
   stage="$(mktemp -d "${INSTALL_STATE_ROOT}/.${SERVICE}.pending.XXXXXX")"
   install -d -o root -g root -m 0700 "$stage/backups"
