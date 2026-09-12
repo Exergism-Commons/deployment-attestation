@@ -495,16 +495,24 @@ else
   quiesce_unit "$TIMER_UNIT" || exit 1
 fi
 
-# For synchronous/direct recovery we can prove exact active state immediately.
-# Boot/dependency mode uses --no-block to avoid dependency cycles; successful
-# queueing is the strongest safe assertion before this prerequisite exits.
+# For synchronous/direct recovery prove the exact terminal state with
+# systemctl show. Never interpret a DBus/query failure as "inactive".
 if [[ "$MODE" == "normal" ]]; then
-  actual_active=0
-  systemctl is-active --quiet "$TIMER_UNIT" && actual_active=1
-  [[ "$actual_active" == "$expected_active" ]] || {
-    echo "Timer active-state restore mismatch: expected=$expected_active actual=$actual_active" >&2
-    exit 1
-  }
+  if [[ "$expected_active" == 1 ]]; then
+    if ! actual_state="$(systemctl show "$TIMER_UNIT" --property=ActiveState --value 2>/dev/null)"; then
+      echo "Could not determine timer ActiveState after synchronous recovery." >&2
+      exit 1
+    fi
+    [[ "$actual_state" == "active" ]] || {
+      echo "Timer active-state restore mismatch: expected=active actual=${actual_state:-unknown}" >&2
+      exit 1
+    }
+  else
+    unit_is_quiescent "$TIMER_UNIT" || {
+      echo "Timer did not remain provably quiescent after synchronous recovery." >&2
+      exit 1
+    }
+  fi
 fi
 
 if [[ "$MODE" == "normal" ]]; then
