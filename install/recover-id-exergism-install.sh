@@ -14,10 +14,12 @@ MODE="${1:-normal}"
 
 SERVICE="id.exergism.org"
 TARGET_UNIT="id-exergism.service"
+AGENT_RUN_UNIT="ec-deployment-attestation@${SERVICE}.service"
 TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
+VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 AGENT_SERVICE_UNIT="/etc/systemd/system/ec-deployment-attestation@.service"
 AGENT_TIMER_UNIT="/etc/systemd/system/ec-deployment-attestation@.timer"
 ENV_FILE="/etc/ec-deployment-attestation/${SERVICE}.env"
@@ -25,80 +27,12 @@ FENCE_DROPIN_DIR="/etc/systemd/system/${TARGET_UNIT}.d"
 FENCE_DROPIN="${FENCE_DROPIN_DIR}/90-ec-deployment-attestation-artifact-fence.conf"
 
 INSTALL_STATE_ROOT="/var/lib/ec-deployment-attestation/install"
-INSTALL_TXN_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
+INSTALL_PENDING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
+INSTALL_VALIDATED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.validated"
+INSTALL_RECOVERING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovering"
 INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
-
-if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
-  exec 9>"$INSTALL_LOCK"
-  if ! flock -n 9; then
-    if [[ "$MODE" == "boot" && -d "$INSTALL_TXN_DIR" ]]; then
-      # A live installer owns the transaction lock and may intentionally start
-      # the guarded resolver/timer while validating the pending generation.
-      # Exiting successfully lets that owner proceed; if it dies, the lock is
-      # released and the next guarded activation performs real recovery.
-      exit 0
-    fi
-    echo "Another Deployment Attestation installation/recovery is already running." >&2
-    exit 1
-  fi
-fi
-
-[[ -d "$INSTALL_TXN_DIR" ]] || exit 0
-
-read_value() {
-  local name="$1"
-  [[ -f "${INSTALL_TXN_DIR}/${name}" ]] || {
-    echo "Recovery journal is missing ${name}" >&2
-    return 1
-  }
-  cat "${INSTALL_TXN_DIR}/${name}"
-}
-
-schema_version="$(read_value schema_version)"
-[[ "$schema_version" == 1 ]] || {
-  echo "Unsupported installer recovery journal schema: $schema_version" >&2
-  exit 1
-}
-origin_boot_id="$(read_value origin_boot_id)"
-current_boot_id="$(cat "$BOOT_ID_FILE")"
-[[ "$origin_boot_id" =~ ^[0-9a-fA-F-]{36}$ && "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
-  echo "Recovery journal or kernel exposes an invalid boot ID." >&2
-  exit 1
-}
-if [[ "$origin_boot_id" == "$current_boot_id" ]]; then
-  RECOVERY_MODE="normal"
-else
-  RECOVERY_MODE="boot"
-fi
-
-timer_enablement_state="$(read_value timer_enablement_state)"
-case "$timer_enablement_state" in
-  enabled|enabled-runtime|disabled|not-found) ;;
-  *)
-    echo "Recovery journal has unsupported timer enablement state: $timer_enablement_state" >&2
-    exit 1
-    ;;
-esac
-
-timer_was_active="$(read_value timer_was_active)"
-[[ "$timer_was_active" == 0 || "$timer_was_active" == 1 ]] || {
-  echo "Recovery journal has invalid timer_was_active: $timer_was_active" >&2
-  exit 1
-}
-
-artifact_path() {
-  case "$1" in
-    agent) printf '%s\n' "$AGENT" ;;
-    smoke) printf '%s\n' "$SMOKE" ;;
-    service_unit) printf '%s\n' "$AGENT_SERVICE_UNIT" ;;
-    timer_unit) printf '%s\n' "$AGENT_TIMER_UNIT" ;;
-    env) printf '%s\n' "$ENV_FILE" ;;
-    fence) printf '%s\n' "$FENCE_DROPIN" ;;
-    *) return 1 ;;
-  esac
-}
 
 durable_sync_paths() {
   python3 - "$@" <<'PY'
@@ -156,21 +90,120 @@ for raw in sys.argv[1:]:
 PY
 }
 
+select_transaction() {
+  local count=0
+  TXN_PHASE=""
+  TXN_DIR=""
+
+  if [[ -d "$INSTALL_PENDING_DIR" ]]; then
+    TXN_PHASE="pending"; TXN_DIR="$INSTALL_PENDING_DIR"; count=$((count + 1))
+  fi
+  if [[ -d "$INSTALL_VALIDATED_DIR" ]]; then
+    TXN_PHASE="validated"; TXN_DIR="$INSTALL_VALIDATED_DIR"; count=$((count + 1))
+  fi
+  if [[ -d "$INSTALL_RECOVERING_DIR" ]]; then
+    TXN_PHASE="recovering"; TXN_DIR="$INSTALL_RECOVERING_DIR"; count=$((count + 1))
+  fi
+
+  (( count <= 1 )) || {
+    echo "CRITICAL: multiple installer transaction phases exist simultaneously." >&2
+    return 1
+  }
+  (( count == 1 ))
+}
+
+if ! select_transaction; then
+  # No transaction is the normal fast path. select_transaction emits a message
+  # itself only for the impossible multi-phase case.
+  if [[ ! -d "$INSTALL_PENDING_DIR" && ! -d "$INSTALL_VALIDATED_DIR" && ! -d "$INSTALL_RECOVERING_DIR" ]]; then
+    exit 0
+  fi
+  exit 1
+fi
+
+if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
+  exec 9>"$INSTALL_LOCK"
+  if ! flock -n 9; then
+    # Only a fully validated+fsynced generation may be activated while the
+    # installer owns the lock. pending/recovering always fail closed.
+    if [[ "$MODE" == "boot" && "$TXN_PHASE" == "validated" ]]; then
+      exit 0
+    fi
+    echo "Installation/recovery lock is busy while transaction phase is $TXN_PHASE." >&2
+    exit 1
+  fi
+fi
+
+# Once recovery owns the transaction, make the rollback intent durable before
+# touching any live artifact. This also closes the validated lock-contention
+# admission window for concurrent unit starts.
+if [[ "$TXN_PHASE" != "recovering" ]]; then
+  mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"
+  durable_sync_paths "$INSTALL_STATE_ROOT"
+  TXN_PHASE="recovering"
+  TXN_DIR="$INSTALL_RECOVERING_DIR"
+fi
+
+read_value() {
+  local name="$1"
+  [[ -f "${TXN_DIR}/${name}" ]] || {
+    echo "Recovery journal is missing ${name}" >&2
+    return 1
+  }
+  cat "${TXN_DIR}/${name}"
+}
+
+schema_version="$(read_value schema_version)"
+[[ "$schema_version" == 2 ]] || {
+  echo "Unsupported installer recovery journal schema: $schema_version" >&2
+  exit 1
+}
+
+origin_boot_id="$(read_value origin_boot_id)"
+current_boot_id="$(cat "$BOOT_ID_FILE")"
+[[ "$origin_boot_id" =~ ^[0-9a-fA-F-]{36}$ && "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+  echo "Recovery journal or kernel exposes an invalid boot ID." >&2
+  exit 1
+}
+if [[ "$origin_boot_id" == "$current_boot_id" ]]; then
+  RECOVERY_MODE="normal"
+else
+  RECOVERY_MODE="boot"
+fi
+
+timer_enablement_state="$(read_value timer_enablement_state)"
+case "$timer_enablement_state" in
+  enabled|enabled-runtime|disabled|not-found) ;;
+  *) echo "Unsupported recorded timer enablement state: $timer_enablement_state" >&2; exit 1 ;;
+esac
+
+timer_was_active="$(read_value timer_was_active)"
+target_was_active="$(read_value target_was_active)"
+[[ "$timer_was_active" == 0 || "$timer_was_active" == 1 ]] || exit 1
+[[ "$target_was_active" == 0 || "$target_was_active" == 1 ]] || exit 1
+
+artifact_path() {
+  case "$1" in
+    agent) printf '%s\n' "$AGENT" ;;
+    smoke) printf '%s\n' "$SMOKE" ;;
+    service_unit) printf '%s\n' "$AGENT_SERVICE_UNIT" ;;
+    timer_unit) printf '%s\n' "$AGENT_TIMER_UNIT" ;;
+    env) printf '%s\n' "$ENV_FILE" ;;
+    fence) printf '%s\n' "$FENCE_DROPIN" ;;
+    *) return 1 ;;
+  esac
+}
+
 restore_artifact() {
   local key="$1" path present backup
   path="$(artifact_path "$key")"
   present="$(read_value "${key}_present")"
-  [[ "$present" == 0 || "$present" == 1 ]] || {
-    echo "Recovery journal has invalid ${key}_present: $present" >&2
-    return 1
-  }
-
-  backup="${INSTALL_TXN_DIR}/backups/${key}"
+  [[ "$present" == 0 || "$present" == 1 ]] || return 1
+  backup="${TXN_DIR}/backups/${key}"
   if [[ "$present" == 1 && ! -e "$backup" && ! -L "$backup" ]]; then
     echo "Recovery backup for $key is missing." >&2
     return 1
   fi
-
   rm -f -- "$path"
   if [[ "$present" == 1 ]]; then
     cp -a -- "$backup" "$path"
@@ -179,36 +212,55 @@ restore_artifact() {
 
 persist_restored_generation() {
   local timer_wants="/etc/systemd/system/timers.target.wants"
-
-  durable_sync_paths     "$AGENT"     "$SMOKE"     "$AGENT_SERVICE_UNIT"     "$AGENT_TIMER_UNIT"     "$ENV_FILE"     "$FENCE_DROPIN"     /usr/local/libexec     /etc/ec-deployment-attestation     "$FENCE_DROPIN_DIR"     /etc/systemd/system     "$timer_wants"
-
-  durable_sync_ancestor_chain     /usr/local/libexec     /etc/ec-deployment-attestation     "$FENCE_DROPIN_DIR"     "$timer_wants"
+  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
+  durable_sync_ancestor_chain     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR" "$timer_wants"
 }
 
-durable_remove_journal() {
-  rm -rf "$INSTALL_RECOVERED_DIR"
-  mv "$INSTALL_TXN_DIR" "$INSTALL_RECOVERED_DIR"
-  durable_sync_paths "$INSTALL_STATE_ROOT"
-  rm -rf "$INSTALL_RECOVERED_DIR"
-  durable_sync_paths "$INSTALL_STATE_ROOT"
+enabled_state() {
+  local state
+  state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true)"
+  [[ -n "$state" ]] || state="not-found"
+  printf '%s\n' "$state"
+}
+
+expected_enablement_state() {
+  if [[ "$RECOVERY_MODE" == "normal" ]]; then
+    printf '%s\n' "$timer_enablement_state"
+    return
+  fi
+  case "$timer_enablement_state" in
+    enabled) printf 'enabled\n' ;;
+    enabled-runtime|disabled) printf 'disabled\n' ;;
+    not-found) printf 'not-found\n' ;;
+  esac
+}
+
+expected_timer_active() {
+  if [[ "$RECOVERY_MODE" == "normal" ]]; then
+    printf '%s\n' "$timer_was_active"
+  elif [[ "$timer_enablement_state" == "enabled" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
 }
 
 restore_rc=0
 
-# Fail closed during rollback: no client-facing process may keep running while
-# its on-disk generation and systemd policy are being replaced.
-if ! systemctl stop "$TARGET_UNIT"; then
-  echo "CRITICAL: could not quiesce target service before recovery." >&2
-  exit 1
-fi
-if systemctl is-active --quiet "$TARGET_UNIT"; then
-  echo "CRITICAL: target service remained active after stop; refusing recovery mutation." >&2
-  exit 1
-fi
+# Nothing that can execute or mutate the generation may remain live while old
+# bytes and systemd policy are being restored.
+systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
+systemctl stop "$AGENT_RUN_UNIT" >/dev/null 2>&1 || restore_rc=1
+systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || restore_rc=1
+systemctl is-active --quiet "$AGENT_RUN_UNIT" && restore_rc=1 || true
+systemctl is-active --quiet "$TARGET_UNIT" && restore_rc=1 || true
 
-systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
-systemctl disable "$TIMER_UNIT" >/dev/null 2>&1 || true
-systemctl --runtime disable "$TIMER_UNIT" >/dev/null 2>&1 || true
+systemctl disable "$TIMER_UNIT" >/dev/null 2>&1 || {
+  [[ "$(enabled_state)" == "disabled" || "$(enabled_state)" == "not-found" ]] || restore_rc=1
+}
+systemctl --runtime disable "$TIMER_UNIT" >/dev/null 2>&1 || {
+  [[ "$(enabled_state)" != "enabled-runtime" ]] || restore_rc=1
+}
 
 for key in agent smoke service_unit timer_unit env fence; do
   restore_artifact "$key" || restore_rc=1
@@ -218,60 +270,57 @@ persist_restored_generation || restore_rc=1
 systemctl daemon-reload || restore_rc=1
 
 case "$RECOVERY_MODE:$timer_enablement_state" in
-  normal:enabled)
+  normal:enabled|boot:enabled)
     systemctl enable "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
     ;;
   normal:enabled-runtime)
     systemctl --runtime enable "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
     ;;
-  normal:disabled|normal:not-found)
-    ;;
-  boot:enabled)
-    systemctl enable "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
-    ;;
-  boot:enabled-runtime|boot:disabled|boot:not-found)
+  normal:disabled|normal:not-found|boot:enabled-runtime|boot:disabled|boot:not-found)
     ;;
 esac
 
+expected_enabled="$(expected_enablement_state)"
+actual_enabled="$(enabled_state)"
+[[ "$actual_enabled" == "$expected_enabled" ]] || {
+  echo "Timer enablement restore mismatch: expected=$expected_enabled actual=$actual_enabled" >&2
+  restore_rc=1
+}
+
+expected_active="$(expected_timer_active)"
+if [[ "$expected_active" == 1 ]]; then
+  systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
+else
+  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
+fi
+actual_active=0
+systemctl is-active --quiet "$TIMER_UNIT" && actual_active=1
+[[ "$actual_active" == "$expected_active" ]] || {
+  echo "Timer active-state restore mismatch: expected=$expected_active actual=$actual_active" >&2
+  restore_rc=1
+}
+
 persist_restored_generation || restore_rc=1
 
+# Validate restored bytes without starting the interlocked production resolver.
+# This avoids a dependency cycle when recovery itself was pulled in by target.
+if (( restore_rc == 0 )); then
+  "$VALIDATOR" || restore_rc=1
+fi
+
 if (( restore_rc != 0 )); then
-  echo "CRITICAL: interrupted installation could not be fully restored; target remains stopped and journal is retained at $INSTALL_TXN_DIR." >&2
-  exit 1
-fi
-
-if [[ "$RECOVERY_MODE" == "normal" ]]; then
-  if ! systemctl start "$TARGET_UNIT" \
-     || ! systemctl is-active --quiet "$TARGET_UNIT" \
-     || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null \
-     || { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; }; then
-    systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
-    echo "CRITICAL: restored target generation failed health validation; target left stopped and journal retained." >&2
-    exit 1
-  fi
-
-  if [[ "$timer_was_active" == 1 ]]; then
-    if ! systemctl start "$TIMER_UNIT" >/dev/null 2>&1; then
-      systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
-      echo "CRITICAL: failed to restore prior active timer state; target left stopped and journal retained." >&2
-      exit 1
-    fi
-  else
-    systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
-  fi
-else
-  if [[ "$timer_enablement_state" == "enabled" ]]; then
-    systemctl --no-block start "$TIMER_UNIT" >/dev/null 2>&1 || {
-      echo "CRITICAL: failed to queue persistently enabled timer after boot recovery." >&2
-      exit 1
-    }
-  fi
-fi
-
-persist_restored_generation || {
   systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
+  systemctl stop "$AGENT_RUN_UNIT" >/dev/null 2>&1 || true
   systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
-  echo "CRITICAL: restored generation could not be durably persisted; journal retained." >&2
+  echo "CRITICAL: previous generation could not be restored exactly; services remain quiesced and recovery journal is retained." >&2
   exit 1
-}
-durable_remove_journal
+fi
+
+# The restored generation is now exact, durable and transiently healthy.
+# Remove the blocking phase atomically; dependent systemd jobs may start only
+# after this service exits.
+rm -rf "$INSTALL_RECOVERED_DIR"
+mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"
+durable_sync_paths "$INSTALL_STATE_ROOT"
+rm -rf "$INSTALL_RECOVERED_DIR"
+durable_sync_paths "$INSTALL_STATE_ROOT"
