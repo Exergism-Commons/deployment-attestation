@@ -195,9 +195,17 @@ durable_remove_journal() {
 
 restore_rc=0
 
-# Normalize whatever the failed installation left behind before restoring the
-# previous unit files and enablement semantics. Runtime and persistent
-# enablement are separate namespaces and must both be cleared.
+# Fail closed during rollback: no client-facing process may keep running while
+# its on-disk generation and systemd policy are being replaced.
+if ! systemctl stop "$TARGET_UNIT"; then
+  echo "CRITICAL: could not quiesce target service before recovery." >&2
+  exit 1
+fi
+if systemctl is-active --quiet "$TARGET_UNIT"; then
+  echo "CRITICAL: target service remained active after stop; refusing recovery mutation." >&2
+  exit 1
+fi
+
 systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
 systemctl disable "$TIMER_UNIT" >/dev/null 2>&1 || true
 systemctl --runtime disable "$TIMER_UNIT" >/dev/null 2>&1 || true
@@ -222,39 +230,48 @@ case "$RECOVERY_MODE:$timer_enablement_state" in
     systemctl enable "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
     ;;
   boot:enabled-runtime|boot:disabled|boot:not-found)
-    # Runtime-only enablement and manually active disabled units naturally do
-    # not survive a reboot. Do not accidentally turn them persistent here.
     ;;
 esac
-
-if [[ "$RECOVERY_MODE" == "normal" ]]; then
-  systemctl restart "$TARGET_UNIT" || restore_rc=1
-  systemctl is-active --quiet "$TARGET_UNIT" || restore_rc=1
-  curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || restore_rc=1
-
-  if [[ -x "$SMOKE" ]]; then
-    EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || restore_rc=1
-  fi
-
-  if [[ "$timer_was_active" == 1 ]]; then
-    systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
-  else
-    systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
-  fi
-else
-  # On boot only a persistently enabled timer should be brought back. A
-  # runtime-enabled or manually active disabled timer would have disappeared
-  # across this reboot even without the failed installation.
-  if [[ "$timer_enablement_state" == "enabled" ]]; then
-    systemctl --no-block start "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
-  fi
-fi
 
 persist_restored_generation || restore_rc=1
 
 if (( restore_rc != 0 )); then
-  echo "CRITICAL: interrupted Deployment Attestation installation could not be fully restored; recovery journal retained at $INSTALL_TXN_DIR." >&2
+  echo "CRITICAL: interrupted installation could not be fully restored; target remains stopped and journal is retained at $INSTALL_TXN_DIR." >&2
   exit 1
 fi
 
+if [[ "$RECOVERY_MODE" == "normal" ]]; then
+  if ! systemctl start "$TARGET_UNIT" \
+     || ! systemctl is-active --quiet "$TARGET_UNIT" \
+     || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null \
+     || { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; }; then
+    systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+    echo "CRITICAL: restored target generation failed health validation; target left stopped and journal retained." >&2
+    exit 1
+  fi
+
+  if [[ "$timer_was_active" == 1 ]]; then
+    if ! systemctl start "$TIMER_UNIT" >/dev/null 2>&1; then
+      systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+      echo "CRITICAL: failed to restore prior active timer state; target left stopped and journal retained." >&2
+      exit 1
+    fi
+  else
+    systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
+  fi
+else
+  if [[ "$timer_enablement_state" == "enabled" ]]; then
+    systemctl --no-block start "$TIMER_UNIT" >/dev/null 2>&1 || {
+      echo "CRITICAL: failed to queue persistently enabled timer after boot recovery." >&2
+      exit 1
+    }
+  fi
+fi
+
+persist_restored_generation || {
+  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
+  systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+  echo "CRITICAL: restored generation could not be durably persisted; journal retained." >&2
+  exit 1
+}
 durable_remove_journal
