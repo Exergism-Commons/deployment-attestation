@@ -708,6 +708,29 @@ for flag in ("--git-dir", "--git-common-dir"):
     if root not in roots:
         roots.append(root)
 
+# Populated submodules normally live below the superproject common-dir, but a
+# gitfile may legitimately point elsewhere. Include every discovered gitfile
+# target so both live-writer detection and stale-lock cleanup cover it.
+for marker in app.rglob(".git"):
+    try:
+        if marker.is_file() and not marker.is_symlink():
+            text = marker.read_text(encoding="utf-8").strip()
+            if not text.lower().startswith("gitdir:"):
+                raise RuntimeError(f"malformed gitfile: {marker}")
+            raw = text.split(":", 1)[1].strip()
+            root = pathlib.Path(raw)
+            if not root.is_absolute():
+                root = marker.parent / root
+            root = root.resolve(strict=False)
+            if root not in roots:
+                roots.append(root)
+        elif marker.is_dir() and not marker.is_symlink():
+            root = marker.resolve(strict=False)
+            if root not in roots:
+                roots.append(root)
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"cannot inspect git metadata marker {marker}") from exc
+
 protected = [app, *roots]
 
 def resolve_from(value, cwd):
@@ -857,8 +880,10 @@ def lock_is_open(lock):
         for fd in fds:
             try:
                 st = fd.stat()
-            except (FileNotFoundError, ProcessLookupError, PermissionError):
+            except (FileNotFoundError, ProcessLookupError):
                 continue
+            except PermissionError as exc:
+                raise RuntimeError(f"cannot inspect fd for process {proc.name} before lock cleanup") from exc
             if (st.st_dev, st.st_ino) == wanted:
                 return True
     return False
