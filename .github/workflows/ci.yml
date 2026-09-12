@@ -103,6 +103,13 @@ jobs:
           grep -Fq 'live git process' agent/ec-deployment-agent.sh
           grep -Fq 'root.rglob("*.lock")' agent/ec-deployment-agent.sh
           grep -Fq 'reconcile_stale_git_locks || return 1' agent/ec-deployment-agent.sh
+          grep -Fq 'arg.startswith("--git-dir=")' agent/ec-deployment-agent.sh
+          grep -Fq 'arg.startswith("--work-tree=")' agent/ec-deployment-agent.sh
+          grep -Fq 'arg in ("--git-dir", "--work-tree", "-C")' agent/ec-deployment-agent.sh
+          grep -Fq 'GIT_COMMON_DIR' agent/ec-deployment-agent.sh
+          grep -Fq 'GIT_INDEX_FILE' agent/ec-deployment-agent.sh
+          grep -Fq 'for marker in app.rglob(".git")' agent/ec-deployment-agent.sh
+          grep -Fq 'refusing to remove open git lock' agent/ec-deployment-agent.sh
           grep -Fq 'stop_service_quiescent()' agent/ec-deployment-agent.sh
           grep -Fq 'service_cgroup_has_processes()' agent/ec-deployment-agent.sh
           grep -Fq 'Target service did not become provably quiescent' agent/ec-deployment-agent.sh
@@ -162,8 +169,10 @@ jobs:
           grep -Fq 'mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
           grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
           grep -Fq 'verify_production_artifact_fence()' install/install-id-exergism.sh
-          grep -Fq 'nsenter --target "$pid" --mount -- findmnt -T "$path" -n -o OPTIONS' install/install-id-exergism.sh
-          grep -Fq 'Production resolver sees writable deployment artifact' install/install-id-exergism.sh
+          grep -Fq 'open("/proc/self/mountinfo"' install/install-id-exergism.sh
+          grep -Fq 'writable source submount' install/install-id-exergism.sh
+          grep -Fq 'runtime is writable via' install/install-id-exergism.sh
+          grep -Fq 'Production resolver changed PID during artifact-fence audit' install/install-id-exergism.sh
           grep -Fq 'verify_production_artifact_fence' install/install-id-exergism.sh
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
@@ -225,6 +234,11 @@ jobs:
           grep -Fq 'Restart=on-failure' packaging/id-exergism-install-recovery-finalize.service
           grep -Fq 'RECOVERED_DIR=' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Timer enablement mismatch during recovery finalization' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'timer_active_state()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'wait_timer_quiescent()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'Timer did not reach a provably quiescent terminal state.' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'Could not re-check timer enablement after runtime restoration.' install/finalize-id-exergism-recovery.sh
           grep -Fq 'mv "$RECOVERED_DIR" "$FINALIZED_DIR"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'RuntimeMaxSec=90s' install/validate-id-exergism-generation.sh
           grep -Fq 'ReadOnlyPaths=$APP_DIR' install/validate-id-exergism-generation.sh
@@ -240,12 +254,20 @@ jobs:
           from pathlib import Path
 
           text = Path('install/install-id-exergism.sh').read_text()
+          validator = text.index('atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755')
+          finalizer = text.index('atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755')
+          finalizer_unit = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644')
+          helper = text.index('atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755')
           recovery_unit = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644')
+          helper_gate = text.index('# Only after the helper dependency generation is durable')
           core_barrier = text.index('# The enablement link is part of the recovery core')
           target_interlock = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK" 0644')
           agent_interlock = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK" 0644')
-          assert recovery_unit < core_barrier < target_interlock
-          assert recovery_unit < core_barrier < agent_interlock
+          assert validator < helper_gate < helper
+          assert finalizer < helper_gate < helper
+          assert finalizer_unit < helper_gate < helper
+          assert helper < recovery_unit < core_barrier < target_interlock
+          assert helper < recovery_unit < core_barrier < agent_interlock
 
           recovery = Path('install/recover-id-exergism-install.sh').read_text()
           hard_quiesce = recovery.index('if (( quiesce_failed != 0 )); then')
@@ -292,6 +314,12 @@ jobs:
           timer_start = text.index('systemctl start "$TIMER_UNIT"', live_fence)
           final_commit = text.index('finalize_install_transaction', timer_start)
           assert live_fence < timer_start < final_commit
+
+          finalizer_text = Path('install/finalize-id-exergism-recovery.sh').read_text()
+          timer_terminal = finalizer_text.index('expected_active="$(expected_timer_active)"')
+          enablement_recheck = finalizer_text.index('Could not re-check timer enablement after runtime restoration.')
+          marker_retire = finalizer_text.index('mv "$RECOVERED_DIR" "$FINALIZED_DIR"')
+          assert timer_terminal < enablement_recheck < marker_retire
           PY
 
       - name: Reject obvious committed secrets
