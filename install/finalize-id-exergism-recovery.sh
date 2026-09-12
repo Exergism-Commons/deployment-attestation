@@ -232,29 +232,99 @@ raise SystemExit(0)
 PY
 }
 
-wait_target_quiescent() {
-  local i
-  systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+target_active_state() {
+  local load active
+  if ! load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)"; then
+    echo "Could not determine target LoadState while finalizing recovery." >&2
+    return 1
+  fi
+  if [[ "$load" == "not-found" ]]; then
+    printf 'not-found\n'
+    return 0
+  fi
+  [[ -n "$load" ]] || {
+    echo "Target LoadState query returned no value while finalizing recovery." >&2
+    return 1
+  }
+
+  if ! active="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)"; then
+    echo "Could not determine target ActiveState while finalizing recovery." >&2
+    return 1
+  fi
+  [[ -n "$active" ]] || {
+    echo "Target ActiveState query returned no value while finalizing recovery." >&2
+    return 1
+  }
+  printf '%s\n' "$active"
+}
+
+wait_target_healthy_active() {
+  local i state
+  for i in {1..30}; do
+    state="$(target_active_state)" || return 1
+    case "$state" in
+      active) break ;;
+      activating|reloading) sleep 1; continue ;;
+      inactive|failed|deactivating|not-found)
+        echo "Target failed to become active while finalizing recovery: $state" >&2
+        return 1
+        ;;
+      *)
+        echo "Unexpected target ActiveState while finalizing recovery: $state" >&2
+        return 1
+        ;;
+    esac
+  done
+  [[ "$state" == "active" ]] || {
+    echo "Target did not become provably active while finalizing recovery." >&2
+    return 1
+  }
+  systemctl is-active --quiet "$TARGET_UNIT" || return 1
+  curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || return 1
+  if [[ -x "$SMOKE" ]]; then
+    EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || return 1
+  fi
+}
+
+settle_target_after_inactive_baseline() {
+  local i state
+  # Recovery publishes .recovered only after it has proved the old target
+  # quiescent. Any activity visible now is therefore a post-recovery start,
+  # possibly the original explicit start job that pulled recovery in. Never
+  # issue a stop here: doing so can cancel or reverse that legitimate start.
   for i in {1..30}; do
     target_quiescent && return 0
-    sleep 1
+    state="$(target_active_state)" || return 1
+    case "$state" in
+      active|activating|reloading)
+        wait_target_healthy_active
+        return
+        ;;
+      inactive|failed|deactivating)
+        sleep 1
+        ;;
+      not-found)
+        return 0
+        ;;
+      *)
+        echo "Unexpected target ActiveState while settling recovered state: $state" >&2
+        return 1
+        ;;
+    esac
   done
-  echo "Target did not become provably quiescent while finalizing recovery." >&2
+  echo "Target neither became quiescent nor completed a post-recovery activation." >&2
   return 1
 }
 
-# Same-boot recovery preserves the exact pre-install target active state. A
-# reboot intentionally does not preserve volatile activity across boots.
+# Same-boot recovery restores a previously-active target. If the recorded
+# baseline was inactive, recovery itself already established the stale-process
+# boundary before publishing .recovered; preserve any later explicit start.
 if [[ "$RECOVERY_MODE" == "normal" ]]; then
   if [[ "$target_was_active" == 1 ]]; then
     systemctl start "$TARGET_UNIT"
-    systemctl is-active --quiet "$TARGET_UNIT"
-    curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
-    if [[ -x "$SMOKE" ]]; then
-      EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
-    fi
+    wait_target_healthy_active
   else
-    wait_target_quiescent
+    settle_target_after_inactive_baseline
   fi
 fi
 
