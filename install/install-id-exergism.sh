@@ -16,6 +16,9 @@ RECOVERY_UNIT="id-exergism-install-recovery.service"
 AGENT="/usr/local/libexec/ec-deployment-agent"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
+RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
+APP_DIR="/srv/id.exergism.org"
+APP_BIN="/usr/local/bin/idresolver"
 AGENT_SERVICE_UNIT="/etc/systemd/system/ec-deployment-attestation@.service"
 AGENT_TIMER_UNIT="/etc/systemd/system/ec-deployment-attestation@.timer"
 ENV_FILE="/etc/ec-deployment-attestation/${SERVICE}.env"
@@ -24,6 +27,8 @@ FENCE_DROPIN="${FENCE_DROPIN_DIR}/90-ec-deployment-attestation-artifact-fence.co
 
 RECOVERY_HELPER="/usr/local/libexec/ec-deployment-install-recovery"
 RECOVERY_UNIT_PATH="/etc/systemd/system/${RECOVERY_UNIT}"
+RECOVERY_FINALIZE_UNIT="id-exergism-install-recovery-finalize.service"
+RECOVERY_FINALIZE_UNIT_PATH="/etc/systemd/system/${RECOVERY_FINALIZE_UNIT}"
 TARGET_RECOVERY_INTERLOCK="${FENCE_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
 AGENT_RECOVERY_DROPIN_DIR="/etc/systemd/system/${AGENT_RUN_UNIT}.d"
 AGENT_RECOVERY_INTERLOCK="${AGENT_RECOVERY_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
@@ -151,9 +156,11 @@ fi
 # interlock that can make production units depend on it.
 atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755
 atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755
+atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755
 atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644
+atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644
 
-durable_sync_paths   "$RECOVERY_HELPER"   "$VALIDATOR"   "$RECOVERY_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
+durable_sync_paths   "$RECOVERY_HELPER"   "$VALIDATOR"   "$RECOVERY_FINALIZER"   "$RECOVERY_UNIT_PATH"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
 
 systemctl daemon-reload
@@ -419,6 +426,32 @@ fi
 
 target_was_active="$(capture_active_baseline "$TARGET_UNIT")"
 
+verify_production_artifact_fence() {
+  local pid path options
+  if ! pid="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)"; then
+    echo "Could not determine production resolver MainPID." >&2
+    return 1
+  fi
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Production resolver has no live MainPID." >&2
+    return 1
+  }
+
+  for path in "$APP_DIR" "$APP_BIN"; do
+    options="$(nsenter --target "$pid" --mount -- findmnt -T "$path" -n -o OPTIONS 2>/dev/null)" || {
+      echo "Could not inspect production mount options for $path." >&2
+      return 1
+    }
+    case ",$options," in
+      *,ro,*) ;;
+      *)
+        echo "Production resolver sees writable deployment artifact: $path ($options)" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 artifact_path() {
   case "$1" in
     agent) printf '%s\n' "$AGENT" ;;
@@ -566,6 +599,7 @@ systemctl start "$TARGET_UNIT"
 systemctl is-active --quiet "$TARGET_UNIT"
 curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
 EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
+verify_production_artifact_fence
 
 systemctl start "$TIMER_UNIT"
 systemctl is-active --quiet "$TIMER_UNIT"
