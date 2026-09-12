@@ -246,9 +246,9 @@ jobs:
 
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
-          timer_stop = text.index('stop_and_wait_quiescent "$TIMER_UNIT"')
-          updater_stop = text.index('stop_and_wait_quiescent "$AGENT_RUN_UNIT"')
-          agent_lock = text.index('flock -n 8 || {', updater_stop)
+          timer_stop = text.index('stop_and_wait_quiescent "$TIMER_UNIT"', pretxn_guard)
+          updater_stop = text.index('stop_and_wait_quiescent "$AGENT_RUN_UNIT"', timer_stop)
+          agent_lock = text.index('if ! flock -n 8; then', updater_stop)
           updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover')
           target_baseline = text.index('target_was_active="$(capture_active_baseline "$TARGET_UNIT")"')
           journal_publish = text.index('create_install_transaction')
