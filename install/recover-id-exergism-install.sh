@@ -70,7 +70,20 @@ PY
 }
 
 durable_remove_journal() {
-  rm -rf "$INSTALL_TXN_DIR"
+  local recovered="${INSTALL_TXN_DIR}.recovered"
+  rm -rf "$recovered"
+  mv "$INSTALL_TXN_DIR" "$recovered"
+  python3 - "$INSTALL_STATE_ROOT" <<'PY'
+import os
+import sys
+
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  rm -rf "$recovered"
   python3 - "$INSTALL_STATE_ROOT" <<'PY'
 import os
 import sys
