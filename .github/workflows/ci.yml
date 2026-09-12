@@ -111,6 +111,8 @@ jobs:
           grep -Fq 'GIT_COMMON_DIR' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_INDEX_FILE' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_COUNT' agent/ec-deployment-agent.sh
+          grep -Fq 'GIT_CONFIG_PARAMETERS' agent/ec-deployment-agent.sh
+          grep -Fq 'rev-parse", "--path-format=absolute", "--show-toplevel' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_KEY_' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_VALUE_' agent/ec-deployment-agent.sh
           grep -Fq 'for marker in app.rglob(".git")' agent/ec-deployment-agent.sh
@@ -199,7 +201,8 @@ jobs:
           ! grep -Fq 'ConditionPathExists=' packaging/id-exergism-install-recovery.service
           grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.service' packaging/id-exergism-install-recovery.service
           grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
-          grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
+          grep -Fxq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-agent-recovery-interlock.conf
+          ! grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'After=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'TXN_PHASE="pending"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
@@ -250,8 +253,9 @@ jobs:
           grep -Fq 'timer_active_state()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_quiescent()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'target_quiescent()' install/finalize-id-exergism-recovery.sh
-          grep -Fq 'wait_target_quiescent()' install/finalize-id-exergism-recovery.sh
-          grep -Fq 'Same-boot recovery preserves the exact pre-install target active state.' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'settle_target_after_inactive_baseline()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'Never' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'preserve any later explicit start' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Timer did not reach a provably quiescent terminal state.' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Could not re-check timer enablement after runtime restoration.' install/finalize-id-exergism-recovery.sh
