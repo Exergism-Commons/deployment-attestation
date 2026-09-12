@@ -54,6 +54,11 @@ sha256sum --version >/dev/null
 flock --version >/dev/null
 grep --version >/dev/null
 systemd-run --version >/dev/null
+systemd_version="$(systemd-run --version | awk 'NR==1 {print $2}')"
+if [[ ! "$systemd_version" =~ ^[0-9]+$ ]] || (( systemd_version < 250 )); then
+  echo "systemd >= 250 is required for ExitType=cgroup smoke containment (found: ${systemd_version:-unknown})." >&2
+  exit 1
+fi
 findmnt --version >/dev/null
 nsenter --version >/dev/null
 
@@ -71,6 +76,30 @@ install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.time
   /etc/systemd/system/ec-deployment-attestation@.timer
 
 install -d -o root -g root -m 0755 "$FENCE_DROPIN_DIR"
+
+fence_backup="$(mktemp)"
+had_fence_dropin=0
+if [[ -f "$FENCE_DROPIN" ]]; then
+  install -o root -g root -m 0600 "$FENCE_DROPIN" "$fence_backup"
+  had_fence_dropin=1
+fi
+
+restore_previous_fence() {
+  local restore_rc=0
+  if [[ "$had_fence_dropin" == 1 ]]; then
+    install -o root -g root -m 0644 "$fence_backup" "$FENCE_DROPIN" || restore_rc=1
+  else
+    rm -f "$FENCE_DROPIN" || restore_rc=1
+  fi
+  systemctl daemon-reload || restore_rc=1
+  systemctl restart "$TARGET_UNIT" || restore_rc=1
+  systemctl is-active --quiet "$TARGET_UNIT" || restore_rc=1
+  if (( restore_rc != 0 )); then
+    echo "CRITICAL: failed to restore the previous target-service configuration after fence installation failure." >&2
+    return 1
+  fi
+}
+
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-artifact-fence.conf" "$FENCE_DROPIN"
 
 if [[ ! -e "/etc/ec-deployment-attestation/${SERVICE}.env" ]]; then
@@ -80,10 +109,19 @@ fi
 
 systemctl daemon-reload
 # Apply the service-local read-only artifact namespace before the updater can
-# accept any running deployment as a stable baseline.
-systemctl restart "$TARGET_UNIT"
-systemctl is-active --quiet "$TARGET_UNIT" || { echo "Target service failed after artifact fence installation" >&2; exit 1; }
-curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || { echo "Target service health failed after artifact fence installation" >&2; exit 1; }
+# accept any running deployment as a stable baseline. If the new fence is
+# incompatible with this resolver, restore the exact previous drop-in state and
+# bring the old configuration back before failing the installation.
+if ! systemctl restart "$TARGET_UNIT" \
+   || ! systemctl is-active --quiet "$TARGET_UNIT" \
+   || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null; then
+  echo "Target service failed after artifact fence installation; restoring previous configuration." >&2
+  restore_previous_fence || exit 1
+  rm -f "$fence_backup"
+  exit 1
+fi
+rm -f "$fence_backup"
+
 systemctl enable --now "ec-deployment-attestation@${SERVICE}.timer"
 
 printf '\nInstalled Deployment Attestation agent for %s.\n' "$SERVICE"
