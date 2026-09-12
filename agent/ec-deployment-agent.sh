@@ -673,6 +673,90 @@ PY
   atomic_write "$TRANSACTION_FILE" "$body" 0600
 }
 
+reconcile_stale_git_locks() {
+  # A deployment transaction plus both exclusive agent locks establishes that
+  # no legitimate updater-owned Git writer may still be active. Refuse cleanup
+  # if an external Git process still appears to be operating on this checkout.
+  python3 - "$EC_APP_DIR" <<'PY'
+import os
+import pathlib
+import stat
+import subprocess
+import sys
+
+app = pathlib.Path(sys.argv[1]).resolve()
+
+def under(child, parent):
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+for proc in pathlib.Path("/proc").iterdir():
+    if not proc.name.isdigit():
+        continue
+    try:
+        raw = (proc / "cmdline").read_bytes()
+        if not raw:
+            continue
+        argv = [os.fsdecode(x) for x in raw.split(b"\0") if x]
+        if not argv or pathlib.Path(argv[0]).name != "git":
+            continue
+        relevant = False
+        try:
+            cwd = (proc / "cwd").resolve()
+            relevant = under(cwd, app)
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
+        if not relevant:
+            for arg in argv[1:]:
+                if arg == str(app) or arg.startswith(str(app) + os.sep):
+                    relevant = True
+                    break
+        if relevant:
+            raise RuntimeError(f"live git process {proc.name} still references deployment checkout")
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+    except PermissionError as exc:
+        raise RuntimeError(f"cannot inspect process {proc.name} while reconciling git locks") from exc
+
+def git_path(flag):
+    out = subprocess.check_output(
+        ["git", "-C", str(app), "rev-parse", "--path-format=absolute", flag],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+    return pathlib.Path(out)
+
+roots = []
+for flag in ("--git-dir", "--git-common-dir"):
+    root = git_path(flag)
+    if root not in roots:
+        roots.append(root)
+
+for root in roots:
+    st = root.lstat()
+    if not stat.S_ISDIR(st.st_mode):
+        raise RuntimeError(f"git metadata root is not a directory: {root}")
+    # This includes root index.lock as well as refs/*.lock, shallow.lock and
+    # nested .git/modules/** lockfiles for populated submodules.
+    for lock in sorted(root.rglob("*.lock")):
+        try:
+            st = lock.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError(f"refusing to remove non-regular git lock: {lock}")
+        lock.unlink()
+        fd = os.open(lock.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+PY
+}
+
 switch_source() {
   local commit="$1" fetch_first="${2:-0}"
   if [[ "$fetch_first" == 1 ]]; then
@@ -738,6 +822,7 @@ rollback_transaction() {
 
   warn "Recovering transaction to $commit"
   stop_service_quiescent || return 1
+  reconcile_stale_git_locks || return 1
   switch_source "$commit" 0 || return 1
 
   install -o root -g root -m 0755 "$backup" "${EC_APP_BIN}.rollback" || return 1
