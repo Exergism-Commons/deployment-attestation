@@ -98,6 +98,8 @@ jobs:
           grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
+          grep -Fq 'recover)' agent/ec-deployment-agent.sh
+          grep -Fq 'Installer coordination path: reconcile only an already-journaled' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
           grep -Fq 'systemd-analyze' install/install-id-exergism.sh
@@ -109,11 +111,19 @@ jobs:
           grep -Fq 'Only now expose resolver/updater dependencies' install/install-id-exergism.sh
           grep -Fq 'unit_is_quiescent()' install/install-id-exergism.sh
           grep -Fq 'Could not determine LoadState for $unit' install/install-id-exergism.sh
+          grep -Fq 'query_timer_enablement_state()' install/install-id-exergism.sh
+          grep -Fq 'Could not determine exact timer enablement state' install/install-id-exergism.sh
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
+          grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover' install/install-id-exergism.sh
+          grep -Fq 'Deployment updater transaction could not be recovered' install/install-id-exergism.sh
+          grep -Fq 'pretransaction_journal_published=0' install/install-id-exergism.sh
+          grep -Fq 'restore_pretransaction_timer_on_exit()' install/install-id-exergism.sh
           grep -Fq 'Refusing to capture installer baseline' install/install-id-exergism.sh
           grep -Fq 'ActiveState' install/install-id-exergism.sh
           grep -Fq 'MainPID' install/install-id-exergism.sh
           grep -Fq 'ControlGroup' install/install-id-exergism.sh
+          grep -Fq 'Could not determine ControlGroup for $unit' install/install-id-exergism.sh
+          grep -Fq 'cgroup_rc=$?' install/install-id-exergism.sh
           grep -Fq 'stop_and_wait_quiescent "$AGENT_RUN_UNIT"' install/install-id-exergism.sh
           grep -Fq 'flock -n 9' install/install-id-exergism.sh
           grep -Fq 'INSTALL_PENDING_DIR=' install/install-id-exergism.sh
@@ -145,6 +155,7 @@ jobs:
           grep -Fq 'TXN_PHASE="pending"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="recovering"' install/recover-id-exergism-install.sh
+          grep -Fq 'TXN_PHASE="recovered"' install/recover-id-exergism-install.sh
           grep -Fq 'if [[ "$MODE" == "boot" && "$TXN_PHASE" == "validated" ]]' install/recover-id-exergism-install.sh
           grep -Fq 'mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
           grep -Fq '[[ "$schema_version" == 2 ]]' install/recover-id-exergism-install.sh
@@ -158,6 +169,11 @@ jobs:
           grep -Fq 'ActiveState' install/recover-id-exergism-install.sh
           grep -Fq 'MainPID' install/recover-id-exergism-install.sh
           grep -Fq 'ControlGroup' install/recover-id-exergism-install.sh
+          grep -Fq 'Could not determine ControlGroup for $unit' install/recover-id-exergism-install.sh
+          grep -Fq 'cgroup_rc=$?' install/recover-id-exergism-install.sh
+          grep -Fq 'quiesce_failed=0' install/recover-id-exergism-install.sh
+          grep -Fq 'no deployment artifact was modified and journal is retained' install/recover-id-exergism-install.sh
+          grep -Fq 'Could not determine exact timer enablement during recovery' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_unit()' install/recover-id-exergism-install.sh
           grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
           grep -Fq 'previously active resolver could not be restored healthy after direct recovery' install/recover-id-exergism-install.sh
@@ -189,11 +205,26 @@ jobs:
           assert recovery_unit < core_barrier < agent_interlock
 
           recovery = Path('install/recover-id-exergism-install.sh').read_text()
+          hard_quiesce = recovery.index('if (( quiesce_failed != 0 )); then')
+          first_restore = recovery.index('restore_artifact "$key"')
           validate = recovery.index('"$VALIDATOR" || restore_rc=1')
           retire = recovery.index('mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
           direct_restart = recovery.index('previously active resolver could not be restored healthy after direct recovery')
           timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
+          assert hard_quiesce < first_restore
           assert validate < retire < direct_restart < timer_restore
+
+          agent = Path('agent/ec-deployment-agent.sh').read_text()
+          assert agent.index('recover)') < agent.index('run|update)')
+
+          updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover')
+          target_baseline = text.index('target_was_active="$(capture_active_baseline "$TARGET_UNIT")"')
+          journal_publish = text.index('create_install_transaction')
+          assert updater_recover < target_baseline < journal_publish
+
+          select_recovered = recovery.index('TXN_PHASE="recovered"')
+          phase_to_recovering = recovery.index('mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
+          assert select_recovered < phase_to_recovering
           PY
 
       - name: Reject obvious committed secrets
