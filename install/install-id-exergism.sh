@@ -110,6 +110,25 @@ for raw in sys.argv[1:]:
 PY
 }
 
+atomic_install_root_file() {
+  local source="$1" dest="$2" mode="$3"
+  local dir base tmp
+  dir="${dest%/*}"
+  base="${dest##*/}"
+  tmp="$(mktemp "${dir}/.${base}.tmp.XXXXXX")"
+  trap 'rm -f "$tmp"' RETURN
+
+  install -o root -g root -m "$mode" "$source" "$tmp"
+  # Content reaches stable storage before the rename. Until rename, the old
+  # destination remains intact; after rename, fsync the directory entry.
+  durable_sync_paths "$tmp"
+  mv -f "$tmp" "$dest"
+  durable_sync_paths "$dest" "$dir"
+
+  trap - RETURN
+}
+
+
 install -d -m 0755 /usr/local/libexec
 install -d -m 0755 /etc/ec-deployment-attestation
 install -d -m 0700 /etc/ec-deployment-attestation/secrets
@@ -129,9 +148,9 @@ fi
 # Recovery and isolated validation infrastructure are outside the generation
 # transaction. Publish the complete recovery core durably *before* exposing any
 # interlock that can make production units depend on it.
-install -o root -g root -m 0755 "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER"
-install -o root -g root -m 0755 "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR"
-install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH"
+atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755
+atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755
+atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644
 
 durable_sync_paths   "$RECOVERY_HELPER"   "$VALIDATOR"   "$RECOVERY_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
@@ -146,8 +165,8 @@ durable_sync_ancestor_chain   /etc/systemd/system/multi-user.target.wants
 
 # Only now expose resolver/updater dependencies on the already-durable recovery
 # core. A power loss can no longer persist an interlock without its prerequisite.
-install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK"
-install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK"
+atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK" 0644
+atomic_install_root_file "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK" 0644
 rm -f "$LEGACY_TIMER_RECOVERY_INTERLOCK"
 
 durable_sync_paths   "$TARGET_RECOVERY_INTERLOCK"   "$AGENT_RECOVERY_INTERLOCK"   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system
