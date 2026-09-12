@@ -3,7 +3,6 @@ Description=Recover interrupted Exergism Commons Deployment Attestation installa
 DefaultDependencies=no
 After=local-fs.target
 Before=id-exergism.service ec-deployment-attestation@id.exergism.org.timer
-ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.pending
 
 [Service]
 Type=oneshot
