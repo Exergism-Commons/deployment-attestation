@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre14"
+AGENT_VERSION="0.1.0-pre15"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 
 log()  { printf '\n==> %s\n' "$*"; }
@@ -416,13 +416,36 @@ PY
 
 bootstrap_state() {
   [[ -f "$CURRENT_STATE_FILE" ]] && return 0
-  local commit binary
-  # A first-run baseline is trusted only from a write-stable deployment view.
-  # If the target service is already running, require its live namespace to
-  # expose both deployment artifacts read-only before measuring either one.
-  if systemctl is-active --quiet "$EC_SERVICE_UNIT"; then
-    artifact_write_fence || die "Bootstrap refused: active service lacks the artifact write fence"
+  local commit binary active_state pid
+  active_state="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value 2>/dev/null || true)"
+  pid="$(service_main_pid 2>/dev/null || true)"
+
+  # Never sample a transitional writer. If a live process exists in any unit
+  # state, first prove its mount namespace fences both deployment artifacts.
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    artifact_write_fence || die "Bootstrap refused: live service process lacks the artifact write fence"
   fi
+
+  case "$active_state" in
+    active)
+      ;;
+    inactive|failed)
+      [[ -z "$pid" ]] || die "Bootstrap refused: non-active service still has a live MainPID"
+      systemctl start "$EC_SERVICE_UNIT" || die "Bootstrap refused: could not start target service"
+      systemctl is-active --quiet "$EC_SERVICE_UNIT" || die "Bootstrap refused: target service did not become active"
+      artifact_write_fence || die "Bootstrap refused: started service lacks the artifact write fence"
+      ;;
+    *)
+      die "Bootstrap refused: target service is in transitional state ${active_state:-unknown}"
+      ;;
+  esac
+
+  # A rollback baseline must already be operationally viable. These are the
+  # same mandatory local/semantic checks used when validating recovery.
+  curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null || die "Bootstrap refused: local health check failed"
+  run_smoke >/dev/null 2>&1 || die "Bootstrap refused: semantic smoke check failed"
+  artifact_write_fence || die "Bootstrap refused: artifact fence lost during health validation"
+
   if [[ -r "$EC_SOURCE_REVISION_FILE" ]]; then commit="$(tr -d '\r\n' < "$EC_SOURCE_REVISION_FILE")"
   else commit="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"; fi
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "Cannot bootstrap deployment revision"
@@ -432,9 +455,11 @@ bootstrap_state() {
   [[ "$binary" =~ ^[0-9a-f]{64}$ ]] || die "Bootstrap refused: runtime digest invalid"
   fsync_checkout "$commit" || die "Bootstrap refused: source durability barrier failed"
   verify_runtime_exact "$binary" || die "Bootstrap refused: runtime durability barrier failed"
+  artifact_write_fence || die "Bootstrap refused: artifact fence lost before state commit"
+  source_tree_exact "$commit" || die "Bootstrap refused: source changed before state commit"
+  [[ "$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)" == "$binary" ]] || die "Bootstrap refused: runtime changed before state commit"
   write_current_state "$commit" "$binary" "" || die "Could not bootstrap durable state"
 }
-
 validate_manifest() {
   python3 - "$1" "$EC_REPOSITORY" "$EC_RELEASE_TAG" "$2" <<'PY'
 import json, pathlib, re, sys
@@ -497,11 +522,16 @@ run_smoke() {
   return "$rc"
 }
 
-artifact_write_fence() {
-  local pid path options
-  systemctl is-active --quiet "$EC_SERVICE_UNIT" || return 1
+service_main_pid() {
+  local pid
   pid="$(systemctl show "$EC_SERVICE_UNIT" -p MainPID --value 2>/dev/null)" || return 1
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+artifact_write_fence() {
+  local pid path options
+  pid="$(service_main_pid)" || return 1
 
   # Observe the service's actual mount namespace, not merely unit-file text.
   # A healthy deployment requires both owner-controlled artifacts to be mounted
@@ -516,7 +546,6 @@ artifact_write_fence() {
     esac
   done
 }
-
 verify_baseline() {
   local commit binary
   # If the service is active, establish the write-stable boundary before
