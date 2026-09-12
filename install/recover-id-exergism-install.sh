@@ -247,12 +247,49 @@ expected_timer_active() {
 
 restore_rc=0
 
+unit_has_processes() {
+  local unit="$1" cgroup
+  cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null || true)"
+  [[ -n "$cgroup" ]] || return 1
+  python3 - "$cgroup" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path("/sys/fs/cgroup") / sys.argv[1].lstrip("/")
+if not root.exists():
+    raise SystemExit(1)
+for procs in root.rglob("cgroup.procs"):
+    try:
+        if procs.read_text().strip():
+            raise SystemExit(0)
+    except (FileNotFoundError, PermissionError):
+        continue
+raise SystemExit(1)
+PY
+}
+
+unit_is_quiescent() {
+  local unit="$1" load active main_pid
+  load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
+  [[ "$load" == "not-found" || -z "$load" ]] && return 0
+
+  active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+  main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null || true)"
+  [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
+  [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1
+  unit_has_processes "$unit" && return 1
+  return 0
+}
+
 quiesce_unit() {
-  local unit="$1"
-  systemctl stop "$unit" >/dev/null 2>&1 || {
-    systemctl is-active --quiet "$unit" && return 1 || return 0
-  }
-  systemctl is-active --quiet "$unit" && return 1 || return 0
+  local unit="$1" i
+  systemctl stop "$unit" >/dev/null 2>&1 || true
+  for i in {1..30}; do
+    unit_is_quiescent "$unit" && return 0
+    sleep 1
+  done
+  echo "Unit did not become quiescent: $unit" >&2
+  return 1
 }
 
 # Nothing that can execute or mutate the generation may remain live while old
@@ -294,20 +331,10 @@ actual_enabled="$(enabled_state)"
   restore_rc=1
 }
 
+# Keep the timer quiesced until the restored generation has passed transient
+# validation and the blocking recovering phase has been retired.
 expected_active="$(expected_timer_active)"
-if [[ "$expected_active" == 1 ]]; then
-  systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || restore_rc=1
-else
-  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || {
-    systemctl is-active --quiet "$TIMER_UNIT" && restore_rc=1 || true
-  }
-fi
-actual_active=0
-systemctl is-active --quiet "$TIMER_UNIT" && actual_active=1
-[[ "$actual_active" == "$expected_active" ]] || {
-  echo "Timer active-state restore mismatch: expected=$expected_active actual=$actual_active" >&2
-  restore_rc=1
-}
+quiesce_unit "$TIMER_UNIT" || restore_rc=1
 
 persist_restored_generation || restore_rc=1
 
@@ -326,18 +353,63 @@ if (( restore_rc != 0 )); then
 fi
 
 # The restored generation is now exact, durable and transiently healthy.
-# Remove the blocking phase atomically; dependent systemd jobs may start only
-# after this service exits.
+# Retire the blocking phase atomically, but keep a recovered marker until the
+# recorded runtime state has also been restored successfully.
 rm -rf "$INSTALL_RECOVERED_DIR"
 mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
-# If systemd pulled recovery in for the updater service after an interrupted
-# same-boot install, restore the previously-running resolver asynchronously.
-# The updater's After=id-exergism.service edge then orders it behind that job.
-if [[ "$MODE" == "boot" && "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
-  systemctl --no-block start "$TARGET_UNIT" >/dev/null 2>&1 || {
-    echo "CRITICAL: failed to queue previously active resolver after recovery." >&2
+if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
+  if [[ "$MODE" == "normal" ]]; then
+    # Direct installer recovery is not executing as the target's prerequisite,
+    # so restore the previously-active production resolver synchronously before
+    # returning to preflight/network work.
+    systemctl start "$TARGET_UNIT" || {
+      echo "CRITICAL: failed to restart previously active resolver after direct recovery." >&2
+      exit 1
+    }
+    systemctl is-active --quiet "$TARGET_UNIT" || exit 1
+    curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || exit 1
+    if [[ -x "$SMOKE" ]]; then
+      EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || exit 1
+    fi
+  else
+    # Dependency-triggered recovery cannot synchronously start a unit ordered
+    # after itself. Queue it and let systemd satisfy the dependency graph.
+    systemctl --no-block start "$TARGET_UNIT" >/dev/null 2>&1 || {
+      echo "CRITICAL: failed to queue previously active resolver after recovery." >&2
+      exit 1
+    }
+  fi
+fi
+
+# Restore timer activation only after the old generation is fully restored and
+# validated. This prevents a timer expiry from launching the updater mid-rollback.
+if [[ "$expected_active" == 1 ]]; then
+  if [[ "$MODE" == "boot" ]]; then
+    systemctl --no-block start "$TIMER_UNIT" >/dev/null 2>&1 || {
+      echo "CRITICAL: failed to queue restored active timer." >&2
+      exit 1
+    }
+  else
+    systemctl start "$TIMER_UNIT" >/dev/null 2>&1 || {
+      echo "CRITICAL: failed to restore active timer." >&2
+      exit 1
+    }
+    systemctl is-active --quiet "$TIMER_UNIT" || exit 1
+  fi
+else
+  quiesce_unit "$TIMER_UNIT" || exit 1
+fi
+
+# For synchronous/direct recovery we can prove exact active state immediately.
+# Boot/dependency mode uses --no-block to avoid dependency cycles; successful
+# queueing is the strongest safe assertion before this prerequisite exits.
+if [[ "$MODE" == "normal" ]]; then
+  actual_active=0
+  systemctl is-active --quiet "$TIMER_UNIT" && actual_active=1
+  [[ "$actual_active" == "$expected_active" ]] || {
+    echo "Timer active-state restore mismatch: expected=$expected_active actual=$actual_active" >&2
     exit 1
   }
 fi
