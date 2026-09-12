@@ -98,10 +98,16 @@ jobs:
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
-          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter' install/install-id-exergism.sh
+          grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp' install/install-id-exergism.sh
           grep -Fq 'systemd-run --version' install/install-id-exergism.sh
+          grep -Fq 'systemctl show --property=Version --value' install/install-id-exergism.sh
           grep -Fq 'systemd_version < 250' install/install-id-exergism.sh
           grep -Fq 'restore_previous_fence()' install/install-id-exergism.sh
+          grep -Fq 'rollback_fence_on_exit()' install/install-id-exergism.sh
+          grep -Fq 'trap rollback_fence_on_exit EXIT' install/install-id-exergism.sh
+          grep -Fq '[[ -e "$FENCE_DROPIN" || -L "$FENCE_DROPIN" ]]' install/install-id-exergism.sh
+          grep -Fq 'cp -a -- "$FENCE_DROPIN" "$fence_backup"' install/install-id-exergism.sh
+          grep -Fq 'cp -a -- "$fence_backup" "$FENCE_DROPIN"' install/install-id-exergism.sh
           grep -Fq 'restoring previous configuration' install/install-id-exergism.sh
           grep -Fq 'failed to restore the previous target-service configuration' install/install-id-exergism.sh
           grep -Fq 'findmnt --version' install/install-id-exergism.sh
