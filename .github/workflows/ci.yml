@@ -74,7 +74,7 @@ jobs:
           grep -Fq 'Bootstrap refused: live service process lacks the artifact write fence' agent/ec-deployment-agent.sh
           grep -Fq 'Bootstrap refused: semantic smoke check failed' agent/ec-deployment-agent.sh
           grep -Fq 'Bootstrap refused: target service is in transitional state' agent/ec-deployment-agent.sh
-          grep -Fq 'nsenter --target "$pid" --mount -- findmnt -T "$path"' agent/ec-deployment-agent.sh
+          grep -Fq 'open("/proc/self/mountinfo"' agent/ec-deployment-agent.sh
           grep -Fq 'artifact_fence' agent/ec-deployment-agent.sh
           grep -Fq 'post_start_integrity' agent/ec-deployment-agent.sh
           grep -Fq 'finalize_quiescent' agent/ec-deployment-agent.sh
