@@ -35,6 +35,7 @@ INSTALL_PENDING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
 INSTALL_VALIDATED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.validated"
 INSTALL_RECOVERING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovering"
 INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
+INSTALL_COMMITTED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.committed"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
@@ -147,7 +148,7 @@ if [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_R
   echo "Recovering interrupted Deployment Attestation installation before continuing." >&2
   EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal
 fi
-rm -rf "$INSTALL_RECOVERED_DIR"
+rm -rf "$INSTALL_RECOVERED_DIR" "$INSTALL_COMMITTED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
 tmp_manifest="$(mktemp)"
@@ -271,7 +272,10 @@ mark_generation_validated() {
 }
 
 finalize_install_transaction() {
-  rm -rf "$INSTALL_VALIDATED_DIR"
+  rm -rf "$INSTALL_COMMITTED_DIR"
+  mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"
+  durable_sync_paths "$INSTALL_STATE_ROOT"
+  rm -rf "$INSTALL_COMMITTED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 }
 
@@ -307,9 +311,14 @@ trap rollback_install_on_exit EXIT
 
 # Quiesce every actor that could observe or mutate the generation while it is
 # pending. The triggered updater service itself is stopped, not just its timer.
-systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
-systemctl stop "$AGENT_RUN_UNIT" >/dev/null 2>&1 || true
+systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || {
+  systemctl is-active --quiet "$TIMER_UNIT" && exit 1 || true
+}
+systemctl stop "$AGENT_RUN_UNIT" >/dev/null 2>&1 || {
+  systemctl is-active --quiet "$AGENT_RUN_UNIT" && exit 1 || true
+}
 systemctl stop "$TARGET_UNIT"
+! systemctl is-active --quiet "$TIMER_UNIT"
 ! systemctl is-active --quiet "$TARGET_UNIT"
 ! systemctl is-active --quiet "$AGENT_RUN_UNIT"
 
