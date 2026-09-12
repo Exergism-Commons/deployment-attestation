@@ -9,33 +9,38 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE="id.exergism.org"
 TARGET_UNIT="id-exergism.service"
+AGENT_RUN_UNIT="ec-deployment-attestation@${SERVICE}.service"
 TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 RECOVERY_UNIT="id-exergism-install-recovery.service"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
+VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 AGENT_SERVICE_UNIT="/etc/systemd/system/ec-deployment-attestation@.service"
 AGENT_TIMER_UNIT="/etc/systemd/system/ec-deployment-attestation@.timer"
 ENV_FILE="/etc/ec-deployment-attestation/${SERVICE}.env"
 FENCE_DROPIN_DIR="/etc/systemd/system/${TARGET_UNIT}.d"
 FENCE_DROPIN="${FENCE_DROPIN_DIR}/90-ec-deployment-attestation-artifact-fence.conf"
-TARGET_RECOVERY_INTERLOCK="${FENCE_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
-TIMER_RECOVERY_DROPIN_DIR="/etc/systemd/system/${TIMER_UNIT}.d"
-TIMER_RECOVERY_INTERLOCK="${TIMER_RECOVERY_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
 
 RECOVERY_HELPER="/usr/local/libexec/ec-deployment-install-recovery"
 RECOVERY_UNIT_PATH="/etc/systemd/system/${RECOVERY_UNIT}"
+TARGET_RECOVERY_INTERLOCK="${FENCE_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
+AGENT_RECOVERY_DROPIN_DIR="/etc/systemd/system/${AGENT_RUN_UNIT}.d"
+AGENT_RECOVERY_INTERLOCK="${AGENT_RECOVERY_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
+LEGACY_TIMER_RECOVERY_INTERLOCK="/etc/systemd/system/${TIMER_UNIT}.d/80-ec-deployment-attestation-install-recovery.conf"
+
 INSTALL_STATE_PARENT="/var/lib/ec-deployment-attestation"
 INSTALL_STATE_ROOT="${INSTALL_STATE_PARENT}/install"
-INSTALL_TXN_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
-INSTALL_COMMITTED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.committed"
+INSTALL_PENDING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
+INSTALL_VALIDATED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.validated"
+INSTALL_RECOVERING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovering"
 INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
-
-MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
-for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat readlink; do
+MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
+
+for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
@@ -86,8 +91,8 @@ seen = set()
 for raw in sys.argv[1:]:
     p = pathlib.Path(raw).resolve(strict=False)
     if not p.exists():
-        continue
-    if p.is_file():
+        p = p.parent
+    if p.exists() and p.is_file():
         p = p.parent
     while True:
         key = str(p)
@@ -104,53 +109,45 @@ for raw in sys.argv[1:]:
 PY
 }
 
-# Create every parent used by the transaction and fsync the complete ancestor
-# chain. This makes a first-install journal reachable after sudden power loss.
 install -d -m 0755 /usr/local/libexec
 install -d -m 0755 /etc/ec-deployment-attestation
 install -d -m 0700 /etc/ec-deployment-attestation/secrets
 install -d -o root -g root -m 0755 "$FENCE_DROPIN_DIR"
-install -d -o root -g root -m 0755 "$TIMER_RECOVERY_DROPIN_DIR"
+install -d -o root -g root -m 0755 "$AGENT_RECOVERY_DROPIN_DIR"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_PARENT"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_ROOT"
-durable_sync_ancestor_chain   /usr/local/libexec   /etc/ec-deployment-attestation/secrets   "$FENCE_DROPIN_DIR"   "$TIMER_RECOVERY_DROPIN_DIR"   "$INSTALL_STATE_ROOT"
-
-jq --version >/dev/null
-git --version >/dev/null
-sha256sum --version >/dev/null
-flock --version >/dev/null
-grep --version >/dev/null
-systemd-run --version >/dev/null
+durable_sync_ancestor_chain   /usr/local/libexec   /etc/ec-deployment-attestation/secrets   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   "$INSTALL_STATE_ROOT"
 
 manager_version="$(systemctl show --property=Version --value 2>/dev/null || true)"
 systemd_version="$(printf '%s\n' "$manager_version" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
 if [[ ! "$systemd_version" =~ ^[0-9]+$ ]] || (( systemd_version < 250 )); then
-  echo "Running systemd manager >= 250 is required for ExitType=cgroup smoke containment (found: ${manager_version:-unknown})." >&2
+  echo "Running systemd manager >= 250 is required (found: ${manager_version:-unknown})." >&2
   exit 1
 fi
-findmnt --version >/dev/null
-nsenter --version >/dev/null
 
-# Recovery infrastructure is deliberately outside the application-generation
-# transaction. It is inert without a .pending journal and must itself be durable
-# before any transactional mutation is allowed.
+# Recovery and isolated validation infrastructure are outside the generation
+# transaction. They are inert/safe without a journal and must survive a crash
+# before any mutable generation artifact is touched.
 install -o root -g root -m 0755 "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER"
+install -o root -g root -m 0755 "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR"
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH"
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK"
-install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TIMER_RECOVERY_INTERLOCK"
+install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK"
+rm -f "$LEGACY_TIMER_RECOVERY_INTERLOCK"
+
 systemctl daemon-reload
 systemctl enable "$RECOVERY_UNIT" >/dev/null
-durable_sync_paths   "$RECOVERY_HELPER"   "$RECOVERY_UNIT_PATH"   "$TARGET_RECOVERY_INTERLOCK"   "$TIMER_RECOVERY_INTERLOCK"   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$TIMER_RECOVERY_DROPIN_DIR"   /etc/systemd/system   /etc/systemd/system/multi-user.target.wants
-durable_sync_ancestor_chain   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$TIMER_RECOVERY_DROPIN_DIR"   /etc/systemd/system/multi-user.target.wants
 
-if [[ -d "$INSTALL_TXN_DIR" ]]; then
+durable_sync_paths   "$RECOVERY_HELPER"   "$VALIDATOR"   "$RECOVERY_UNIT_PATH"   "$TARGET_RECOVERY_INTERLOCK"   "$AGENT_RECOVERY_INTERLOCK"   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system   /etc/systemd/system/multi-user.target.wants
+durable_sync_ancestor_chain   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system/multi-user.target.wants
+
+# Any old transaction from a failed invocation must be resolved before a new
+# baseline can be captured. The helper recognizes pending/validated/recovering.
+if [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" ]]; then
   echo "Recovering interrupted Deployment Attestation installation before continuing." >&2
   EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal
 fi
-
-# .committed/.recovered are cleanup remnants only: the atomic disappearance of
-# .pending is already the durable decision. They are safe to remove here.
-rm -rf "$INSTALL_COMMITTED_DIR" "$INSTALL_RECOVERED_DIR"
+rm -rf "$INSTALL_RECOVERED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
 tmp_manifest="$(mktemp)"
@@ -176,7 +173,7 @@ trap - EXIT
 
 current_boot_id="$(cat "$BOOT_ID_FILE")"
 [[ "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
-  echo "Could not read a valid kernel boot ID from $BOOT_ID_FILE." >&2
+  echo "Could not read a valid kernel boot ID." >&2
   exit 1
 }
 
@@ -185,15 +182,15 @@ timer_enablement_state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true
 case "$timer_enablement_state" in
   enabled|enabled-runtime|disabled|not-found) ;;
   *)
-    echo "Unsupported pre-install timer enablement state '$timer_enablement_state'; refusing mutation so rollback semantics remain exact." >&2
+    echo "Unsupported pre-install timer enablement state '$timer_enablement_state'; refusing mutation." >&2
     exit 1
     ;;
 esac
 
 timer_was_active=0
-if systemctl is-active --quiet "$TIMER_UNIT" 2>/dev/null; then
-  timer_was_active=1
-fi
+systemctl is-active --quiet "$TIMER_UNIT" 2>/dev/null && timer_was_active=1
+target_was_active=0
+systemctl is-active --quiet "$TARGET_UNIT" 2>/dev/null && target_was_active=1
 
 artifact_path() {
   case "$1" in
@@ -209,13 +206,16 @@ artifact_path() {
 
 create_install_transaction() {
   local stage key path present
+  [[ ! -e "$INSTALL_PENDING_DIR" && ! -e "$INSTALL_VALIDATED_DIR" && ! -e "$INSTALL_RECOVERING_DIR" ]] || return 1
+
   stage="$(mktemp -d "${INSTALL_STATE_ROOT}/.${SERVICE}.pending.XXXXXX")"
   install -d -o root -g root -m 0700 "$stage/backups"
 
-  printf '1\n' > "$stage/schema_version"
+  printf '2\n' > "$stage/schema_version"
   printf '%s\n' "$current_boot_id" > "$stage/origin_boot_id"
   printf '%s\n' "$timer_enablement_state" > "$stage/timer_enablement_state"
   printf '%s\n' "$timer_was_active" > "$stage/timer_was_active"
+  printf '%s\n' "$target_was_active" > "$stage/target_was_active"
 
   for key in agent smoke service_unit timer_unit env fence; do
     path="$(artifact_path "$key")"
@@ -255,35 +255,49 @@ finally:
     os.close(fd)
 PY
 
-  mv "$stage" "$INSTALL_TXN_DIR"
+  mv "$stage" "$INSTALL_PENDING_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 }
 
 persist_installed_generation() {
   local timer_wants="/etc/systemd/system/timers.target.wants"
-
-  durable_sync_paths     "$AGENT"     "$SMOKE"     "$AGENT_SERVICE_UNIT"     "$AGENT_TIMER_UNIT"     "$ENV_FILE"     "$FENCE_DROPIN"     /usr/local/libexec     /etc/ec-deployment-attestation     "$FENCE_DROPIN_DIR"     /etc/systemd/system     "$timer_wants"
-
-  # Directory-entry durability matters for files, symlinks and a newly created
-  # wants/ drop-in directory. Sync every relevant ancestor before committing.
-  durable_sync_ancestor_chain     /usr/local/libexec     /etc/ec-deployment-attestation     "$FENCE_DROPIN_DIR"     "$timer_wants"
+  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
+  durable_sync_ancestor_chain     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR" "$timer_wants"
 }
 
-commit_install_transaction() {
-  rm -rf "$INSTALL_COMMITTED_DIR"
-  mv "$INSTALL_TXN_DIR" "$INSTALL_COMMITTED_DIR"
+mark_generation_validated() {
+  mv "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
-  rm -rf "$INSTALL_COMMITTED_DIR"
+}
+
+finalize_install_transaction() {
+  rm -rf "$INSTALL_VALIDATED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
+}
+
+restore_prior_runtime_state() {
+  local rc=0
+  if [[ "$target_was_active" == 1 ]]; then
+    systemctl start "$TARGET_UNIT" || rc=1
+    systemctl is-active --quiet "$TARGET_UNIT" || rc=1
+    curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || rc=1
+    if [[ -x "$SMOKE" ]]; then
+      EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || rc=1
+    fi
+  else
+    systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+  fi
+  return "$rc"
 }
 
 install_complete=0
 rollback_install_on_exit() {
   local rc=$?
   trap - EXIT
-  if [[ "$install_complete" == 0 && -d "$INSTALL_TXN_DIR" ]]; then
-    echo "Installation failed after transactional mutation; restoring durable previous generation." >&2
+  if [[ "$install_complete" == 0 ]] &&      [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" ]]; then
+    echo "Installation failed; restoring the durable previous generation." >&2
     EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal || rc=1
+    restore_prior_runtime_state || rc=1
   fi
   exit "$rc"
 }
@@ -291,35 +305,53 @@ rollback_install_on_exit() {
 create_install_transaction
 trap rollback_install_on_exit EXIT
 
+# Quiesce every actor that could observe or mutate the generation while it is
+# pending. The triggered updater service itself is stopped, not just its timer.
+systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
+systemctl stop "$AGENT_RUN_UNIT" >/dev/null 2>&1 || true
+systemctl stop "$TARGET_UNIT"
+! systemctl is-active --quiet "$TARGET_UNIT"
+! systemctl is-active --quiet "$AGENT_RUN_UNIT"
+
 install -o root -g root -m 0755 "$ROOT/agent/ec-deployment-agent.sh" "$AGENT"
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-artifact-fence.conf" "$FENCE_DROPIN"
-
 if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
   install -o root -g root -m 0640 "$ROOT/examples/id.exergism.org.env.example" "$ENV_FILE"
 fi
 
 systemctl daemon-reload
-systemctl restart "$TARGET_UNIT"
+systemd-analyze verify "$TARGET_UNIT" "$AGENT_RUN_UNIT" "$TIMER_UNIT" >/dev/null
+
+# Validate the pending generation without starting any interlocked production
+# unit. A transient resolver gets the same user, source, binary and read-only
+# artifact boundaries on an isolated loopback port.
+"$VALIDATOR"
+
+# Successful installation intentionally makes the updater persistently enabled,
+# but it remains stopped until the production resolver has activated safely.
+systemctl enable "$TIMER_UNIT" >/dev/null
+[[ "$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true)" == "enabled" ]]
+! systemctl is-active --quiet "$TIMER_UNIT"
+
+persist_installed_generation
+
+# validated means the on-disk generation is complete, semantically healthy and
+# durable. Recovery may allow reads/activation while the installer lock is held,
+# because no mixed generation can exist beyond this atomic transition.
+mark_generation_validated
+
+systemctl start "$TARGET_UNIT"
 systemctl is-active --quiet "$TARGET_UNIT"
 curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
 EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
 
-systemctl enable --now "$TIMER_UNIT"
-[[ "$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true)" == "enabled" ]] || {
-  echo "Timer did not reach persistent enabled state." >&2
-  exit 1
-}
+systemctl start "$TIMER_UNIT"
 systemctl is-active --quiet "$TIMER_UNIT"
 
-# The durability barrier precedes the journal commit. After this returns, every
-# file and directory entry needed by the installed generation is on stable
-# storage, including the persistent timer enablement symlink.
-persist_installed_generation
-
-commit_install_transaction
+finalize_install_transaction
 install_complete=1
 trap - EXIT
 
