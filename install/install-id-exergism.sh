@@ -16,7 +16,7 @@ MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-m
 # Keep this in sync with the commands required by the installed agent and the
 # id-specific semantic smoke check. A successful installation must never leave
 # a timer that can only fail at runtime because a dependency is absent.
-for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter; do
+for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
@@ -54,9 +54,13 @@ sha256sum --version >/dev/null
 flock --version >/dev/null
 grep --version >/dev/null
 systemd-run --version >/dev/null
-systemd_version="$(systemd-run --version | awk 'NR==1 {print $2}')"
+# Query the running manager through systemctl. The systemd-run client package
+# can be newer than PID 1 after an upgrade, so its package version is not a
+# safe feature gate for ExitType=cgroup.
+manager_version="$(systemctl show --property=Version --value 2>/dev/null || true)"
+systemd_version="$(printf '%s\n' "$manager_version" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
 if [[ ! "$systemd_version" =~ ^[0-9]+$ ]] || (( systemd_version < 250 )); then
-  echo "systemd >= 250 is required for ExitType=cgroup smoke containment (found: ${systemd_version:-unknown})." >&2
+  echo "Running systemd manager >= 250 is required for ExitType=cgroup smoke containment (found: ${manager_version:-unknown})." >&2
   exit 1
 fi
 findmnt --version >/dev/null
@@ -77,52 +81,66 @@ install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.time
 
 install -d -o root -g root -m 0755 "$FENCE_DROPIN_DIR"
 
-fence_backup="$(mktemp)"
+fence_backup_dir="$(mktemp -d)"
+fence_backup="${fence_backup_dir}/fence"
 had_fence_dropin=0
-if [[ -f "$FENCE_DROPIN" ]]; then
-  install -o root -g root -m 0600 "$FENCE_DROPIN" "$fence_backup"
+# -e is false for a dangling symlink, so test -L as well. cp -a preserves the
+# prior object type, symlink target, ownership, mode and timestamps.
+if [[ -e "$FENCE_DROPIN" || -L "$FENCE_DROPIN" ]]; then
+  cp -a -- "$FENCE_DROPIN" "$fence_backup"
   had_fence_dropin=1
 fi
 
 restore_previous_fence() {
   local restore_rc=0
+  rm -f "$FENCE_DROPIN" || restore_rc=1
   if [[ "$had_fence_dropin" == 1 ]]; then
-    install -o root -g root -m 0644 "$fence_backup" "$FENCE_DROPIN" || restore_rc=1
-  else
-    rm -f "$FENCE_DROPIN" || restore_rc=1
+    cp -a -- "$fence_backup" "$FENCE_DROPIN" || restore_rc=1
   fi
   systemctl daemon-reload || restore_rc=1
   systemctl restart "$TARGET_UNIT" || restore_rc=1
   systemctl is-active --quiet "$TARGET_UNIT" || restore_rc=1
+  curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || restore_rc=1
   if (( restore_rc != 0 )); then
     echo "CRITICAL: failed to restore the previous target-service configuration after fence installation failure." >&2
     return 1
   fi
 }
 
+fence_mutated=0
+install_complete=0
+rollback_fence_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$fence_mutated" == 1 && "$install_complete" == 0 ]]; then
+    echo "Installation failed after artifact fence mutation; restoring previous configuration." >&2
+    restore_previous_fence || rc=1
+  fi
+  rm -rf "$fence_backup_dir"
+  exit "$rc"
+}
+trap rollback_fence_on_exit EXIT
+
+# Arm rollback before the first command that can alter the drop-in.
+fence_mutated=1
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-artifact-fence.conf" "$FENCE_DROPIN"
 
 if [[ ! -e "/etc/ec-deployment-attestation/${SERVICE}.env" ]]; then
-  install -o root -g root -m 0640 "$ROOT/examples/id.exergism.org.env.example" \
-    "/etc/ec-deployment-attestation/${SERVICE}.env"
+  install -o root -g root -m 0640 "$ROOT/examples/id.exergism.org.env.example" "/etc/ec-deployment-attestation/${SERVICE}.env"
 fi
 
 systemctl daemon-reload
-# Apply the service-local read-only artifact namespace before the updater can
-# accept any running deployment as a stable baseline. If the new fence is
-# incompatible with this resolver, restore the exact previous drop-in state and
-# bring the old configuration back before failing the installation.
-if ! systemctl restart "$TARGET_UNIT" \
-   || ! systemctl is-active --quiet "$TARGET_UNIT" \
-   || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null; then
-  echo "Target service failed after artifact fence installation; restoring previous configuration." >&2
-  restore_previous_fence || exit 1
-  rm -f "$fence_backup"
-  exit 1
-fi
-rm -f "$fence_backup"
+# Any failure from the first fence mutation through timer activation is covered
+# by the EXIT rollback guard.
+systemctl restart "$TARGET_UNIT"
+systemctl is-active --quiet "$TARGET_UNIT"
+curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
 
 systemctl enable --now "ec-deployment-attestation@${SERVICE}.timer"
+
+install_complete=1
+trap - EXIT
+rm -rf "$fence_backup_dir"
 
 printf '\nInstalled Deployment Attestation agent for %s.\n' "$SERVICE"
 printf 'Config: /etc/ec-deployment-attestation/%s.env\n' "$SERVICE"
