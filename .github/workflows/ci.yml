@@ -78,6 +78,11 @@ jobs:
           grep -Fq 'RuntimeMaxSec=${EC_SMOKE_TIMEOUT}s' agent/ec-deployment-agent.sh
           grep -Fq -- '--property="ReadOnlyPaths=${EC_APP_DIR}"' agent/ec-deployment-agent.sh
           grep -Fq -- '--property="ReadOnlyPaths=${EC_APP_BIN}"' agent/ec-deployment-agent.sh
+          grep -Fq -- '--property=DynamicUser=yes' agent/ec-deployment-agent.sh
+          grep -Fq -- '--property=NoNewPrivileges=yes' agent/ec-deployment-agent.sh
+          grep -Fq -- '--property=ProtectSystem=strict' agent/ec-deployment-agent.sh
+          grep -Fq -- '--property=ProtectControlGroups=yes' agent/ec-deployment-agent.sh
+          grep -Fq 'AGENT_VERSION="0.1.0-pre13"' agent/ec-deployment-agent.sh
           grep -Fq '"phase":"activating"' agent/ec-deployment-agent.sh
           grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
           grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
