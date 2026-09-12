@@ -102,6 +102,10 @@ jobs:
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
           grep -Fq 'systemd-analyze' install/install-id-exergism.sh
           grep -Fq 'Publish the complete recovery core durably *before* exposing any' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file()' install/install-id-exergism.sh
+          grep -Fq 'mv -f "$tmp" "$dest"' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK" 0644' install/install-id-exergism.sh
           grep -Fq 'Only now expose resolver/updater dependencies' install/install-id-exergism.sh
           grep -Fq 'unit_is_quiescent()' install/install-id-exergism.sh
           grep -Fq 'Could not determine LoadState for $unit' install/install-id-exergism.sh
@@ -177,10 +181,10 @@ jobs:
           from pathlib import Path
 
           text = Path('install/install-id-exergism.sh').read_text()
-          recovery_unit = text.index('install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery.service"')
+          recovery_unit = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644')
           core_barrier = text.index('# The enablement link is part of the recovery core')
-          target_interlock = text.index('install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf"')
-          agent_interlock = text.index('install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf"')
+          target_interlock = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK" 0644')
+          agent_interlock = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK" 0644')
           assert recovery_unit < core_barrier < target_interlock
           assert recovery_unit < core_barrier < agent_interlock
 
