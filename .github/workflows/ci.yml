@@ -110,8 +110,13 @@ jobs:
           grep -Fq 'GIT_INDEX_FILE' agent/ec-deployment-agent.sh
           grep -Fq 'for marker in app.rglob(".git")' agent/ec-deployment-agent.sh
           grep -Fq 'refusing to remove open git lock' agent/ec-deployment-agent.sh
+          grep -Fq 'core.worktree' agent/ec-deployment-agent.sh
+          grep -Fq -- '--config-env=' agent/ec-deployment-agent.sh
           grep -Fq 'stop_service_quiescent()' agent/ec-deployment-agent.sh
           grep -Fq 'service_cgroup_has_processes()' agent/ec-deployment-agent.sh
+          grep -Fq 'open("/proc/self/mountinfo"' agent/ec-deployment-agent.sh
+          grep -Fq 'contains(app_dir, target)' agent/ec-deployment-agent.sh
+          grep -Fq 'pid_after="$(service_main_pid)"' agent/ec-deployment-agent.sh
           grep -Fq 'Target service did not become provably quiescent' agent/ec-deployment-agent.sh
           grep -Fq 'Stop/quiescence failed and rollback failed' agent/ec-deployment-agent.sh
           grep -Fq 'ACTION="${1:-run}"' agent/ec-deployment-agent.sh
