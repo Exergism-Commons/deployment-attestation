@@ -1,0 +1,15 @@
+[Unit]
+Description=Recover interrupted Exergism Commons Deployment Attestation installation
+DefaultDependencies=no
+After=local-fs.target
+Before=id-exergism.service ec-deployment-attestation@id.exergism.org.timer
+ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.pending
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ec-deployment-install-recovery boot
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
