@@ -154,15 +154,24 @@ fi
 # Recovery and isolated validation infrastructure are outside the generation
 # transaction. Publish the complete recovery core durably *before* exposing any
 # interlock that can make production units depend on it.
-atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755
+# Publish every dependency referenced by the new recovery helper first. If an
+# older interrupted install is already actionable, a crash before helper
+# replacement must still leave either the complete old recovery generation or
+# a host where the old helper continues to run; never expose a helper whose
+# finalizer/validator does not yet exist durably.
 atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755
 atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755
-atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644
 atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644
-
-durable_sync_paths   "$RECOVERY_HELPER"   "$VALIDATOR"   "$RECOVERY_FINALIZER"   "$RECOVERY_UNIT_PATH"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
+durable_sync_paths   "$VALIDATOR"   "$RECOVERY_FINALIZER"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
+systemctl daemon-reload
 
+# Only after the helper dependency generation is durable and known to systemd
+# may the helper that references it become visible.
+atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755
+atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644
+durable_sync_paths   "$RECOVERY_HELPER"   "$RECOVERY_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
+durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
 systemctl daemon-reload
 systemctl enable "$RECOVERY_UNIT" >/dev/null
 
@@ -427,7 +436,7 @@ fi
 target_was_active="$(capture_active_baseline "$TARGET_UNIT")"
 
 verify_production_artifact_fence() {
-  local pid path options
+  local pid pid_after
   if ! pid="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)"; then
     echo "Could not determine production resolver MainPID." >&2
     return 1
@@ -437,19 +446,74 @@ verify_production_artifact_fence() {
     return 1
   }
 
-  for path in "$APP_DIR" "$APP_BIN"; do
-    options="$(nsenter --target "$pid" --mount -- findmnt -T "$path" -n -o OPTIONS 2>/dev/null)" || {
-      echo "Could not inspect production mount options for $path." >&2
-      return 1
-    }
-    case ",$options," in
-      *,ro,*) ;;
-      *)
-        echo "Production resolver sees writable deployment artifact: $path ($options)" >&2
-        return 1
-        ;;
-    esac
-  done
+  # Audit the target process mount namespace as a whole. Requiring only the
+  # mount containing APP_DIR misses ReadWritePaths/bind mounts nested beneath
+  # the source tree. Every mount whose target is APP_DIR or a descendant must
+  # be ro, and the deepest mount covering APP_BIN must also be ro.
+  nsenter --target "$pid" --mount -- python3 - "$APP_DIR" "$APP_BIN" <<'PY' || return 1
+import os
+import re
+import sys
+
+app_dir = os.path.normpath(sys.argv[1])
+app_bin = os.path.normpath(sys.argv[2])
+if not (app_dir.startswith("/") and app_bin.startswith("/")):
+    raise SystemExit("deployment artifact paths must be absolute")
+
+_octal = re.compile(r"\\([0-7]{3})")
+def unescape_mountinfo(value):
+    return _octal.sub(lambda m: chr(int(m.group(1), 8)), value)
+
+mounts = []
+with open("/proc/self/mountinfo", "r", encoding="utf-8") as fh:
+    for raw in fh:
+        left, sep, _right = raw.rstrip("\n").partition(" - ")
+        if not sep:
+            raise SystemExit("malformed mountinfo")
+        fields = left.split()
+        if len(fields) < 6:
+            raise SystemExit("malformed mountinfo fields")
+        target = os.path.normpath(unescape_mountinfo(fields[4]))
+        options = set(fields[5].split(","))
+        mounts.append((target, options))
+
+def contains(root, path):
+    try:
+        return os.path.commonpath((root, path)) == root
+    except ValueError:
+        return False
+
+def deepest_cover(path):
+    candidates = [(target, opts) for target, opts in mounts if contains(target, path)]
+    if not candidates:
+        raise SystemExit(f"no mount covers {path}")
+    return max(candidates, key=lambda item: len(item[0]))
+
+source_cover, source_opts = deepest_cover(app_dir)
+if "ro" not in source_opts or "rw" in source_opts:
+    raise SystemExit(f"source root is writable via {source_cover}: {sorted(source_opts)}")
+
+for target, options in mounts:
+    if target == app_dir or (contains(app_dir, target) and target != app_dir):
+        if "ro" not in options or "rw" in options:
+            raise SystemExit(f"writable source submount {target}: {sorted(options)}")
+
+binary_cover, binary_opts = deepest_cover(app_bin)
+if "ro" not in binary_opts or "rw" in binary_opts:
+    raise SystemExit(f"runtime is writable via {binary_cover}: {sorted(binary_opts)}")
+PY
+
+  # Do not accept evidence from a process that exited/restarted while its
+  # namespace was being inspected.
+  if ! pid_after="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)"; then
+    echo "Could not re-check production resolver MainPID after fence audit." >&2
+    return 1
+  fi
+  [[ "$pid_after" == "$pid" ]] || {
+    echo "Production resolver changed PID during artifact-fence audit." >&2
+    return 1
+  }
+  systemctl is-active --quiet "$TARGET_UNIT"
 }
 
 artifact_path() {
