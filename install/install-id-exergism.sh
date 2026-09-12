@@ -33,6 +33,7 @@ INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
+BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
 for command in curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat readlink; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -173,6 +174,12 @@ PY
 rm -f "$tmp_manifest"
 trap - EXIT
 
+current_boot_id="$(cat "$BOOT_ID_FILE")"
+[[ "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+  echo "Could not read a valid kernel boot ID from $BOOT_ID_FILE." >&2
+  exit 1
+}
+
 timer_enablement_state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true)"
 [[ -n "$timer_enablement_state" ]] || timer_enablement_state="not-found"
 case "$timer_enablement_state" in
@@ -206,6 +213,7 @@ create_install_transaction() {
   install -d -o root -g root -m 0700 "$stage/backups"
 
   printf '1\n' > "$stage/schema_version"
+  printf '%s\n' "$current_boot_id" > "$stage/origin_boot_id"
   printf '%s\n' "$timer_enablement_state" > "$stage/timer_enablement_state"
   printf '%s\n' "$timer_was_active" > "$stage/timer_was_active"
 
