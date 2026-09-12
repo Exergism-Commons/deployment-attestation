@@ -796,6 +796,38 @@ def git_process_references_checkout(proc, argv):
             i += 1
         elif arg.startswith("-C") and arg != "-C":
             value = arg[2:]
+        elif arg == "-c":
+            if i + 1 >= len(argv):
+                raise RuntimeError(f"malformed git -c selector in process {proc.name}")
+            config = argv[i + 1]
+            i += 1
+            if "=" in config:
+                key, config_value = config.split("=", 1)
+                if key.lower() == "core.worktree" and points_into_protected(config_value, cwd):
+                    return True
+        elif arg.startswith("-c") and arg != "-c":
+            config = arg[2:]
+            if "=" in config:
+                key, config_value = config.split("=", 1)
+                if key.lower() == "core.worktree" and points_into_protected(config_value, cwd):
+                    return True
+        elif arg.startswith("--config-env="):
+            spec = arg.split("=", 1)[1]
+            if "=" in spec:
+                key, env_name = spec.split("=", 1)
+                if key.lower() == "core.worktree":
+                    try:
+                        raw_env = (proc / "environ").read_bytes()
+                    except (FileNotFoundError, ProcessLookupError):
+                        return False
+                    except PermissionError as exc:
+                        raise RuntimeError(f"cannot inspect environment for git process {proc.name}") from exc
+                    for item in raw_env.split(b"\0"):
+                        if item.startswith(os.fsencode(env_name) + b"="):
+                            config_value = os.fsdecode(item.split(b"=", 1)[1])
+                            if config_value and points_into_protected(config_value, cwd):
+                                return True
+                            break
         elif not arg.startswith("-"):
             # Conservatively treat absolute/relative path operands that resolve
             # into the checkout or metadata roots as relevant.
