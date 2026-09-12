@@ -138,7 +138,7 @@ jobs:
           grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
-          grep -Fq 'Recovery retained a blocking journal' install/install-id-exergism.sh
+          grep -Fq 'Recovery retained an actionable journal' install/install-id-exergism.sh
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
           grep -Fq 'target_was_active' install/install-id-exergism.sh
           grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/install-id-exergism.sh
