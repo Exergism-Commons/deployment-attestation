@@ -156,7 +156,7 @@ jobs:
           grep -Fq 'ControlGroup' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_unit()' install/recover-id-exergism-install.sh
           grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
-          grep -Fq 'failed to restart previously active resolver after direct recovery' install/recover-id-exergism-install.sh
+          grep -Fq 'previously active resolver could not be restored healthy after direct recovery' install/recover-id-exergism-install.sh
           grep -Fq 'Restore timer activation only after the old generation is fully restored' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Timer enablement restore mismatch' install/recover-id-exergism-install.sh
