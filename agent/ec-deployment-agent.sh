@@ -897,6 +897,24 @@ def git_process_references_checkout(proc, argv):
             if value and points_into_protected(value, cwd):
                 return True
 
+    # Git also accepts arbitrary config through GIT_CONFIG_COUNT plus
+    # GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n. Cover core.worktree explicitly.
+    count = env.get("GIT_CONFIG_COUNT")
+    if count is not None:
+        try:
+            count_i = int(count)
+        except ValueError:
+            raise RuntimeError(f"malformed GIT_CONFIG_COUNT in process {proc.name}")
+        if count_i < 0 or count_i > 10000:
+            raise RuntimeError(f"unsafe GIT_CONFIG_COUNT in process {proc.name}")
+        for n in range(count_i):
+            key = env.get(f"GIT_CONFIG_KEY_{n}")
+            value = env.get(f"GIT_CONFIG_VALUE_{n}")
+            if key is None or value is None:
+                raise RuntimeError(f"incomplete Git config environment in process {proc.name}")
+            if key.lower() == "core.worktree" and points_into_protected(value, cwd):
+                return True
+
     try:
         fds = list((proc / "fd").iterdir())
     except (FileNotFoundError, ProcessLookupError):
