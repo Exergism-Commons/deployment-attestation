@@ -109,6 +109,9 @@ jobs:
           grep -Fq 'mark_generation_validated()' install/install-id-exergism.sh
           grep -Fq 'mv "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"' install/install-id-exergism.sh
           grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
+          grep -Fq 'INSTALL_COMMITTED_DIR=' install/install-id-exergism.sh
+          grep -Fq 'mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
+          grep -Fq '! systemctl is-active --quiet "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
           grep -Fq 'systemctl stop "$AGENT_RUN_UNIT"' install/install-id-exergism.sh
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
@@ -125,7 +128,7 @@ jobs:
           ! grep -Fq 'ConditionPathExists=' packaging/id-exergism-install-recovery.service
           grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.service' packaging/id-exergism-install-recovery.service
           grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
-          grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
+          grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'After=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'TXN_PHASE="pending"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
@@ -138,6 +141,9 @@ jobs:
           grep -Fq 'RECOVERY_MODE="boot"' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl stop "$AGENT_RUN_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'restore_artifact "$key"' install/recover-id-exergism-install.sh
+          grep -Fq 'quiesce_unit()' install/recover-id-exergism-install.sh
+          grep -Fq 'Missing first-install units count' install/recover-id-exergism-install.sh
+          grep -Fq 'systemctl --no-block start "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Timer enablement restore mismatch' install/recover-id-exergism-install.sh
           grep -Fq 'Timer active-state restore mismatch' install/recover-id-exergism-install.sh
           grep -Fq '"$VALIDATOR" || restore_rc=1' install/recover-id-exergism-install.sh
