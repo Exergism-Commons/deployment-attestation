@@ -202,15 +202,59 @@ actual_enabled="$(enabled_state)" || {
   exit 1
 }
 
-# A same-boot recovery that recorded an active resolver must prove that the
-# queued/restored production instance really became healthy before the journal
-# can be retired.
-if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
-  systemctl start "$TARGET_UNIT"
-  systemctl is-active --quiet "$TARGET_UNIT"
-  curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
-  if [[ -x "$SMOKE" ]]; then
-    EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
+target_quiescent() {
+  local load active main_pid cgroup
+  if ! load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$load" == "not-found" ]] && return 0
+  [[ -n "$load" ]] || return 1
+  if ! active="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)"      || ! main_pid="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)"      || ! cgroup="$(systemctl show "$TARGET_UNIT" --property=ControlGroup --value 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
+  [[ "$main_pid" == 0 ]] || return 1
+  [[ -z "$cgroup" ]] && return 0
+  python3 - "$cgroup" <<'PY'
+import pathlib, sys
+root = pathlib.Path("/sys/fs/cgroup") / sys.argv[1].lstrip("/")
+if not root.exists():
+    raise SystemExit(0)
+for procs in root.rglob("cgroup.procs"):
+    try:
+        if procs.read_text().strip():
+            raise SystemExit(1)
+    except FileNotFoundError:
+        continue
+    except PermissionError:
+        raise SystemExit(2)
+raise SystemExit(0)
+PY
+}
+
+wait_target_quiescent() {
+  local i
+  systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+  for i in {1..30}; do
+    target_quiescent && return 0
+    sleep 1
+  done
+  echo "Target did not become provably quiescent while finalizing recovery." >&2
+  return 1
+}
+
+# Same-boot recovery preserves the exact pre-install target active state. A
+# reboot intentionally does not preserve volatile activity across boots.
+if [[ "$RECOVERY_MODE" == "normal" ]]; then
+  if [[ "$target_was_active" == 1 ]]; then
+    systemctl start "$TARGET_UNIT"
+    systemctl is-active --quiet "$TARGET_UNIT"
+    curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
+    if [[ -x "$SMOKE" ]]; then
+      EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
+    fi
+  else
+    wait_target_quiescent
   fi
 fi
 
