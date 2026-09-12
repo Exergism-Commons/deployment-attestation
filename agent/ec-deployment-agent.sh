@@ -32,6 +32,7 @@ EC_SMOKE_SCRIPT="${EC_SMOKE_SCRIPT:-}"
 EC_SMOKE_TIMEOUT="${EC_SMOKE_TIMEOUT:-60}"
 [[ "$EC_SMOKE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "EC_SMOKE_TIMEOUT must be a positive integer number of seconds"
 EC_STATE_DIR="${EC_STATE_DIR:-/var/lib/ec-deployment-attestation/${EC_SERVICE}}"
+AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${EC_SERVICE//[^A-Za-z0-9_.-]/-}.agent.lock"
 EC_CHECK_PUBLIC="${EC_CHECK_PUBLIC:-1}"
 
 CURRENT_STATE_FILE="$EC_STATE_DIR/current-state.json"
@@ -77,6 +78,14 @@ PY
 
 durable_mkdir_tree "$EC_STATE_DIR" 0700
 durable_mkdir_tree "$BACKUP_DIR" 0700
+exec 8>"$AGENT_COORDINATION_LOCK"
+if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]] && ! flock -n 8; then
+  if [[ "$ACTION" == "recover" ]]; then
+    die "Cannot coordinate recovery while installer or another coordinator holds the agent lock"
+  fi
+  log "Installer or another coordinator holds the agent lock"
+  exit 0
+fi
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   if [[ "$ACTION" == "recover" ]]; then
