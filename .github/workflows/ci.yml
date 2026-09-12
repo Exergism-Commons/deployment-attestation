@@ -187,7 +187,7 @@ jobs:
           recovery = Path('install/recover-id-exergism-install.sh').read_text()
           validate = recovery.index('"$VALIDATOR" || restore_rc=1')
           retire = recovery.index('mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
-          direct_restart = recovery.index('failed to restart previously active resolver after direct recovery')
+          direct_restart = recovery.index('previously active resolver could not be restored healthy after direct recovery')
           timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
           assert validate < retire < direct_restart < timer_restore
           PY
