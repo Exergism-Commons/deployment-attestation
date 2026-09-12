@@ -117,6 +117,7 @@ jobs:
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq '! systemctl is-active --quiet "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
+          grep -Fq 'Recovery retained a blocking journal' install/install-id-exergism.sh
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
           grep -Fq 'target_was_active' install/install-id-exergism.sh
           grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/install-id-exergism.sh
@@ -128,7 +129,7 @@ jobs:
           ! grep -Fq 'ConditionPathExists=' packaging/id-exergism-install-recovery.service
           grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.service' packaging/id-exergism-install-recovery.service
           grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
-          grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-agent-recovery-interlock.conf
+          grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'After=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'TXN_PHASE="pending"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
