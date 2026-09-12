@@ -188,7 +188,22 @@ PY
 }
 
 commit_install_transaction() {
-  rm -rf "$INSTALL_TXN_DIR"
+  local committed="${INSTALL_TXN_DIR}.committed"
+  rm -rf "$committed"
+  # Atomic rename is the commit point. Once .pending disappears, boot recovery
+  # must not roll back the already validated fence/timer generation.
+  mv "$INSTALL_TXN_DIR" "$committed"
+  python3 - "$INSTALL_STATE_ROOT" <<'PY'
+import os
+import sys
+
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  rm -rf "$committed"
   python3 - "$INSTALL_STATE_ROOT" <<'PY'
 import os
 import sys
