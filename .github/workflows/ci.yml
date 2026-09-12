@@ -19,6 +19,7 @@ jobs:
           bash -n examples/id.exergism.org-smoke.sh
           bash -n install/install-id-exergism.sh
           bash -n install/recover-id-exergism-install.sh
+          bash -n install/finalize-id-exergism-recovery.sh
           bash -n install/validate-id-exergism-generation.sh
 
       - name: Validate JSON schema documents
@@ -98,6 +99,10 @@ jobs:
           grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_present' agent/ec-deployment-agent.sh
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
+          grep -Fq 'reconcile_stale_git_locks()' agent/ec-deployment-agent.sh
+          grep -Fq 'live git process' agent/ec-deployment-agent.sh
+          grep -Fq 'root.rglob("*.lock")' agent/ec-deployment-agent.sh
+          grep -Fq 'reconcile_stale_git_locks || return 1' agent/ec-deployment-agent.sh
           grep -Fq 'stop_service_quiescent()' agent/ec-deployment-agent.sh
           grep -Fq 'service_cgroup_has_processes()' agent/ec-deployment-agent.sh
           grep -Fq 'Target service did not become provably quiescent' agent/ec-deployment-agent.sh
@@ -118,6 +123,8 @@ jobs:
           grep -Fq 'atomic_install_root_file()' install/install-id-exergism.sh
           grep -Fq 'mv -f "$tmp" "$dest"' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK" 0644' install/install-id-exergism.sh
           grep -Fq 'Only now expose resolver/updater dependencies' install/install-id-exergism.sh
           grep -Fq 'unit_is_quiescent()' install/install-id-exergism.sh
@@ -154,6 +161,10 @@ jobs:
           grep -Fq 'INSTALL_COMMITTED_DIR=' install/install-id-exergism.sh
           grep -Fq 'mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
           grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
+          grep -Fq 'verify_production_artifact_fence()' install/install-id-exergism.sh
+          grep -Fq 'nsenter --target "$pid" --mount -- findmnt -T "$path" -n -o OPTIONS' install/install-id-exergism.sh
+          grep -Fq 'Production resolver sees writable deployment artifact' install/install-id-exergism.sh
+          grep -Fq 'verify_production_artifact_fence' install/install-id-exergism.sh
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
           grep -Fq 'Recovery retained an actionable journal' install/install-id-exergism.sh
@@ -174,6 +185,10 @@ jobs:
           grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="recovering"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="recovered"' install/recover-id-exergism-install.sh
+          grep -Fq 'RECOVERY_FINALIZE_UNIT=' install/recover-id-exergism-install.sh
+          grep -Fq '"$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
+          grep -Fq 'systemctl --no-block start "$RECOVERY_FINALIZE_UNIT"' install/recover-id-exergism-install.sh
+          grep -Fq '"$RECOVERY_FINALIZER"' install/recover-id-exergism-install.sh
           grep -Fq 'if [[ "$MODE" == "boot" && "$TXN_PHASE" == "validated" ]]' install/recover-id-exergism-install.sh
           grep -Fq 'mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
           grep -Fq '[[ "$schema_version" == 2 ]]' install/recover-id-exergism-install.sh
@@ -205,7 +220,12 @@ jobs:
           grep -Fq 'services remain quiesced and recovery journal is retained' install/recover-id-exergism-install.sh
           grep -Fq 'mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
           grep -Fq 'if [[ "$MODE" == "normal" ]]; then' install/recover-id-exergism-install.sh
-          grep -Fq 'Keep the actionable marker until a later synchronous recovery can verify' install/recover-id-exergism-install.sh
+          grep -Fq 'Keep the actionable marker, then queue an independent finalizer' install/recover-id-exergism-install.sh
+          grep -Fq 'ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.recovered' packaging/id-exergism-install-recovery-finalize.service
+          grep -Fq 'Restart=on-failure' packaging/id-exergism-install-recovery-finalize.service
+          grep -Fq 'RECOVERED_DIR=' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'Timer enablement mismatch during recovery finalization' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'mv "$RECOVERED_DIR" "$FINALIZED_DIR"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'RuntimeMaxSec=90s' install/validate-id-exergism-generation.sh
           grep -Fq 'ReadOnlyPaths=$APP_DIR' install/validate-id-exergism-generation.sh
           grep -Fq 'governance/profile/0.1-DRAFT' install/validate-id-exergism-generation.sh
@@ -246,10 +266,11 @@ jobs:
           assert global_lock < state_lock < installer_phase_guard < dispatch
           stop_helper = agent.index('stop_service_quiescent()')
           rollback_call = agent.index('stop_service_quiescent || return 1', stop_helper)
+          stale_lock_reconcile = agent.index('reconcile_stale_git_locks || return 1')
           rollback_switch = agent.index('switch_source "$commit" 0 || return 1')
           update_call = agent.index('if ! stop_service_quiescent; then')
           update_switch = agent.index('if ! switch_source "$RELEASE_SOURCE_COMMIT" 1; then')
-          assert stop_helper < rollback_call < rollback_switch
+          assert stop_helper < rollback_call < stale_lock_reconcile < rollback_switch
           assert stop_helper < update_call < update_switch
 
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
@@ -263,8 +284,14 @@ jobs:
           assert timer_baseline < pretxn_guard < timer_stop < updater_stop < agent_lock < updater_recover < target_baseline < journal_publish
 
           select_recovered = recovery.index('TXN_PHASE="recovered"')
+          recovered_completion = recovery.index('if [[ "$TXN_PHASE" == "recovered" ]]; then')
           phase_to_recovering = recovery.index('mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
-          assert select_recovered < phase_to_recovering
+          assert select_recovered < recovered_completion < phase_to_recovering
+
+          live_fence = text.index('verify_production_artifact_fence', text.index('systemctl start "$TARGET_UNIT"'))
+          timer_start = text.index('systemctl start "$TIMER_UNIT"', live_fence)
+          final_commit = text.index('finalize_install_transaction', timer_start)
+          assert live_fence < timer_start < final_commit
           PY
 
       - name: Reject obvious committed secrets
