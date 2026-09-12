@@ -676,12 +676,18 @@ PY
   [[ "$pid_after" == "$pid" ]] || return 1
 }
 verify_baseline() {
-  local commit binary
-  # If the service is active, establish the write-stable boundary before
-  # accepting any source/runtime bytes as the rollback baseline.
-  if systemctl is-active --quiet "$EC_SERVICE_UNIT"; then
-    artifact_write_fence || return 1
-  fi
+  local commit binary load active
+  # Determine service state explicitly. A manager/DBus failure or a transitional
+  # state must never be interpreted as "inactive" because that would skip the
+  # write-stable fence while accepting rollback baseline bytes.
+  load="$(systemctl show "$EC_SERVICE_UNIT" -p LoadState --value 2>/dev/null)" || return 1
+  [[ "$load" == "loaded" ]] || return 1
+  active="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value 2>/dev/null)" || return 1
+  case "$active" in
+    active) artifact_write_fence || return 1 ;;
+    inactive|failed) ;;
+    *) return 1 ;;
+  esac
   commit="$(json_field "$CURRENT_STATE_FILE" source_commit)" || return 1
   binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)" || return 1
   [[ "$commit" =~ ^[0-9a-f]{40}$ && "$binary" =~ ^[0-9a-f]{64}$ ]] || return 1
