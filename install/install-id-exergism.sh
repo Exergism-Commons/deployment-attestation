@@ -299,19 +299,26 @@ unit_is_quiescent() {
     return 1
   }
 
-  if ! active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" \
-     || ! main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)"; then
-    echo "Could not determine runtime state for $unit" >&2
+  if ! active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)"; then
+    echo "Could not determine ActiveState for $unit" >&2
     return 1
   fi
-  [[ -n "$active" && -n "$main_pid" ]] || {
-    echo "Could not determine runtime state for $unit" >&2
+  [[ -n "$active" ]] || {
+    echo "Could not determine ActiveState for $unit" >&2
     return 1
   }
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
-  # Timer units own scheduling state, not service processes/cgroups. The
-  # concrete updater service is quiesced separately.
-  [[ "$unit" == *.timer ]] && return 0
+  if [[ "$unit" == *.timer ]]; then
+    return 0
+  fi
+  if ! main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)"; then
+    echo "Could not determine MainPID for $unit" >&2
+    return 1
+  fi
+  [[ -n "$main_pid" ]] || {
+    echo "Could not determine MainPID for $unit" >&2
+    return 1
+  }
   [[ "$main_pid" == 0 ]] || return 1
   if unit_has_processes "$unit"; then
     return 1
