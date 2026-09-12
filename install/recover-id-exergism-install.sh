@@ -326,6 +326,9 @@ unit_is_quiescent() {
     return 1
   }
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
+  # Timer units do not own a service MainPID/cgroup; their triggered updater
+  # service is quiesced and checked independently.
+  [[ "$unit" == *.timer ]] && return 0
   [[ "$main_pid" == 0 ]] || return 1
   if unit_has_processes "$unit"; then
     return 1
