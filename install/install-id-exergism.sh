@@ -650,7 +650,10 @@ systemd-analyze verify "$TARGET_UNIT" "$AGENT_RUN_UNIT" "$TIMER_UNIT" >/dev/null
 # but it remains stopped until the production resolver has activated safely.
 systemctl enable "$TIMER_UNIT" >/dev/null
 [[ "$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true)" == "enabled" ]]
-! systemctl is-active --quiet "$TIMER_UNIT"
+unit_is_quiescent "$TIMER_UNIT" || {
+  echo "Timer did not remain provably quiescent after enablement." >&2
+  exit 1
+}
 
 persist_installed_generation
 
