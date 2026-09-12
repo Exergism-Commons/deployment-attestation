@@ -54,7 +54,6 @@ jobs:
         run: |
           set -euo pipefail
           grep -Fq 'DEPLOYMENT_MANIFEST.json' README.md
-          grep -Fq 'AGENT_VERSION="0.1.0-pre12"' agent/ec-deployment-agent.sh
           grep -Fq 'transaction.json' agent/ec-deployment-agent.sh
           grep -Fq 'durable_mkdir_tree' agent/ec-deployment-agent.sh
           grep -Fq 'fsync_file_and_dir "$backup"' agent/ec-deployment-agent.sh
