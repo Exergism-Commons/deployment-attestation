@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run as root (or with sudo)." >&2
+  exit 1
+fi
+
+SERVICE="id.exergism.org"
+TARGET_UNIT="id-exergism.service"
+TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
+SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
+
+INSTALL_STATE_ROOT="/var/lib/ec-deployment-attestation/install"
+RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
+FINALIZED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.finalized"
+INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
+AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
+BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
+
+if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
+  exec 9>"$INSTALL_LOCK"
+  flock -n 9 || {
+    echo "Installer/recovery lock is busy; finalization will retry." >&2
+    exit 1
+  }
+fi
+if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]]; then
+  exec 8>"$AGENT_COORDINATION_LOCK"
+  flock -n 8 || {
+    echo "Agent coordination lock is busy; finalization will retry." >&2
+    exit 1
+  }
+fi
+
+[[ -d "$RECOVERED_DIR" ]] || exit 0
+
+read_value() {
+  local name="$1"
+  [[ -f "${RECOVERED_DIR}/${name}" ]] || {
+    echo "Recovered journal is missing ${name}" >&2
+    return 1
+  }
+  cat "${RECOVERED_DIR}/${name}"
+}
+
+schema_version="$(read_value schema_version)"
+[[ "$schema_version" == 2 ]] || {
+  echo "Unsupported recovered journal schema: $schema_version" >&2
+  exit 1
+}
+
+origin_boot_id="$(read_value origin_boot_id)"
+current_boot_id="$(cat "$BOOT_ID_FILE")"
+[[ "$origin_boot_id" =~ ^[0-9a-fA-F-]{36}$ && "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+  echo "Recovered journal or kernel exposes an invalid boot ID." >&2
+  exit 1
+}
+if [[ "$origin_boot_id" == "$current_boot_id" ]]; then
+  RECOVERY_MODE="normal"
+else
+  RECOVERY_MODE="boot"
+fi
+
+timer_enablement_state="$(read_value timer_enablement_state)"
+timer_was_active="$(read_value timer_was_active)"
+target_was_active="$(read_value target_was_active)"
+case "$timer_enablement_state" in
+  enabled|enabled-runtime|disabled|not-found) ;;
+  *) echo "Unsupported timer enablement state: $timer_enablement_state" >&2; exit 1 ;;
+esac
+[[ "$timer_was_active" == 0 || "$timer_was_active" == 1 ]] || exit 1
+[[ "$target_was_active" == 0 || "$target_was_active" == 1 ]] || exit 1
+
+enabled_state() {
+  local load state rc
+  if ! load="$(systemctl show "$TIMER_UNIT" --property=LoadState --value 2>/dev/null)"; then
+    return 1
+  fi
+  if [[ "$load" == "not-found" ]]; then
+    printf 'not-found\n'
+    return 0
+  fi
+  [[ -n "$load" ]] || return 1
+
+  if state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$state" in
+    enabled|enabled-runtime) (( rc == 0 )) || return 1 ;;
+    disabled) (( rc != 0 )) || return 1 ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$state"
+}
+
+expected_enablement_state() {
+  if [[ "$RECOVERY_MODE" == "normal" ]]; then
+    printf '%s\n' "$timer_enablement_state"
+    return
+  fi
+  case "$timer_enablement_state" in
+    enabled) printf 'enabled\n' ;;
+    enabled-runtime|disabled) printf 'disabled\n' ;;
+    not-found) printf 'not-found\n' ;;
+  esac
+}
+
+expected_timer_active() {
+  if [[ "$RECOVERY_MODE" == "normal" ]]; then
+    printf '%s\n' "$timer_was_active"
+  elif [[ "$timer_enablement_state" == "enabled" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+expected_enabled="$(expected_enablement_state)"
+actual_enabled="$(enabled_state)" || {
+  echo "Could not determine timer enablement while finalizing recovery." >&2
+  exit 1
+}
+[[ "$actual_enabled" == "$expected_enabled" ]] || {
+  echo "Timer enablement mismatch during recovery finalization: expected=$expected_enabled actual=$actual_enabled" >&2
+  exit 1
+}
+
+# A same-boot recovery that recorded an active resolver must prove that the
+# queued/restored production instance really became healthy before the journal
+# can be retired.
+if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
+  systemctl start "$TARGET_UNIT"
+  systemctl is-active --quiet "$TARGET_UNIT"
+  curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
+  if [[ -x "$SMOKE" ]]; then
+    EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
+  fi
+fi
+
+expected_active="$(expected_timer_active)"
+if [[ "$expected_active" == 1 ]]; then
+  systemctl start "$TIMER_UNIT"
+  systemctl is-active --quiet "$TIMER_UNIT"
+else
+  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
+  systemctl is-active --quiet "$TIMER_UNIT" && {
+    echo "Timer remained active while finalizing recovery." >&2
+    exit 1
+  }
+fi
+
+# Atomic disappearance of .recovered is the completion commit point.
+rm -rf "$FINALIZED_DIR"
+mv "$RECOVERED_DIR" "$FINALIZED_DIR"
+python3 - "$INSTALL_STATE_ROOT" <<'PY'
+import os
+import sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+rm -rf "$FINALIZED_DIR"
+python3 - "$INSTALL_STATE_ROOT" <<'PY'
+import os
+import sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
