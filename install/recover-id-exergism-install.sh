@@ -32,6 +32,7 @@ INSTALL_VALIDATED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.validated"
 INSTALL_RECOVERING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovering"
 INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
+AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
 durable_sync_paths() {
@@ -133,6 +134,14 @@ if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
       exit 0
     fi
     echo "Installation/recovery lock is busy while transaction phase is $TXN_PHASE." >&2
+    exit 1
+  fi
+fi
+
+if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]]; then
+  exec 8>"$AGENT_COORDINATION_LOCK"
+  if ! flock -n 8; then
+    echo "Agent coordination lock is busy; refusing installer recovery while an agent can mutate deployment artifacts." >&2
     exit 1
   fi
 fi
