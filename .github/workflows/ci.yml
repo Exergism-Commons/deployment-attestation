@@ -189,7 +189,7 @@ jobs:
           grep -Fq '"$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$RECOVERY_FINALIZE_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq '"$RECOVERY_FINALIZER"' install/recover-id-exergism-install.sh
-          grep -Fq 'if [[ "$MODE" == "boot" && "$TXN_PHASE" == "validated" ]]' install/recover-id-exergism-install.sh
+          grep -Fq '"$TXN_PHASE" == "validated" || "$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
           grep -Fq 'mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
           grep -Fq '[[ "$schema_version" == 2 ]]' install/recover-id-exergism-install.sh
           grep -Fq 'origin_boot_id=' install/recover-id-exergism-install.sh
