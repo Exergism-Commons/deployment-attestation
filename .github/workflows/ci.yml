@@ -100,6 +100,10 @@ jobs:
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
           grep -Fq 'curl git python3 sha256sum systemctl systemd-run flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter' install/install-id-exergism.sh
           grep -Fq 'systemd-run --version' install/install-id-exergism.sh
+          grep -Fq 'systemd_version < 250' install/install-id-exergism.sh
+          grep -Fq 'restore_previous_fence()' install/install-id-exergism.sh
+          grep -Fq 'restoring previous configuration' install/install-id-exergism.sh
+          grep -Fq 'failed to restore the previous target-service configuration' install/install-id-exergism.sh
           grep -Fq 'findmnt --version' install/install-id-exergism.sh
           grep -Fq 'nsenter --version' install/install-id-exergism.sh
           grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
