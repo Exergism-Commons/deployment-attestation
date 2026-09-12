@@ -119,10 +119,17 @@ jobs:
           grep -Fq 'systemctl enable --now "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
           grep -Fq 'durable_sync_paths "$INSTALL_STATE_ROOT"' install/install-id-exergism.sh
-          grep -Fq 'ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.pending' packaging/id-exergism-install-recovery.service
+          ! grep -Fq 'ConditionPathExists=' packaging/id-exergism-install-recovery.service
           grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.timer' packaging/id-exergism-install-recovery.service
           grep -Fq 'ExecStart=/usr/local/libexec/ec-deployment-install-recovery boot' packaging/id-exergism-install-recovery.service
+          grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
+          grep -Fq 'After=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
+          grep -Fq 'TARGET_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
+          grep -Fq 'TIMER_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
+          grep -Fq 'id-exergism-install-recovery-interlock.conf' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALL_LOCK_HELD' install/recover-id-exergism-install.sh
+          grep -Fq 'if ! flock -n 9; then' install/recover-id-exergism-install.sh
+          grep -Fq 'if [[ "$MODE" == "boot" && -d "$INSTALL_TXN_DIR" ]]; then' install/recover-id-exergism-install.sh
           grep -Fq 'timer_enablement_state' install/recover-id-exergism-install.sh
           grep -Fq 'normal:enabled-runtime' install/recover-id-exergism-install.sh
           grep -Fq 'boot:enabled-runtime' install/recover-id-exergism-install.sh
