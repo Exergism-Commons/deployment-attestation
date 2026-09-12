@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 AGENT_VERSION="0.1.0-pre15"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
+ACTION="${1:-run}"
 
 log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -77,7 +78,13 @@ PY
 durable_mkdir_tree "$EC_STATE_DIR" 0700
 durable_mkdir_tree "$BACKUP_DIR" 0700
 exec 9>"$LOCK_FILE"
-flock -n 9 || { log "Another agent invocation holds the lock"; exit 0; }
+if ! flock -n 9; then
+  if [[ "$ACTION" == "recover" ]]; then
+    die "Cannot coordinate recovery while another agent invocation holds the lock"
+  fi
+  log "Another agent invocation holds the lock"
+  exit 0
+fi
 
 arch() {
   local value
@@ -876,7 +883,7 @@ update_release() {
   attest || true
 }
 
-case "${1:-run}" in
+case "$ACTION" in
   recover)
     # Installer coordination path: reconcile only an already-journaled
     # deployment transaction. Do not bootstrap or contact release/attestation
