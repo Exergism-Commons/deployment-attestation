@@ -20,6 +20,8 @@ TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 AGENT="/usr/local/libexec/ec-deployment-agent"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
+RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
+RECOVERY_FINALIZE_UNIT="id-exergism-install-recovery-finalize.service"
 AGENT_SERVICE_UNIT="/etc/systemd/system/ec-deployment-attestation@.service"
 AGENT_TIMER_UNIT="/etc/systemd/system/ec-deployment-attestation@.timer"
 ENV_FILE="/etc/ec-deployment-attestation/${SERVICE}.env"
@@ -130,7 +132,7 @@ if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
   if ! flock -n 9; then
     # Only a fully validated+fsynced generation may be activated while the
     # installer owns the lock. pending/recovering always fail closed.
-    if [[ "$MODE" == "boot" && "$TXN_PHASE" == "validated" ]]; then
+    if [[ "$MODE" == "boot" && ( "$TXN_PHASE" == "validated" || "$TXN_PHASE" == "recovered" ) ]]; then
       exit 0
     fi
     echo "Installation/recovery lock is busy while transaction phase is $TXN_PHASE." >&2
@@ -144,6 +146,19 @@ if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]]; then
     echo "Agent coordination lock is busy; refusing installer recovery while an agent can mutate deployment artifacts." >&2
     exit 1
   fi
+fi
+# A .recovered journal means artifact restoration already succeeded and only
+# runtime-state completion remains. Never replay byte restoration from this phase.
+if [[ "$TXN_PHASE" == "recovered" ]]; then
+  if [[ "$MODE" == "normal" ]]; then
+    EC_INSTALL_LOCK_HELD=1 EC_AGENT_COORDINATION_LOCK_HELD=1 "$RECOVERY_FINALIZER"
+  else
+    systemctl --no-block start "$RECOVERY_FINALIZE_UNIT" || {
+      echo "CRITICAL: failed to queue recovered-state finalizer." >&2
+      exit 1
+    }
+  fi
+  exit 0
 fi
 
 # Once recovery owns the transaction, make the rollback intent durable before
@@ -499,7 +514,11 @@ if [[ "$MODE" == "normal" ]]; then
   durable_sync_paths "$INSTALL_STATE_ROOT"
 else
   # Dependency/boot recovery used --no-block for at least one possible start.
-  # Keep the actionable marker until a later synchronous recovery can verify
-  # final runtime state; queued is not equivalent to successfully active.
+  # Keep the actionable marker, then queue an independent finalizer that runs
+  # after this recovery unit exits and can synchronously verify final states.
   durable_sync_paths "$INSTALL_RECOVERED_DIR" "$INSTALL_STATE_ROOT"
+  systemctl --no-block start "$RECOVERY_FINALIZE_UNIT" || {
+    echo "CRITICAL: failed to queue recovered-state finalizer." >&2
+    exit 1
+  }
 fi
