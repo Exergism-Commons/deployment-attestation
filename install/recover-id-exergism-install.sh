@@ -492,5 +492,14 @@ if [[ "$MODE" == "normal" ]]; then
   }
 fi
 
-rm -rf "$INSTALL_RECOVERED_DIR"
-durable_sync_paths "$INSTALL_STATE_ROOT"
+if [[ "$MODE" == "normal" ]]; then
+  # Synchronous/direct recovery has verified final target/timer states, so the
+  # recovered marker can be retired durably.
+  rm -rf "$INSTALL_RECOVERED_DIR"
+  durable_sync_paths "$INSTALL_STATE_ROOT"
+else
+  # Dependency/boot recovery used --no-block for at least one possible start.
+  # Keep the actionable marker until a later synchronous recovery can verify
+  # final runtime state; queued is not equivalent to successfully active.
+  durable_sync_paths "$INSTALL_RECOVERED_DIR" "$INSTALL_STATE_ROOT"
+fi
