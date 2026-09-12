@@ -138,7 +138,7 @@ durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system/multi-use
 
 if [[ -d "$INSTALL_TXN_DIR" ]]; then
   echo "Recovering interrupted Deployment Attestation installation before continuing." >&2
-  "$RECOVERY_HELPER" normal
+  EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal
 fi
 
 # .committed/.recovered are cleanup remnants only: the atomic disappearance of
@@ -269,7 +269,7 @@ rollback_install_on_exit() {
   trap - EXIT
   if [[ "$install_complete" == 0 && -d "$INSTALL_TXN_DIR" ]]; then
     echo "Installation failed after transactional mutation; restoring durable previous generation." >&2
-    "$RECOVERY_HELPER" normal || rc=1
+    EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal || rc=1
   fi
   exit "$rc"
 }
