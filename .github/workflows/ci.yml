@@ -100,6 +100,8 @@ jobs:
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'ACTION="${1:-run}"' agent/ec-deployment-agent.sh
           grep -Fq 'recover)' agent/ec-deployment-agent.sh
+          grep -Fq 'AGENT_COORDINATION_LOCK=' agent/ec-deployment-agent.sh
+          grep -Fq 'EC_AGENT_COORDINATION_LOCK_HELD' agent/ec-deployment-agent.sh
           grep -Fq 'Cannot coordinate recovery while another agent invocation holds the lock' agent/ec-deployment-agent.sh
           grep -Fq 'Installer coordination path: reconcile only an already-journaled' agent/ec-deployment-agent.sh
           grep -Fq 'Idempotency-Key:' agent/ec-deployment-agent.sh
@@ -128,6 +130,9 @@ jobs:
           grep -Fq 'Could not determine ControlGroup for $unit' install/install-id-exergism.sh
           grep -Fq 'cgroup_rc=$?' install/install-id-exergism.sh
           grep -Fq 'stop_and_wait_quiescent "$AGENT_RUN_UNIT"' install/install-id-exergism.sh
+          grep -Fq 'AGENT_COORDINATION_LOCK=' install/install-id-exergism.sh
+          grep -Fq 'A direct deployment agent invocation is still running' install/install-id-exergism.sh
+          grep -Fq '[[ "$unit" == *.timer ]]' install/install-id-exergism.sh
           grep -Fq 'flock -n 9' install/install-id-exergism.sh
           grep -Fq 'INSTALL_PENDING_DIR=' install/install-id-exergism.sh
           grep -Fq 'INSTALL_VALIDATED_DIR=' install/install-id-exergism.sh
@@ -178,6 +183,9 @@ jobs:
           grep -Fq 'no deployment artifact was modified and journal is retained' install/recover-id-exergism-install.sh
           grep -Fq 'Could not determine exact timer enablement during recovery' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_unit()' install/recover-id-exergism-install.sh
+          grep -Fq 'AGENT_COORDINATION_LOCK=' install/recover-id-exergism-install.sh
+          grep -Fq 'Agent coordination lock is busy' install/recover-id-exergism-install.sh
+          grep -Fq '[[ "$unit" == *.timer ]]' install/recover-id-exergism-install.sh
           grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
           grep -Fq 'previously active resolver could not be restored healthy after direct recovery' install/recover-id-exergism-install.sh
           grep -Fq 'Restore timer activation only after the old generation is fully restored' install/recover-id-exergism-install.sh
@@ -220,11 +228,13 @@ jobs:
           agent = Path('agent/ec-deployment-agent.sh').read_text()
           assert agent.index('recover)') < agent.index('run|update)')
 
+          updater_stop = text.index('stop_and_wait_quiescent "$AGENT_RUN_UNIT"')
+          agent_lock = text.index('flock -n 8 || {', updater_stop)
           updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
           target_baseline = text.index('target_was_active="$(capture_active_baseline "$TARGET_UNIT")"')
           journal_publish = text.index('create_install_transaction')
-          assert updater_recover < pretxn_guard < target_baseline < journal_publish
+          assert updater_stop < agent_lock < updater_recover < pretxn_guard < target_baseline < journal_publish
 
           select_recovered = recovery.index('TXN_PHASE="recovered"')
           phase_to_recovering = recovery.index('mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
