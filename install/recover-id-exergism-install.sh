@@ -104,6 +104,9 @@ select_transaction() {
   if [[ -d "$INSTALL_RECOVERING_DIR" ]]; then
     TXN_PHASE="recovering"; TXN_DIR="$INSTALL_RECOVERING_DIR"; count=$((count + 1))
   fi
+  if [[ -d "$INSTALL_RECOVERED_DIR" ]]; then
+    TXN_PHASE="recovered"; TXN_DIR="$INSTALL_RECOVERED_DIR"; count=$((count + 1))
+  fi
 
   (( count <= 1 )) || {
     echo "CRITICAL: multiple installer transaction phases exist simultaneously." >&2
@@ -115,7 +118,7 @@ select_transaction() {
 if ! select_transaction; then
   # No transaction is the normal fast path. select_transaction emits a message
   # itself only for the impossible multi-phase case.
-  if [[ ! -d "$INSTALL_PENDING_DIR" && ! -d "$INSTALL_VALIDATED_DIR" && ! -d "$INSTALL_RECOVERING_DIR" ]]; then
+  if [[ ! -d "$INSTALL_PENDING_DIR" && ! -d "$INSTALL_VALIDATED_DIR" && ! -d "$INSTALL_RECOVERING_DIR" && ! -d "$INSTALL_RECOVERED_DIR" ]]; then
     exit 0
   fi
   exit 1
@@ -217,9 +220,37 @@ persist_restored_generation() {
 }
 
 enabled_state() {
-  local state
-  state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null || true)"
-  [[ -n "$state" ]] || state="not-found"
+  local load state rc
+  if ! load="$(systemctl show "$TIMER_UNIT" --property=LoadState --value 2>/dev/null)"; then
+    echo "Could not query timer LoadState during recovery." >&2
+    return 1
+  fi
+  if [[ "$load" == "not-found" ]]; then
+    printf 'not-found\n'
+    return 0
+  fi
+  [[ -n "$load" ]] || {
+    echo "Timer LoadState query returned no value during recovery." >&2
+    return 1
+  }
+
+  if state="$(systemctl is-enabled "$TIMER_UNIT" 2>/dev/null)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$state" in
+    enabled|enabled-runtime)
+      (( rc == 0 )) || return 1
+      ;;
+    disabled)
+      (( rc != 0 )) || return 1
+      ;;
+    *)
+      echo "Could not determine exact timer enablement during recovery (value=$state, rc=$rc)." >&2
+      return 1
+      ;;
+  esac
   printf '%s\n' "$state"
 }
 
@@ -249,7 +280,10 @@ restore_rc=0
 
 unit_has_processes() {
   local unit="$1" cgroup
-  cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null || true)"
+  if ! cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)"; then
+    echo "Could not determine ControlGroup for $unit" >&2
+    return 2
+  fi
   [[ -n "$cgroup" ]] || return 1
   python3 - "$cgroup" <<'PY'
 import pathlib
@@ -262,30 +296,43 @@ for procs in root.rglob("cgroup.procs"):
     try:
         if procs.read_text().strip():
             raise SystemExit(0)
-    except (FileNotFoundError, PermissionError):
+    except FileNotFoundError:
         continue
+    except PermissionError:
+        raise SystemExit(2)
 raise SystemExit(1)
 PY
 }
 
 unit_is_quiescent() {
-  local unit="$1" load active main_pid
-  load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null || true)"
+  local unit="$1" load active main_pid cgroup_rc
+  if ! load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
+    echo "Could not determine LoadState for $unit" >&2
+    return 1
+  fi
   [[ "$load" == "not-found" ]] && return 0
   [[ -n "$load" ]] || {
     echo "Could not determine LoadState for $unit" >&2
     return 1
   }
 
-  active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
-  main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null || true)"
+  if ! active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" \
+     || ! main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)"; then
+    echo "Could not determine runtime state for $unit" >&2
+    return 1
+  fi
   [[ -n "$active" && -n "$main_pid" ]] || {
     echo "Could not determine runtime state for $unit" >&2
     return 1
   }
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
-  [[ -z "$main_pid" || "$main_pid" == 0 ]] || return 1
-  unit_has_processes "$unit" && return 1
+  [[ "$main_pid" == 0 ]] || return 1
+  if unit_has_processes "$unit"; then
+    return 1
+  else
+    cgroup_rc=$?
+    (( cgroup_rc == 1 )) || return 1
+  fi
   return 0
 }
 
@@ -301,11 +348,16 @@ quiesce_unit() {
 }
 
 # Nothing that can execute or mutate the generation may remain live while old
-# bytes and systemd policy are being restored. Missing first-install units count
-# as already quiesced rather than as rollback failures.
-quiesce_unit "$TIMER_UNIT" || restore_rc=1
-quiesce_unit "$AGENT_RUN_UNIT" || restore_rc=1
-quiesce_unit "$TARGET_UNIT" || restore_rc=1
+# bytes and systemd policy are being restored. Quiescence is a hard gate:
+# never touch an artifact if even one unit can still execute or trigger work.
+quiesce_failed=0
+quiesce_unit "$TIMER_UNIT" || quiesce_failed=1
+quiesce_unit "$AGENT_RUN_UNIT" || quiesce_failed=1
+quiesce_unit "$TARGET_UNIT" || quiesce_failed=1
+if (( quiesce_failed != 0 )); then
+  echo "CRITICAL: recovery could not prove all units quiescent; no deployment artifact was modified and journal is retained." >&2
+  exit 1
+fi
 
 systemctl disable "$TIMER_UNIT" >/dev/null 2>&1 || {
   [[ "$(enabled_state)" == "disabled" || "$(enabled_state)" == "not-found" ]] || restore_rc=1
