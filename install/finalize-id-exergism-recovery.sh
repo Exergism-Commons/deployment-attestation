@@ -118,6 +118,80 @@ expected_timer_active() {
   fi
 }
 
+timer_active_state() {
+  local load active
+  if ! load="$(systemctl show "$TIMER_UNIT" --property=LoadState --value 2>/dev/null)"; then
+    echo "Could not determine timer LoadState while finalizing recovery." >&2
+    return 1
+  fi
+  if [[ "$load" == "not-found" ]]; then
+    printf 'not-found\n'
+    return 0
+  fi
+  [[ -n "$load" ]] || {
+    echo "Timer LoadState query returned no value while finalizing recovery." >&2
+    return 1
+  }
+
+  if ! active="$(systemctl show "$TIMER_UNIT" --property=ActiveState --value 2>/dev/null)"; then
+    echo "Could not determine timer ActiveState while finalizing recovery." >&2
+    return 1
+  fi
+  [[ -n "$active" ]] || {
+    echo "Timer ActiveState query returned no value while finalizing recovery." >&2
+    return 1
+  }
+  printf '%s\n' "$active"
+}
+
+wait_timer_quiescent() {
+  local i state
+  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
+  for i in {1..30}; do
+    state="$(timer_active_state)" || {
+      sleep 1
+      continue
+    }
+    case "$state" in
+      inactive|failed|not-found) return 0 ;;
+      activating|deactivating|reloading|active) ;;
+      *)
+        echo "Unexpected timer ActiveState while finalizing recovery: $state" >&2
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  echo "Timer did not reach a provably quiescent terminal state." >&2
+  return 1
+}
+
+wait_timer_active() {
+  local i state
+  systemctl start "$TIMER_UNIT" || return 1
+  for i in {1..30}; do
+    state="$(timer_active_state)" || {
+      sleep 1
+      continue
+    }
+    [[ "$state" == "active" ]] && return 0
+    case "$state" in
+      activating|reloading) ;;
+      inactive|failed|deactivating|not-found)
+        echo "Timer failed to become active while finalizing recovery: $state" >&2
+        return 1
+        ;;
+      *)
+        echo "Unexpected timer ActiveState while finalizing recovery: $state" >&2
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  echo "Timer did not become provably active." >&2
+  return 1
+}
+
 expected_enabled="$(expected_enablement_state)"
 actual_enabled="$(enabled_state)" || {
   echo "Could not determine timer enablement while finalizing recovery." >&2
@@ -142,15 +216,21 @@ fi
 
 expected_active="$(expected_timer_active)"
 if [[ "$expected_active" == 1 ]]; then
-  systemctl start "$TIMER_UNIT"
-  systemctl is-active --quiet "$TIMER_UNIT"
+  wait_timer_active
 else
-  systemctl stop "$TIMER_UNIT" >/dev/null 2>&1 || true
-  systemctl is-active --quiet "$TIMER_UNIT" && {
-    echo "Timer remained active while finalizing recovery." >&2
-    exit 1
-  }
+  wait_timer_quiescent
 fi
+
+# Re-check enablement after runtime-state restoration. A concurrent manager or
+# unit-file failure must not retire the only durable recovery marker.
+actual_enabled="$(enabled_state)" || {
+  echo "Could not re-check timer enablement after runtime restoration." >&2
+  exit 1
+}
+[[ "$actual_enabled" == "$expected_enabled" ]] || {
+  echo "Timer enablement changed during recovery finalization: expected=$expected_enabled actual=$actual_enabled" >&2
+  exit 1
+}
 
 # Atomic disappearance of .recovered is the completion commit point.
 rm -rf "$FINALIZED_DIR"
