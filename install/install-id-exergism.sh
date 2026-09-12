@@ -206,11 +206,6 @@ PY
 rm -f "$tmp_manifest"
 trap - EXIT
 
-exec 8>"$AGENT_COORDINATION_LOCK"
-flock -n 8 || {
-  echo "A deployment agent invocation is already running; refusing to capture an unstable installer baseline." >&2
-  exit 1
-}
 
 current_boot_id="$(cat "$BOOT_ID_FILE")"
 [[ "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
@@ -375,6 +370,15 @@ timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"
 stop_and_wait_quiescent "$TIMER_UNIT"
 stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 
+# With the systemd updater quiesced, acquire the cross-process agent lock. A
+# direct/manual agent that is not represented by the unit now makes installation
+# fail closed instead of racing baseline capture or later rollback.
+exec 8>"$AGENT_COORDINATION_LOCK"
+flock -n 8 || {
+  echo "A direct deployment agent invocation is still running; leaving updater/timer quiesced." >&2
+  exit 1
+}
+
 # Reconcile the updater's own durable transaction before measuring target state.
 if [[ -r "$ENV_FILE" ]]; then
   EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover || {
@@ -493,7 +497,7 @@ rollback_install_on_exit() {
   trap - EXIT
   if [[ "$install_complete" == 0 ]] &&      [[ -d "$INSTALL_PENDING_DIR" || -d "$INSTALL_VALIDATED_DIR" || -d "$INSTALL_RECOVERING_DIR" || -d "$INSTALL_RECOVERED_DIR" ]]; then
     echo "Installation failed; restoring the durable previous generation." >&2
-    if ! EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal; then
+    if ! EC_INSTALL_LOCK_HELD=1 EC_AGENT_COORDINATION_LOCK_HELD=1 "$RECOVERY_HELPER" normal; then
       # Recovery retained an actionable journal and deliberately left services
       # quiesced. Never bypass that fail-closed state.
       rc=1
