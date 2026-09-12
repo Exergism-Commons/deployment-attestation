@@ -19,6 +19,9 @@ AGENT_TIMER_UNIT="/etc/systemd/system/ec-deployment-attestation@.timer"
 ENV_FILE="/etc/ec-deployment-attestation/${SERVICE}.env"
 FENCE_DROPIN_DIR="/etc/systemd/system/${TARGET_UNIT}.d"
 FENCE_DROPIN="${FENCE_DROPIN_DIR}/90-ec-deployment-attestation-artifact-fence.conf"
+TARGET_RECOVERY_INTERLOCK="${FENCE_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
+TIMER_RECOVERY_DROPIN_DIR="/etc/systemd/system/${TIMER_UNIT}.d"
+TIMER_RECOVERY_INTERLOCK="${TIMER_RECOVERY_DROPIN_DIR}/80-ec-deployment-attestation-install-recovery.conf"
 
 RECOVERY_HELPER="/usr/local/libexec/ec-deployment-install-recovery"
 RECOVERY_UNIT_PATH="/etc/systemd/system/${RECOVERY_UNIT}"
@@ -106,9 +109,10 @@ install -d -m 0755 /usr/local/libexec
 install -d -m 0755 /etc/ec-deployment-attestation
 install -d -m 0700 /etc/ec-deployment-attestation/secrets
 install -d -o root -g root -m 0755 "$FENCE_DROPIN_DIR"
+install -d -o root -g root -m 0755 "$TIMER_RECOVERY_DROPIN_DIR"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_PARENT"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_ROOT"
-durable_sync_ancestor_chain   /usr/local/libexec   /etc/ec-deployment-attestation/secrets   "$FENCE_DROPIN_DIR"   "$INSTALL_STATE_ROOT"
+durable_sync_ancestor_chain   /usr/local/libexec   /etc/ec-deployment-attestation/secrets   "$FENCE_DROPIN_DIR"   "$TIMER_RECOVERY_DROPIN_DIR"   "$INSTALL_STATE_ROOT"
 
 jq --version >/dev/null
 git --version >/dev/null
@@ -131,10 +135,12 @@ nsenter --version >/dev/null
 # before any transactional mutation is allowed.
 install -o root -g root -m 0755 "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER"
 install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH"
+install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK"
+install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TIMER_RECOVERY_INTERLOCK"
 systemctl daemon-reload
 systemctl enable "$RECOVERY_UNIT" >/dev/null
-durable_sync_paths   "$RECOVERY_HELPER"   "$RECOVERY_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system   /etc/systemd/system/multi-user.target.wants
-durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system/multi-user.target.wants
+durable_sync_paths   "$RECOVERY_HELPER"   "$RECOVERY_UNIT_PATH"   "$TARGET_RECOVERY_INTERLOCK"   "$TIMER_RECOVERY_INTERLOCK"   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$TIMER_RECOVERY_DROPIN_DIR"   /etc/systemd/system   /etc/systemd/system/multi-user.target.wants
+durable_sync_ancestor_chain   /usr/local/libexec   "$FENCE_DROPIN_DIR"   "$TIMER_RECOVERY_DROPIN_DIR"   /etc/systemd/system/multi-user.target.wants
 
 if [[ -d "$INSTALL_TXN_DIR" ]]; then
   echo "Recovering interrupted Deployment Attestation installation before continuing." >&2
