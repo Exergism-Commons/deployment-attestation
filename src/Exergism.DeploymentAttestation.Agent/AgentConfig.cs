@@ -28,7 +28,8 @@ internal sealed class AgentConfig
         LocalUrl = RequireHttpUri(ENV_LOCAL_URL, Required(ENV_LOCAL_URL));
         PublicUrl = RequireHttpUri(ENV_PUBLIC_URL, Required(ENV_PUBLIC_URL));
 
-        HostId = Optional(ENV_HOST_ID, HostIdentity.ResolveDefault());
+        values.TryGetValue(ENV_HOST_ID, out var configuredHostId);
+        HostId = HostIdentity.SelectConfiguredOrDefault(configuredHostId, HostIdentity.ResolveDefault);
         GitHubDownloadBase = new Uri(Optional(
             ENV_GITHUB_DOWNLOAD_BASE,
             $"https://github.com/{Repository}/releases/download/{ReleaseTag}").TrimEnd('/') + "/", UriKind.Absolute);
@@ -199,6 +200,9 @@ internal sealed class AgentConfig
 
 internal static class HostIdentity
 {
+    internal static string SelectConfiguredOrDefault(string? configured, Func<string> resolveDefault)
+        => !string.IsNullOrWhiteSpace(configured) ? configured : resolveDefault();
+
     internal static string ResolveDefault()
     {
         try

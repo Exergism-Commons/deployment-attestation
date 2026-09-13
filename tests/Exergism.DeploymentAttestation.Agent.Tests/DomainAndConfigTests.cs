@@ -43,6 +43,38 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void ConfiguredHostIdDoesNotResolveFallback()
+    {
+        var fallbackCalls = 0;
+        var hostId = HostIdentity.SelectConfiguredOrDefault(
+            "configured.example.org",
+            () =>
+            {
+                fallbackCalls++;
+                return "fallback.example.org";
+            });
+
+        Assert.AreEqual("configured.example.org", hostId);
+        Assert.AreEqual(0, fallbackCalls);
+    }
+
+    [TestMethod]
+    public void MissingHostIdResolvesFallbackOnce()
+    {
+        var fallbackCalls = 0;
+        var hostId = HostIdentity.SelectConfiguredOrDefault(
+            null,
+            () =>
+            {
+                fallbackCalls++;
+                return "fallback.example.org";
+            });
+
+        Assert.AreEqual("fallback.example.org", hostId);
+        Assert.AreEqual(1, fallbackCalls);
+    }
+
+    [TestMethod]
     public void ExtraCliArgumentsFailClosed()
         => TestAssert.Throws<AgentException>(
             () => AgentActionParser.ParseArgs(new[] { ACTION_STATUS, "--unexpected" }));
