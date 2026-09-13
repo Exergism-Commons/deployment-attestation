@@ -445,7 +445,7 @@ if [[ -r "$ENV_FILE" ]]; then
   # Recover an existing transaction with the implementation that created it
   # whenever possible. This keeps future journal evolution tied to the installed
   # generation while preserving the Bash implementation for first install.
-  if [[ -x "$AGENT" && ! -d "$AGENT" ]]; then
+  if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then
     recovery_agent="$AGENT"
   fi
   if ! EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover; then
