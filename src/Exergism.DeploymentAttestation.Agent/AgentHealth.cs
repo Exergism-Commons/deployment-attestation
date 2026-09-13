@@ -112,16 +112,16 @@ internal sealed class AgentHealthStore(AgentConfig config)
         using var document = JsonDocument.Parse(File.ReadAllBytes(_config.AgentHealthFile));
         var root = document.RootElement;
         return new AgentHealthState(
-            RequireString(root, "agent_version"),
-            RequireString(root, "service"),
-            RequireString(root, "state"),
-            OptionalString(root, "action"),
-            OptionalString(root, "cycle_started_at"),
-            OptionalString(root, "last_completed_at"),
-            OptionalString(root, "last_success_at"),
-            OptionalString(root, "last_attestation_at"),
-            OptionalBool(root, "last_attestation_delivered"),
-            OptionalString(root, "last_error"));
+            RequireString(root, JSON_AGENT_VERSION),
+            RequireString(root, JSON_SERVICE),
+            RequireString(root, JSON_HEALTH_STATE),
+            OptionalString(root, JSON_HEALTH_ACTION),
+            OptionalString(root, JSON_HEALTH_CYCLE_STARTED_AT),
+            OptionalString(root, JSON_HEALTH_LAST_COMPLETED_AT),
+            OptionalString(root, JSON_HEALTH_LAST_SUCCESS_AT),
+            OptionalString(root, JSON_HEALTH_LAST_ATTESTATION_AT),
+            OptionalBool(root, JSON_HEALTH_LAST_ATTESTATION_DELIVERED),
+            OptionalString(root, JSON_HEALTH_LAST_ERROR));
     }
 
     private AgentHealthState RequireCurrent()
@@ -133,20 +133,20 @@ internal sealed class AgentHealthStore(AgentConfig config)
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteString("schema_version", SCHEMA_VERSION);
-            writer.WriteString("agent_version", state.AgentVersion);
-            writer.WriteString("service", state.Service);
-            writer.WriteString("state", state.State);
-            WriteNullableString(writer, "action", state.Action);
-            WriteNullableString(writer, "cycle_started_at", state.CycleStartedAt);
-            WriteNullableString(writer, "last_completed_at", state.LastCompletedAt);
-            WriteNullableString(writer, "last_success_at", state.LastSuccessAt);
-            WriteNullableString(writer, "last_attestation_at", state.LastAttestationAt);
+            writer.WriteString(JSON_SCHEMA_VERSION, SCHEMA_VERSION);
+            writer.WriteString(JSON_AGENT_VERSION, state.AgentVersion);
+            writer.WriteString(JSON_SERVICE, state.Service);
+            writer.WriteString(JSON_HEALTH_STATE, state.State);
+            WriteNullableString(writer, JSON_HEALTH_ACTION, state.Action);
+            WriteNullableString(writer, JSON_HEALTH_CYCLE_STARTED_AT, state.CycleStartedAt);
+            WriteNullableString(writer, JSON_HEALTH_LAST_COMPLETED_AT, state.LastCompletedAt);
+            WriteNullableString(writer, JSON_HEALTH_LAST_SUCCESS_AT, state.LastSuccessAt);
+            WriteNullableString(writer, JSON_HEALTH_LAST_ATTESTATION_AT, state.LastAttestationAt);
             if (state.LastAttestationDelivered is bool delivered)
-                writer.WriteBoolean("last_attestation_delivered", delivered);
+                writer.WriteBoolean(JSON_HEALTH_LAST_ATTESTATION_DELIVERED, delivered);
             else
-                writer.WriteNull("last_attestation_delivered");
-            WriteNullableString(writer, "last_error", state.LastError);
+                writer.WriteNull(JSON_HEALTH_LAST_ATTESTATION_DELIVERED);
+            WriteNullableString(writer, JSON_HEALTH_LAST_ERROR, state.LastError);
             writer.WriteEndObject();
         }
 
@@ -263,17 +263,17 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteString("schema_version", SCHEMA_VERSION);
-            writer.WriteString("agent_version", AGENT_VERSION);
-            writer.WriteString("service", _config.Service);
-            writer.WriteString("status", report.Status);
-            writer.WriteString("observed_at", DateTimeOffset.UtcNow.ToString(RFC3339_UTC_FORMAT, CultureInfo.InvariantCulture));
-            writer.WritePropertyName("checks");
+            writer.WriteString(JSON_SCHEMA_VERSION, SCHEMA_VERSION);
+            writer.WriteString(JSON_AGENT_VERSION, AGENT_VERSION);
+            writer.WriteString(JSON_SERVICE, _config.Service);
+            writer.WriteString(JSON_STATUS, report.Status);
+            writer.WriteString(JSON_OBSERVED_AT, DateTimeOffset.UtcNow.ToString(RFC3339_UTC_FORMAT, CultureInfo.InvariantCulture));
+            writer.WritePropertyName(JSON_CHECKS);
             writer.WriteStartObject();
             foreach (var check in report.Checks.OrderBy(pair => pair.Key, StringComparer.Ordinal))
                 writer.WriteBoolean(check.Key, check.Value);
             writer.WriteEndObject();
-            writer.WritePropertyName("last_cycle");
+            writer.WritePropertyName(JSON_HEALTH_LAST_CYCLE);
             if (report.State is null)
             {
                 writer.WriteNullValue();
@@ -281,17 +281,17 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
             else
             {
                 writer.WriteStartObject();
-                writer.WriteString("state", report.State.State);
-                WriteNullableString(writer, "action", report.State.Action);
-                WriteNullableString(writer, "cycle_started_at", report.State.CycleStartedAt);
-                WriteNullableString(writer, "last_completed_at", report.State.LastCompletedAt);
-                WriteNullableString(writer, "last_success_at", report.State.LastSuccessAt);
-                WriteNullableString(writer, "last_attestation_at", report.State.LastAttestationAt);
+                writer.WriteString(JSON_HEALTH_STATE, report.State.State);
+                WriteNullableString(writer, JSON_HEALTH_ACTION, report.State.Action);
+                WriteNullableString(writer, JSON_HEALTH_CYCLE_STARTED_AT, report.State.CycleStartedAt);
+                WriteNullableString(writer, JSON_HEALTH_LAST_COMPLETED_AT, report.State.LastCompletedAt);
+                WriteNullableString(writer, JSON_HEALTH_LAST_SUCCESS_AT, report.State.LastSuccessAt);
+                WriteNullableString(writer, JSON_HEALTH_LAST_ATTESTATION_AT, report.State.LastAttestationAt);
                 if (report.State.LastAttestationDelivered is bool delivered)
-                    writer.WriteBoolean("last_attestation_delivered", delivered);
+                    writer.WriteBoolean(JSON_HEALTH_LAST_ATTESTATION_DELIVERED, delivered);
                 else
-                    writer.WriteNull("last_attestation_delivered");
-                WriteNullableString(writer, "last_error", report.State.LastError);
+                    writer.WriteNull(JSON_HEALTH_LAST_ATTESTATION_DELIVERED);
+                WriteNullableString(writer, JSON_HEALTH_LAST_ERROR, report.State.LastError);
                 writer.WriteEndObject();
             }
             writer.WriteEndObject();
