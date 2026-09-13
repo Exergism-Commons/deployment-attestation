@@ -17,7 +17,8 @@ The Native AOT executable owns the runtime state machine:
 - activation journal creation;
 - rollback and committed-phase recovery;
 - health collection;
-- deterministic attestation construction and HMAC delivery.
+- deterministic attestation construction and HMAC delivery;
+- independent durable self-health via `agent-health.json`, `health` and `status`.
 
 The installer/recovery scripts remain shell in this migration. They are separate host-generation transactions and can be migrated independently after the agent reaches behavioral parity.
 
@@ -32,7 +33,7 @@ JSON is parsed with `JsonDocument` and emitted with `Utf8JsonWriter`. The projec
 - `IsAotCompatible=true`;
 - `TreatWarningsAsErrors=true`.
 
-CI publishes a real `linux-x64` Native AOT ELF and executes its dependency-free `self-test` command.
+CI runs a dedicated MSTest unit-test project first, then publishes a real `linux-x64` Native AOT ELF and executes its dependency-free `self-test` command. Unit tests cover pure protocol/state logic and regression cases; `self-test` remains a native-binary smoke test rather than a substitute for unit testing.
 
 ## Rollout rule
 
@@ -62,3 +63,8 @@ sudo EC_NATIVE_AGENT_BINARY=/path/to/ec-deployment-agent \
 The installer validates that the supplied path is a real executable file, installs it through the existing generation transaction, runs its dependency-free `self-test`, and keeps the same rollback artifact/journal semantics. If an installed agent already exists, pre-install transaction recovery prefers that installed generation so the implementation that created a journal is also the implementation that reconciles it.
 
 Without `EC_NATIVE_AGENT_BINARY`, the installer continues to install the Bash reference agent. This is deliberate until the Native AOT PR has parity review and a durable release/distribution channel.
+
+
+## C# conventions
+
+The executable uses top-level statements for the entry point. Closed domains use enums internally; persisted/wire values and other repeated contract strings are centralized as `SNAKE_CASE` constants. This keeps protocol spellings reviewable in one place and avoids magic strings across the state machine.
