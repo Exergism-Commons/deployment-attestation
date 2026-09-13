@@ -38,7 +38,7 @@ internal sealed class AgentConfig
         SmokeTimeout = PositiveSeconds(Optional(ENV_SMOKE_TIMEOUT, "60"), ENV_SMOKE_TIMEOUT);
         DownloadTimeout = PositiveSeconds(Optional(ENV_DOWNLOAD_TIMEOUT, "120"), ENV_DOWNLOAD_TIMEOUT);
         AgentHealthMaxAge = PositiveSeconds(Optional(ENV_AGENT_HEALTH_MAX_AGE, "1500"), ENV_AGENT_HEALTH_MAX_AGE);
-        CheckPublic = Optional(ENV_CHECK_PUBLIC, "1") == "1";
+        CheckPublic = Optional(ENV_CHECK_PUBLIC, CONFIG_BOOLEAN_TRUE) == CONFIG_BOOLEAN_TRUE;
         StateDirectory = RequireAbsolutePath(
             ENV_STATE_DIR,
             Optional(ENV_STATE_DIR, $"/var/lib/ec-deployment-attestation/{Service}"));
