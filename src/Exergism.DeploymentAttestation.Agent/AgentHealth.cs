@@ -258,8 +258,8 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
         var recentSuccess = state is not null && IsRecent(state.LastSuccessAt, _config.AgentHealthMaxAge);
         var cycleNotStuck = state is not null && IsCycleNotStuck(state);
         var transactionClear = !File.Exists(_config.TransactionFile);
-        var timerActive = await SystemctlSuccessAsync("is-active", "--quiet", _config.AgentTimerUnit);
-        var timerEnabled = await SystemctlSuccessAsync("is-enabled", "--quiet", _config.AgentTimerUnit);
+        var timerActive = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ACTIVE, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
+        var timerEnabled = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ENABLED, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
         var attestationDelivery = string.IsNullOrEmpty(_config.AttestationEndpoint) ||
             (state?.LastAttestationDelivered == true &&
              IsRecent(state.LastAttestationAt, _config.AgentHealthMaxAge));
