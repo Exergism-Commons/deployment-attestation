@@ -5,6 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec=15min
 Environment=EC_ATTESTATION_CONFIG=/etc/ec-deployment-attestation/%i.env
 ExecStart=/usr/local/libexec/ec-deployment-agent run
 User=root
