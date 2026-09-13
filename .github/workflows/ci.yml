@@ -142,6 +142,8 @@ jobs:
           grep -Fq 'os.open(f"/proc/{pid}/exe", os.O_RDONLY)' agent/ec-deployment-agent.sh
           grep -Fq '(live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino)' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_process' agent/ec-deployment-agent.sh
+          grep -Fq 'final_actual="$(live_runtime_snapshot_sha256' agent/ec-deployment-agent.sh
+          grep -Fq 'invalidate all runtime-bound evidence' agent/ec-deployment-agent.sh
           grep -Fq 'Bootstrap refused: live service process does not match the fenced configured runtime' agent/ec-deployment-agent.sh
           grep -Fq 'Bootstrap refused: semantic smoke check failed' agent/ec-deployment-agent.sh
           grep -Fq 'Bootstrap refused: target service is in transitional state' agent/ec-deployment-agent.sh
@@ -406,12 +408,15 @@ jobs:
           live_fence_agent = agent.index('artifact_write_fence || return 1', live_snapshot)
           bound_digest = agent.index('digest="$(bound_running_runtime_sha256)"', live_snapshot)
           post_start = agent.index('post_start_integrity()')
-          post_start_live = agent.index('live_runtime_invariants || return 1', post_start)
+          post_start_first_live = agent.index('live_digest="$(live_runtime_snapshot_sha256)"', post_start)
+          post_start_integrity = agent.index('artifact_integrity "$commit" "$binary" || return 1', post_start_first_live)
+          post_start_second_live = agent.index('live_digest="$(live_runtime_snapshot_sha256)"', post_start_integrity)
           collect = agent.index('collect_checks()')
           collect_snapshot = agent.index('actual="$(live_runtime_snapshot_sha256', collect)
+          collect_final_snapshot = agent.index('final_actual="$(live_runtime_snapshot_sha256', collect_snapshot)
           assert live_snapshot < live_fence_agent < bound_digest
-          assert post_start < post_start_live
-          assert collect < collect_snapshot
+          assert post_start < post_start_first_live < post_start_integrity < post_start_second_live
+          assert collect < collect_snapshot < collect_final_snapshot
           global_lock = agent.index('if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]] && ! flock -n 8; then')
           state_lock = agent.index('if ! flock -n 9; then')
           installer_phase_guard = agent.index('for phase in pending validated recovering recovered; do')
