@@ -189,8 +189,14 @@ internal sealed class AgentLock : IDisposable
 
 internal static class Durability
 {
-    private const int ORdOnly = 0;
-    private const int ODirectory = 0x10000;
+    private const int O_RDONLY = 0;
+    private const int O_DIRECTORY = 0x10000;
+    private const int O_NOFOLLOW = 0x20000;
+    private const int O_CLOEXEC = 0x80000;
+    private const int AT_EMPTY_PATH = 0x1000;
+    private const uint STATX_TYPE = 0x00000001;
+    private const ushort S_IFMT = 0xF000;
+    private const ushort S_IFREG = 0x8000;
 
     public static void EnsureDirectory(string target, UnixFileMode mode)
     {
@@ -272,11 +278,34 @@ internal static class Durability
             throw new AgentException($"fsync failed for {path}: errno={Marshal.GetLastPInvokeError()}");
     }
 
+    public static void FsyncRegularFileNoFollow(string path, string displayPath)
+    {
+        var fd = Native.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException($"open tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_TYPE, out var stat) != 0)
+                throw new AgentException($"statx tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+            if ((stat.Mode & S_IFMT) != S_IFREG)
+                throw new AgentException($"Tracked path is not a regular file during fsync: {displayPath}");
+
+            if (Native.fsync(fd) != 0)
+                throw new AgentException($"fsync tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
     public static void FsyncDirectory(string path)
     {
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
             return;
-        var fd = Native.open(path, ORdOnly | ODirectory);
+        var fd = Native.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (fd < 0)
             throw new AgentException($"open directory failed for {path}: errno={Marshal.GetLastPInvokeError()}");
         try
@@ -297,6 +326,13 @@ internal static class Durability
     }
 }
 
+[StructLayout(LayoutKind.Explicit, Size = 256)]
+internal struct LinuxStatx
+{
+    [FieldOffset(28)]
+    internal ushort Mode;
+}
+
 internal static class Native
 {
     [DllImport("libc", SetLastError = true)]
@@ -307,6 +343,14 @@ internal static class Native
 
     [DllImport("libc", SetLastError = true)]
     internal static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+    [DllImport("libc", SetLastError = true)]
+    internal static extern int statx(
+        int dirfd,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string pathname,
+        int flags,
+        uint mask,
+        out LinuxStatx statxbuf);
 
     [DllImport("libc", SetLastError = true)]
     internal static extern int close(int fd);
