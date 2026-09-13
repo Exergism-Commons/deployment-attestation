@@ -603,9 +603,9 @@ internal sealed class DeploymentAgent
         };
         if (mandatory.Any(key => !checks.TryGetValue(key, out var value) || !value))
             return STATUS_UNHEALTHY;
-        return checks.TryGetValue("public_https", out var publicOk) && !publicOk
-            ? "degraded"
-            : "healthy";
+        return checks.TryGetValue(CHECK_PUBLIC_HTTPS, out var publicOk) && !publicOk
+            ? STATUS_DEGRADED
+            : STATUS_HEALTHY;
     }
 
     private async Task SendAttestationAsync(byte[] body)
