@@ -54,6 +54,8 @@ internal static class SelfTest
         Assert(config.DownloadTimeout == TimeSpan.FromSeconds(37), "config timeout");
         Assert(!config.CheckPublic, "config public check");
         Assert(AgentConfig.ParseValue("\"hello\\nworld\"") == "hello\nworld", "quoted config parse");
+        AssertThrows(() => AgentConfig.ParseValue("$HOME/runtime"), "shell variable expansion");
+        AssertThrows(() => AgentConfig.ParseValue("`id`"), "shell command expansion");
     }
 
     private static void TestProtocol(string root)
@@ -80,6 +82,19 @@ internal static class SelfTest
             "amd64");
         Assert(parsed.SourceCommit == new string('a', 40), "manifest commit");
         Assert(parsed.AssetSha256 == new string('b', 64), "manifest digest");
+
+        var arbitraryKey = manifest.Replace(
+            "\"amd64\": {",
+            "\"experimental/linux-x64\": {",
+            StringComparison.Ordinal).Replace(
+            "\"experimental/linux-x64\": {",
+            "\"experimental/linux-x64\": {",
+            StringComparison.Ordinal);
+        _ = Protocol.ParseReleaseManifest(
+            Encoding.UTF8.GetBytes(arbitraryKey),
+            "Exergism-Commons/id",
+            "runtime-main",
+            "experimental/linux-x64");
 
         AssertThrows(() => Protocol.ParseReleaseManifest(
             Encoding.UTF8.GetBytes(manifest.Replace(
