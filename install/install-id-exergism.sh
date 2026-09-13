@@ -164,9 +164,11 @@ fi
 # finalizer/validator does not yet exist durably.
 atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755
 atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755
+atomic_install_root_file "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755
+atomic_install_root_file "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA" 0644
 atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755
 atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644
-durable_sync_paths   "$VALIDATOR"   "$ARTIFACT_FENCE_AUDITOR"   "$RECOVERY_FINALIZER"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
+durable_sync_paths   "$VALIDATOR"   "$ARTIFACT_FENCE_AUDITOR"   "$MANIFEST_VALIDATOR"   "$MANIFEST_SCHEMA"   "$RECOVERY_FINALIZER"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
 systemctl daemon-reload
 
@@ -455,8 +457,6 @@ artifact_path() {
     timer_unit) printf '%s\n' "$AGENT_TIMER_UNIT" ;;
     env) printf '%s\n' "$ENV_FILE" ;;
     fence) printf '%s\n' "$FENCE_DROPIN" ;;
-    manifest_validator) printf '%s\n' "$MANIFEST_VALIDATOR" ;;
-    manifest_schema) printf '%s\n' "$MANIFEST_SCHEMA" ;;
     *) return 1 ;;
   esac
 }
@@ -474,7 +474,7 @@ create_install_transaction() {
   printf '%s\n' "$timer_was_active" > "$stage/timer_was_active"
   printf '%s\n' "$target_was_active" > "$stage/target_was_active"
 
-  for key in agent smoke service_unit timer_unit env fence manifest_validator manifest_schema; do
+  for key in agent smoke service_unit timer_unit env fence; do
     path="$(artifact_path "$key")"
     present=0
     if [[ -e "$path" || -L "$path" ]]; then
@@ -518,7 +518,7 @@ PY
 
 persist_installed_generation() {
   local timer_wants="/etc/systemd/system/timers.target.wants"
-  durable_sync_paths     "$AGENT" "$SMOKE" "$MANIFEST_VALIDATOR" "$MANIFEST_SCHEMA" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
+  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
   durable_sync_ancestor_chain     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR" "$timer_wants"
 }
 
@@ -563,8 +563,6 @@ stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
 install -o root -g root -m 0755 "$ROOT/agent/ec-deployment-agent.sh" "$AGENT"
-install -o root -g root -m 0755 "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR"
-install -o root -g root -m 0644 "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA"
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
