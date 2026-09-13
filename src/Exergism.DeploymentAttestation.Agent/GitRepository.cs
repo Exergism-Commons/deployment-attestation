@@ -6,8 +6,14 @@ namespace Exergism.DeploymentAttestation.Agent;
 
 internal static class TrackedFileDurability
 {
-    internal static void FsyncRegularFile(string path, string relativePath)
-        => Durability.FsyncRegularFileNoFollow(path, relativePath);
+    internal static VerifiedRegularFile ReadVerifiedRegularFile(string path, string relativePath)
+        => Durability.ReadRegularFileNoFollow(path, relativePath);
+
+    internal static void FsyncRegularFile(
+        string path,
+        string relativePath,
+        FileIdentity expectedIdentity)
+        => Durability.FsyncRegularFileNoFollow(path, relativePath, expectedIdentity);
 }
 
 internal static class GitProcessIdentity
@@ -38,7 +44,7 @@ internal sealed class GitRepository(AgentConfig config)
         => (await GitAsync([GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
 
     public async Task VerifySourceTreeExactAsync(string commit)
-        => await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        => _ = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
 
     public async Task SwitchSourceAsync(string commit, bool fetchFirst)
     {
@@ -60,8 +66,8 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task FsyncCheckoutAsync(string commit)
     {
-        await VerifySourceTreeExactAsync(commit);
-        await FsyncRepositoryAsync(_config.AppDirectory, commit);
+        var verifiedFiles = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        await FsyncRepositoryAsync(_config.AppDirectory, commit, verifiedFiles);
         await VerifySourceTreeExactAsync(commit);
     }
 
@@ -90,8 +96,12 @@ internal sealed class GitRepository(AgentConfig config)
         await AssertNoRelatedGitAsync(protectedRoots);
     }
 
-    private async Task VerifyRepositoryExactAsync(string repository, string commit)
+    private async Task<Dictionary<string, FileIdentity>> VerifyRepositoryExactAsync(
+        string repository,
+        string commit,
+        Dictionary<string, FileIdentity>? verifiedFiles = null)
     {
+        verifiedFiles ??= new Dictionary<string, FileIdentity>(StringComparer.Ordinal);
         repository = Path.GetFullPath(repository);
         if (!Directory.Exists(repository) || new DirectoryInfo(repository).LinkTarget is not null)
             throw new AgentException($"Repository path is not a real directory: {repository}");
@@ -134,13 +144,12 @@ internal sealed class GitRepository(AgentConfig config)
             }
             else if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
-                if (!File.Exists(fullPath) || info.LinkTarget is not null)
-                    throw new AgentException($"Expected regular file: {entry.RelativePath}");
-                var mode = File.GetUnixFileMode(fullPath);
-                var executable = (mode & UnixFileMode.UserExecute) != 0;
+                var verified = TrackedFileDurability.ReadVerifiedRegularFile(fullPath, entry.RelativePath);
+                var executable = (verified.Mode & UnixFileMode.UserExecute) != 0;
                 if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
                     throw new AgentException($"Executable bit mismatch: {entry.RelativePath}");
-                data = await File.ReadAllBytesAsync(fullPath);
+                data = verified.Data;
+                verifiedFiles[Path.GetFullPath(fullPath)] = verified.Identity;
             }
             else
             {
@@ -163,8 +172,10 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var submodule in submodules)
         {
             var subPath = Path.Combine(repository, submodule.Key.Replace('/', Path.DirectorySeparatorChar));
-            await VerifyRepositoryExactAsync(subPath, submodule.Value);
+            await VerifyRepositoryExactAsync(subPath, submodule.Value, verifiedFiles);
         }
+
+        return verifiedFiles;
     }
 
     private async Task SyncSubmodulesAsync(string commit)
@@ -208,7 +219,10 @@ internal sealed class GitRepository(AgentConfig config)
         }
     }
 
-    private async Task FsyncRepositoryAsync(string repository, string commit)
+    private async Task FsyncRepositoryAsync(
+        string repository,
+        string commit,
+        IReadOnlyDictionary<string, FileIdentity> verifiedFiles)
     {
         var entries = await ReadTreeAsync(repository, commit);
         var directories = new HashSet<string>(StringComparer.Ordinal) { repository };
@@ -237,7 +251,11 @@ internal sealed class GitRepository(AgentConfig config)
 
             if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
-                TrackedFileDurability.FsyncRegularFile(path, entry.RelativePath);
+                var fullPath = Path.GetFullPath(path);
+                if (!verifiedFiles.TryGetValue(fullPath, out var expectedIdentity))
+                    throw new AgentException($"Tracked regular file was not identity-verified: {entry.RelativePath}");
+
+                TrackedFileDurability.FsyncRegularFile(path, entry.RelativePath, expectedIdentity);
                 continue;
             }
 
@@ -258,7 +276,7 @@ internal sealed class GitRepository(AgentConfig config)
             FsyncDirectoryTree(root);
 
         foreach (var submodule in submodules)
-            await FsyncRepositoryAsync(submodule.Path, submodule.Commit);
+            await FsyncRepositoryAsync(submodule.Path, submodule.Commit, verifiedFiles);
     }
 
     private static void FsyncDirectoryTree(string root)
