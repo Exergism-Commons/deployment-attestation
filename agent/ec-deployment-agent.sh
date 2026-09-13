@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre15"
+AGENT_VERSION="0.1.0-pre16"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 ACTION="${1:-run}"
 
@@ -26,6 +26,8 @@ done
 EC_HOST_ID="${EC_HOST_ID:-$(hostname -f 2>/dev/null || hostname)}"
 EC_GITHUB_DOWNLOAD_BASE="${EC_GITHUB_DOWNLOAD_BASE:-https://github.com/${EC_REPOSITORY}/releases/download/${EC_RELEASE_TAG}}"
 EC_RELEASE_MANIFEST="${EC_RELEASE_MANIFEST:-DEPLOYMENT_MANIFEST.json}"
+EC_RELEASE_MANIFEST_VALIDATOR="${EC_RELEASE_MANIFEST_VALIDATOR:-/usr/local/libexec/ec-release-manifest-validator}"
+EC_RELEASE_MANIFEST_SCHEMA="${EC_RELEASE_MANIFEST_SCHEMA:-/usr/local/libexec/release-manifest-v0.1.schema.json}"
 EC_ATTESTATION_ENDPOINT="${EC_ATTESTATION_ENDPOINT:-}"
 EC_HMAC_SECRET_FILE="${EC_HMAC_SECRET_FILE:-}"
 EC_SMOKE_SCRIPT="${EC_SMOKE_SCRIPT:-}"
@@ -488,6 +490,17 @@ bootstrap_state() {
   write_current_state "$commit" "$binary" "" || die "Could not bootstrap durable state"
 }
 validate_manifest() {
+  [[ -x "$EC_RELEASE_MANIFEST_VALIDATOR" ]] || {
+    warn "Release-manifest validator is missing or not executable: $EC_RELEASE_MANIFEST_VALIDATOR"
+    return 1
+  }
+  [[ -r "$EC_RELEASE_MANIFEST_SCHEMA" ]] || {
+    warn "Release-manifest schema is missing or unreadable: $EC_RELEASE_MANIFEST_SCHEMA"
+    return 1
+  }
+  "$EC_RELEASE_MANIFEST_VALIDATOR" "$EC_RELEASE_MANIFEST_SCHEMA" "$1" || return 1
+  # Schema validation establishes the complete structural contract. These
+  # additional checks bind that valid document to this service/channel/arch.
   python3 - "$1" "$EC_REPOSITORY" "$EC_RELEASE_TAG" "$2" <<'PY'
 import json, pathlib, re, sys
 p,repo,tag,arch=sys.argv[1:]; o=json.loads(pathlib.Path(p).read_text())
