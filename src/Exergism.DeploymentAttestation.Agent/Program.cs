@@ -10,7 +10,7 @@ static async Task<int> RunAsync(string[] args)
 
     try
     {
-        var action = args.Length == 0 ? AgentAction.Run : AgentActionParser.Parse(args[0]);
+        var action = AgentActionParser.ParseArgs(args);
         if (action == AgentAction.SelfTest)
             return SelfTest.Run();
 
