@@ -12,6 +12,7 @@ internal enum AgentAction
     Health,
     Status,
     Recover,
+    ValidateConfig,
     SelfTest
 }
 
@@ -56,7 +57,7 @@ internal static class AgentActionParser
             0 => AgentAction.Run,
             1 => Parse(args[0]),
             _ => throw new AgentException(
-                $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_SELF_TEST}]")
+                $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_VALIDATE_CONFIG}|{ACTION_SELF_TEST}]")
         };
 
     internal static AgentAction Parse(string value) => value switch
@@ -67,9 +68,10 @@ internal static class AgentActionParser
         ACTION_HEALTH => AgentAction.Health,
         ACTION_STATUS => AgentAction.Status,
         ACTION_RECOVER => AgentAction.Recover,
+        ACTION_VALIDATE_CONFIG => AgentAction.ValidateConfig,
         ACTION_SELF_TEST => AgentAction.SelfTest,
         _ => throw new AgentException(
-            $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_SELF_TEST}]")
+            $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_VALIDATE_CONFIG}|{ACTION_SELF_TEST}]")
     };
 
     internal static string ToWireValue(AgentAction action) => action switch
@@ -80,6 +82,7 @@ internal static class AgentActionParser
         AgentAction.Health => ACTION_HEALTH,
         AgentAction.Status => ACTION_STATUS,
         AgentAction.Recover => ACTION_RECOVER,
+        AgentAction.ValidateConfig => ACTION_VALIDATE_CONFIG,
         AgentAction.SelfTest => ACTION_SELF_TEST,
         _ => throw new AgentException("Unsupported agent action")
     };
