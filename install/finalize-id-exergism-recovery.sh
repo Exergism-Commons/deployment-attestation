@@ -10,6 +10,7 @@ SERVICE="id.exergism.org"
 TARGET_UNIT="id-exergism.service"
 TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
+ARTIFACT_FENCE_AUDITOR="/usr/local/libexec/ec-id-production-artifact-fence"
 
 INSTALL_STATE_ROOT="/var/lib/ec-deployment-attestation/install"
 RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
@@ -284,6 +285,10 @@ wait_target_healthy_active() {
   if [[ -x "$SMOKE" ]]; then
     EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || return 1
   fi
+  "$ARTIFACT_FENCE_AUDITOR" || {
+    echo "Production resolver failed the live artifact-fence audit during recovery finalization." >&2
+    return 1
+  }
 }
 
 settle_target_after_inactive_baseline() {
