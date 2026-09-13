@@ -341,6 +341,12 @@ internal sealed class GitRepository(AgentConfig config)
 
         if (GitProcessArguments.ReferencesProtectedPath(
                 argv,
+                value => PointsIntoProtected(value, cwd, protectedRoots),
+                name => environment.TryGetValue(name, out var value) ? value : null))
+            return true;
+
+        if (GitProcessEnvironment.ReferencesProtectedWorktree(
+                environment,
                 value => PointsIntoProtected(value, cwd, protectedRoots)))
             return true;
 
@@ -432,9 +438,10 @@ internal sealed class GitRepository(AgentConfig config)
             if (protectedRoots.Any(root => PathsIntersect(effective, root)))
                 return true;
         }
-        else if (environment.ContainsKey(GIT_ENV_CONFIG_PARAMETERS))
+        else if (environment.ContainsKey(GIT_ENV_CONFIG_PARAMETERS) ||
+                 environment.ContainsKey(GIT_ENV_CONFIG_COUNT))
         {
-            throw new AgentException("Cannot resolve GIT_CONFIG_PARAMETERS for live Git process");
+            throw new AgentException("Cannot resolve live Git configuration");
         }
 
         return false;
@@ -634,15 +641,63 @@ internal sealed class GitRepository(AgentConfig config)
     private sealed record TreeEntry(string Mode, string Kind, string ObjectId, string RelativePath);
 }
 
+internal static class GitProcessEnvironment
+{
+    internal static bool ReferencesProtectedWorktree(
+        IReadOnlyDictionary<string, string> environment,
+        Func<string, bool> pointsIntoProtected)
+    {
+        if (!environment.TryGetValue(GIT_ENV_CONFIG_COUNT, out var rawCount))
+            return false;
+
+        if (!int.TryParse(rawCount, out var count) || count < 0 || count > 10_000)
+            throw new AgentException("Malformed or unsafe GIT_CONFIG_COUNT");
+
+        for (var index = 0; index < count; index++)
+        {
+            var keyName = $"{GIT_ENV_CONFIG_KEY_PREFIX}{index}";
+            var valueName = $"{GIT_ENV_CONFIG_VALUE_PREFIX}{index}";
+            if (!environment.TryGetValue(keyName, out var key) ||
+                !environment.TryGetValue(valueName, out var value))
+                throw new AgentException("Incomplete Git config environment");
+
+            if (key.Equals(GIT_CONFIG_CORE_WORKTREE, StringComparison.OrdinalIgnoreCase) &&
+                pointsIntoProtected(value))
+                return true;
+        }
+
+        return false;
+    }
+}
+
 internal static class GitProcessArguments
 {
     internal static bool ReferencesProtectedPath(
         IReadOnlyList<string> argv,
-        Func<string, bool> pointsIntoProtected)
+        Func<string, bool> pointsIntoProtected,
+        Func<string, string?>? getEnvironment = null)
     {
         for (var index = 1; index < argv.Count; index++)
         {
             var argument = argv[index];
+
+            if (argument.StartsWith(GIT_FLAG_CONFIG_ENV_PREFIX, StringComparison.Ordinal))
+            {
+                var spec = argument[GIT_FLAG_CONFIG_ENV_PREFIX.Length..];
+                var equals = spec.IndexOf('=');
+                if (equals <= 0 || equals == spec.Length - 1)
+                    throw new AgentException("Malformed Git --config-env selector");
+
+                var key = spec[..equals];
+                var environmentName = spec[(equals + 1)..];
+                var value = getEnvironment?.Invoke(environmentName)
+                    ?? throw new AgentException("Unresolvable Git --config-env selector");
+
+                if (key.Equals(GIT_CONFIG_CORE_WORKTREE, StringComparison.OrdinalIgnoreCase) &&
+                    pointsIntoProtected(value))
+                    return true;
+                continue;
+            }
 
             if (argument is GIT_FLAG_DIR or GIT_FLAG_WORK_TREE or GIT_FLAG_CHDIR)
             {
@@ -710,4 +765,3 @@ internal static class GitProcessArguments
                pointsIntoProtected(value);
     }
 }
-
