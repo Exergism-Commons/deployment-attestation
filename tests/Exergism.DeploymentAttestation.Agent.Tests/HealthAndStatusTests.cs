@@ -146,4 +146,20 @@ public sealed class HealthAndStatusTests
             () => new AgentHealthStore(environment.Config).TryRead());
     }
 
+
+    [TestMethod]
+    public void NewCycleRepairsCorruptedSelfHealthState()
+    {
+        using var environment = TestEnvironment.Create();
+        File.WriteAllText(environment.Config.AgentHealthFile, "{not-json");
+
+        var store = new AgentHealthStore(environment.Config);
+        store.BeginCycle(AgentAction.Run);
+
+        var state = store.TryRead();
+        Assert.IsNotNull(state);
+        Assert.AreEqual(HEALTH_STATE_RUNNING, state.State);
+        Assert.AreEqual(ACTION_RUN, state.Action);
+    }
+
 }
