@@ -1196,12 +1196,15 @@ artifact_integrity() {
 }
 
 post_start_integrity() {
-  local commit="$1" binary="$2"
-  # Once this succeeds, the long-lived service cannot race either the source
-  # traversal or runtime hashing: both deployment artifacts are read-only in
-  # that service's live mount namespace.
-  live_runtime_invariants || return 1
-  artifact_integrity "$commit" "$binary"
+  local commit="$1" binary="$2" live_digest
+  # Prove both sides of the byte-exact integrity traversal. A systemd restart
+  # or exec transition between these barriers cannot make a different process
+  # inherit evidence gathered for the previous MainPID.
+  live_digest="$(live_runtime_snapshot_sha256)" || return 1
+  [[ "$live_digest" == "$binary" ]] || return 1
+  artifact_integrity "$commit" "$binary" || return 1
+  live_digest="$(live_runtime_snapshot_sha256)" || return 1
+  [[ "$live_digest" == "$binary" ]]
 }
 
 # Commit candidate state only while the normal service writer is stopped.
@@ -1295,7 +1298,7 @@ recover_transaction() {
 collect_checks() {
   local expected="$1" expected_binary="$2" deployed="$3" state_binary="$4"
   local systemd=false local_http=false public_https=true release_revision=false service_smoke=true artifact_fence=false runtime_process=false source_tree=false state_integrity=false runtime_digest=false runtime_present=false
-  local actual disk_actual
+  local actual disk_actual final_actual
 
   # The smoke hook runs first and cannot leave descendants behind. Accept live
   # artifact evidence only from one stable service instance that both sees the
@@ -1329,6 +1332,22 @@ collect_checks() {
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
   [[ "$runtime_process" == true && "$actual" == "$state_binary" && "$disk_actual" == "$state_binary" ]] && state_integrity=true
   [[ "$runtime_process" == true && "$actual" == "$expected_binary" && "$disk_actual" == "$expected_binary" ]] && runtime_digest=true
+
+  # Close the observation window with a second live snapshot. If the service
+  # restarted, exec'd a wrapper, or lost its mount fence during the remaining
+  # checks, invalidate all runtime-bound evidence instead of signing stale facts.
+  if [[ "$runtime_process" == true ]]; then
+    final_actual="$(live_runtime_snapshot_sha256 2>/dev/null || true)"
+    if [[ ! "$final_actual" =~ ^[0-9a-f]{64}$ || "$final_actual" != "$actual" ]]; then
+      actual="$final_actual"
+      artifact_fence=false
+      runtime_process=false
+      state_integrity=false
+      runtime_digest=false
+      [[ "$actual" =~ ^[0-9a-f]{64}$ ]] || runtime_present=false
+    fi
+  fi
+
   python3 - "$actual" "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$artifact_fence" "$runtime_process" "$source_tree" "$state_integrity" "$runtime_digest" "$runtime_present" <<'PY'
 import json,sys
 actual=sys.argv[1] if len(sys.argv[1]) == 64 else None
