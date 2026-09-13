@@ -7,12 +7,12 @@ internal static class Program
         try
         {
             var action = args.Length == 0 ? AgentAction.Run : AgentAction.Parse(args[0]);
+            if (action == AgentAction.SelfTest)
+                return SelfTest.Run();
+
             var configPath = Environment.GetEnvironmentVariable("EC_ATTESTATION_CONFIG")
                 ?? "/etc/ec-deployment-attestation/service.env";
             var config = AgentConfig.Load(configPath);
-
-            if (action == AgentAction.SelfTest)
-                return SelfTest.Run();
 
             using var coordination = AgentLock.Acquire(
                 config.CoordinationLockPath,
