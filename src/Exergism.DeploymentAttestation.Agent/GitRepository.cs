@@ -7,15 +7,7 @@ namespace Exergism.DeploymentAttestation.Agent;
 internal static class TrackedFileDurability
 {
     internal static void FsyncRegularFile(string path, string relativePath)
-    {
-        if (!File.Exists(path))
-            throw new AgentException($"Tracked regular file disappeared during fsync: {relativePath}");
-
-        if (new FileInfo(path).LinkTarget is not null)
-            throw new AgentException($"Tracked regular file became a symlink during fsync: {relativePath}");
-
-        Durability.FsyncFile(path);
-    }
+        => Durability.FsyncRegularFileNoFollow(path, relativePath);
 }
 
 internal static class GitProcessIdentity
