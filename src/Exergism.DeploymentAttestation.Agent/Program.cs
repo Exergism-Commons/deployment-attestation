@@ -17,6 +17,9 @@ static async Task<int> RunAsync(string[] args)
         var configPath = Environment.GetEnvironmentVariable(ENV_ATTESTATION_CONFIG) ?? DEFAULT_CONFIG_PATH;
         var config = AgentConfig.Load(configPath);
 
+        if (action == AgentAction.ValidateConfig)
+            return 0;
+
         if (action is AgentAction.Health or AgentAction.Status)
         {
             var health = new AgentSelfHealthService(config);
