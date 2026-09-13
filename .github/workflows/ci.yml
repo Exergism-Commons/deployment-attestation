@@ -236,6 +236,7 @@ jobs:
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
           grep -Fq 'AGENT_SOURCE="${EC_NATIVE_AGENT_BINARY:-$ROOT/agent/ec-deployment-agent.sh}"' install/install-id-exergism.sh
           grep -Fq 'recovery_agent="$ROOT/agent/ec-deployment-agent.sh"' install/install-id-exergism.sh
+          grep -Fq 'if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then' install/install-id-exergism.sh
           grep -Fq 'recovery_agent="$AGENT"' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
           grep -Fq 'install -o root -g root -m 0755 "$AGENT_SOURCE" "$AGENT"' install/install-id-exergism.sh
