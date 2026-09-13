@@ -14,6 +14,7 @@ public sealed class DomainAndConfigTests
     [DataRow(ACTION_HEALTH)]
     [DataRow(ACTION_STATUS)]
     [DataRow(ACTION_RECOVER)]
+    [DataRow(ACTION_VALIDATE_CONFIG)]
     [DataRow(ACTION_SELF_TEST)]
     public void ActionsRoundTripWithoutMagicStrings(string wireValue)
     {
