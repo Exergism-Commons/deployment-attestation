@@ -185,6 +185,7 @@ internal static class AgentConstants
     internal const string JSON_HEALTH_LAST_SUCCESS_AT = "last_success_at";
     internal const string JSON_HEALTH_LAST_ATTESTATION_AT = "last_attestation_at";
     internal const string JSON_HEALTH_LAST_ATTESTATION_DELIVERED = "last_attestation_delivered";
+    internal const string JSON_HEALTH_LAST_ATTESTATION_RECEIVER_SHA256 = "last_attestation_receiver_sha256";
     internal const string JSON_HEALTH_LAST_ERROR = "last_error";
     internal const string JSON_HEALTH_LAST_CYCLE = "last_cycle";
 
