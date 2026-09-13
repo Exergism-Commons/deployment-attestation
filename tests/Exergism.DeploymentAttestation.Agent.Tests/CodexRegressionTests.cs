@@ -167,6 +167,29 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void MissingTrackedRegularFileFailsFsyncBarrier()
+    {
+        using var environment = TestEnvironment.Create();
+        var missing = Path.Combine(environment.Root, "missing-tracked-file");
+
+        TestAssert.Throws<AgentException>(
+            () => TrackedFileDurability.FsyncRegularFile(missing, "missing-tracked-file"));
+    }
+
+    [TestMethod]
+    public void SymlinkSubstitutionFailsTrackedRegularFsyncBarrier()
+    {
+        using var environment = TestEnvironment.Create();
+        var target = Path.Combine(environment.Root, "target");
+        var link = Path.Combine(environment.Root, "tracked");
+        File.WriteAllText(target, "content");
+        File.CreateSymbolicLink(link, target);
+
+        TestAssert.Throws<AgentException>(
+            () => TrackedFileDurability.FsyncRegularFile(link, "tracked"));
+    }
+
+    [TestMethod]
     public void BinaryHashIoFailureBecomesMissingProbeValue()
     {
         var digest = HealthCheckRunner.Try<string>(
