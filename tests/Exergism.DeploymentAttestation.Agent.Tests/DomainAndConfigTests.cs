@@ -35,6 +35,22 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void StaticConfigParserRejectsUnquotedShellEscapesAndQuoting()
+    {
+        foreach (var value in new[]
+                 {
+                     @"/srv/id\ resolver",
+                     "/srv/'id resolver'",
+                     "/srv/\"id resolver\"",
+                     "/srv/id resolver",
+                     "/srv/id;echo"
+                 })
+        {
+            TestAssert.Throws<AgentException>(() => AgentConfig.ParseValue(value));
+        }
+    }
+
+    [TestMethod]
     public void StaticConfigParserRejectsInlineComments()
     {
         TestAssert.Throws<AgentException>(
