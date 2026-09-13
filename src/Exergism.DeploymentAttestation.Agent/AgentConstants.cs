@@ -11,6 +11,7 @@ internal static class AgentConstants
     internal const string ACTION_HEALTH = "health";
     internal const string ACTION_STATUS = "status";
     internal const string ACTION_RECOVER = "recover";
+    internal const string ACTION_VALIDATE_CONFIG = "validate-config";
     internal const string ACTION_SELF_TEST = "self-test";
 
     internal const string PHASE_ACTIVATING = "activating";
