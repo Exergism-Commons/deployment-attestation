@@ -729,20 +729,18 @@ internal static class GitProcessArguments
                 continue;
             }
 
-            if (argument is GIT_FLAG_DIR or GIT_FLAG_WORK_TREE or GIT_FLAG_CHDIR)
+            if (argument is GIT_FLAG_DIR or GIT_FLAG_WORK_TREE or GIT_FLAG_SEPARATE_GIT_DIR or GIT_FLAG_CHDIR)
             {
-                if (++index >= argv.Count)
+                if (++index >= argv.Count || string.IsNullOrEmpty(argv[index]))
                     throw new AgentException("Malformed Git path selector");
                 if (pointsIntoProtected(argv[index]))
                     return true;
                 continue;
             }
 
-            if (argument.StartsWith(GIT_FLAG_DIR + "=", StringComparison.Ordinal) ||
-                argument.StartsWith(GIT_FLAG_WORK_TREE + "=", StringComparison.Ordinal))
+            if (TryGetEqualsPathSelector(argument, out var pathSelector))
             {
-                var value = argument[(argument.IndexOf('=') + 1)..];
-                if (pointsIntoProtected(value))
+                if (pointsIntoProtected(pathSelector))
                     return true;
                 continue;
             }
@@ -778,6 +776,24 @@ internal static class GitProcessArguments
                 return true;
         }
 
+        return false;
+    }
+
+    private static bool TryGetEqualsPathSelector(string argument, out string value)
+    {
+        foreach (var flag in new[] { GIT_FLAG_DIR, GIT_FLAG_WORK_TREE, GIT_FLAG_SEPARATE_GIT_DIR })
+        {
+            var prefix = flag + "=";
+            if (!argument.StartsWith(prefix, StringComparison.Ordinal))
+                continue;
+
+            value = argument[prefix.Length..];
+            if (value.Length == 0)
+                throw new AgentException("Malformed Git path selector");
+            return true;
+        }
+
+        value = "";
         return false;
     }
 
