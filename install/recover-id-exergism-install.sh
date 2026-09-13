@@ -21,6 +21,9 @@ AGENT="/usr/local/libexec/ec-deployment-agent"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
+ARTIFACT_FENCE_AUDITOR="/usr/local/libexec/ec-id-production-artifact-fence"
+MANIFEST_VALIDATOR="/usr/local/libexec/ec-release-manifest-validator"
+MANIFEST_SCHEMA="/usr/local/libexec/release-manifest-v0.1.schema.json"
 RECOVERY_FINALIZE_UNIT="id-exergism-install-recovery-finalize.service"
 AGENT_SERVICE_UNIT="/etc/systemd/system/ec-deployment-attestation@.service"
 AGENT_TIMER_UNIT="/etc/systemd/system/ec-deployment-attestation@.timer"
@@ -217,6 +220,8 @@ artifact_path() {
     timer_unit) printf '%s\n' "$AGENT_TIMER_UNIT" ;;
     env) printf '%s\n' "$ENV_FILE" ;;
     fence) printf '%s\n' "$FENCE_DROPIN" ;;
+    manifest_validator) printf '%s\n' "$MANIFEST_VALIDATOR" ;;
+    manifest_schema) printf '%s\n' "$MANIFEST_SCHEMA" ;;
     *) return 1 ;;
   esac
 }
@@ -239,7 +244,7 @@ restore_artifact() {
 
 persist_restored_generation() {
   local timer_wants="/etc/systemd/system/timers.target.wants"
-  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
+  durable_sync_paths     "$AGENT" "$SMOKE" "$MANIFEST_VALIDATOR" "$MANIFEST_SCHEMA" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
   durable_sync_ancestor_chain     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR" "$timer_wants"
 }
 
@@ -400,7 +405,7 @@ systemctl --runtime disable "$TIMER_UNIT" >/dev/null 2>&1 || {
   [[ "$(enabled_state)" != "enabled-runtime" ]] || restore_rc=1
 }
 
-for key in agent smoke service_unit timer_unit env fence; do
+for key in agent smoke service_unit timer_unit env fence manifest_validator manifest_schema; do
   restore_artifact "$key" || restore_rc=1
 done
 
@@ -461,7 +466,8 @@ if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
     if ! systemctl start "$TARGET_UNIT" \
        || ! systemctl is-active --quiet "$TARGET_UNIT" \
        || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null \
-       || { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; }; then
+       || { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; } \
+       || ! "$ARTIFACT_FENCE_AUDITOR"; then
       systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
       echo "CRITICAL: previously active resolver could not be restored healthy after direct recovery; recovered marker retained." >&2
       exit 1
