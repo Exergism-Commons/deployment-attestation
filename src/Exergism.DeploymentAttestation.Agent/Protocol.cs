@@ -77,8 +77,8 @@ internal static partial class Protocol
         ReleaseAsset? selected = null;
         foreach (var property in assets.EnumerateObject())
         {
-            if (!AssetNamePattern.IsMatch(property.Name))
-                throw new AgentException($"Invalid release asset architecture key: {property.Name}");
+            // The schema deliberately allows arbitrary architecture/channel keys;
+            // only the selected host architecture is semantically bound below.
             var asset = property.Value;
             RequireObject(asset, $"$.assets.{property.Name}");
             EnsureNoDuplicateProperties(asset, $"$.assets.{property.Name}");
