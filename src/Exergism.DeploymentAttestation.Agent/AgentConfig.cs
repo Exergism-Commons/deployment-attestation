@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using static Exergism.DeploymentAttestation.Agent.AgentConstants;
@@ -27,7 +28,7 @@ internal sealed class AgentConfig
         LocalUrl = RequireHttpUri(ENV_LOCAL_URL, Required(ENV_LOCAL_URL));
         PublicUrl = RequireHttpUri(ENV_PUBLIC_URL, Required(ENV_PUBLIC_URL));
 
-        HostId = Optional(ENV_HOST_ID, Dns.GetHostName());
+        HostId = Optional(ENV_HOST_ID, HostIdentity.ResolveDefault());
         GitHubDownloadBase = new Uri(Optional(
             ENV_GITHUB_DOWNLOAD_BASE,
             $"https://github.com/{Repository}/releases/download/{ReleaseTag}").TrimEnd('/') + "/", UriKind.Absolute);
@@ -195,3 +196,40 @@ internal sealed class AgentConfig
         return TimeSpan.FromSeconds(seconds);
     }
 }
+
+internal static class HostIdentity
+{
+    internal static string ResolveDefault()
+    {
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo(COMMAND_HOSTNAME)
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false
+                }
+            };
+            process.StartInfo.ArgumentList.Add(HOSTNAME_FLAG_FQDN);
+
+            if (process.Start() && process.WaitForExit(5000) && process.ExitCode == 0)
+            {
+                var fqdn = process.StandardOutput.ReadToEnd().Trim();
+                if (!string.IsNullOrWhiteSpace(fqdn))
+                    return fqdn;
+            }
+        }
+        catch
+        {
+            // Preserve the Bash fallback: hostname -f || hostname.
+        }
+
+        return Dns.GetHostName();
+    }
+
+    internal static string SelectDefault(string? fqdn, string shortName)
+        => string.IsNullOrWhiteSpace(fqdn) ? shortName : fqdn.Trim();
+}
+
