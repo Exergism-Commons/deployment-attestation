@@ -33,7 +33,9 @@ internal sealed class AgentConfig
         GitHubDownloadBase = new Uri(Optional(
             ENV_GITHUB_DOWNLOAD_BASE,
             $"https://github.com/{Repository}/releases/download/{ReleaseTag}").TrimEnd('/') + "/", UriKind.Absolute);
-        ReleaseManifestName = Optional(ENV_RELEASE_MANIFEST, RELEASE_MANIFEST_DEFAULT);
+        ReleaseManifestName = RequireSafeAssetName(
+            ENV_RELEASE_MANIFEST,
+            Optional(ENV_RELEASE_MANIFEST, RELEASE_MANIFEST_DEFAULT));
         AttestationEndpoint = Optional(ENV_ATTESTATION_ENDPOINT);
         HmacSecretFile = Optional(ENV_HMAC_SECRET_FILE);
         SmokeScript = Optional(ENV_SMOKE_SCRIPT);
@@ -86,7 +88,10 @@ internal sealed class AgentConfig
     public string AgentTimerUnit { get; }
     public string InstallTransactionRoot { get; } = INSTALL_TRANSACTION_ROOT;
 
-    public Uri ReleaseUri(string name) => new(GitHubDownloadBase, Uri.EscapeDataString(name));
+    public Uri ReleaseUri(string name)
+        => new(
+            GitHubDownloadBase,
+            Uri.EscapeDataString(RequireSafeAssetName("release asset", name)));
 
     public static AgentConfig Load(string path)
     {
@@ -156,7 +161,21 @@ internal sealed class AgentConfig
             return parsed;
         }
 
+        if (value.Contains('#'))
+            throw new AgentException("Inline comments are not supported in agent configuration");
+
         RejectShellExpansion(value);
+        return value;
+    }
+
+    internal static string RequireSafeAssetName(string key, string value)
+    {
+        if (value.Length == 0 ||
+            !char.IsAsciiLetterOrDigit(value[0]) ||
+            value.Any(character =>
+                !(char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-')))
+            throw new AgentException($"{key} must be a single safe asset name");
+
         return value;
     }
 
