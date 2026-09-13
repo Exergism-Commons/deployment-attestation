@@ -40,7 +40,7 @@ public sealed class ProtocolTests
             $"\"{JSON_SCHEMA_VERSION}\": \"{SCHEMA_VERSION}\",",
             $"\"{JSON_SCHEMA_VERSION}\": \"{SCHEMA_VERSION}\", \"unexpected\": true,",
             StringComparison.Ordinal);
-        Assert.ThrowsException<AgentException>(() => Protocol.ParseReleaseManifest(
+        TestAssert.Throws<AgentException>(() => Protocol.ParseReleaseManifest(
             Encoding.UTF8.GetBytes(invalid), "Exergism-Commons/id", "runtime-main", "amd64"));
     }
 
