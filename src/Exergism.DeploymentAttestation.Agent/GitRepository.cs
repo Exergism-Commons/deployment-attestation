@@ -18,6 +18,25 @@ internal static class TrackedFileDurability
     }
 }
 
+internal static class GitProcessIdentity
+{
+    private const string GIT_EXECUTABLE_NAME = "git";
+    private const string GIT_EXECUTABLE_PREFIX = "git-";
+    private const string PROC_DELETED_SUFFIX = " (deleted)";
+
+    internal static bool IsGitExecutable(string? executableName)
+    {
+        if (string.IsNullOrEmpty(executableName))
+            return false;
+
+        if (executableName.EndsWith(PROC_DELETED_SUFFIX, StringComparison.Ordinal))
+            executableName = executableName[..^PROC_DELETED_SUFFIX.Length];
+
+        return executableName == GIT_EXECUTABLE_NAME ||
+               executableName.StartsWith(GIT_EXECUTABLE_PREFIX, StringComparison.Ordinal);
+    }
+}
+
 internal sealed class GitRepository(AgentConfig config)
 {
     private readonly AgentConfig _config = config;
@@ -318,16 +337,22 @@ internal sealed class GitRepository(AgentConfig config)
             catch (DirectoryNotFoundException) { continue; }
             catch (UnauthorizedAccessException) { throw new AgentException($"Cannot inspect cmdline for process {name}"); }
 
-            var exeName = argv.Length > 0 ? Path.GetFileName(argv[0]) : "";
+            var argvExeName = argv.Length > 0 ? Path.GetFileName(argv[0]) : "";
+            var exeName = argvExeName;
             try
             {
                 var target = new FileInfo(Path.Combine(procDir, "exe")).LinkTarget;
                 if (!string.IsNullOrEmpty(target))
-                    exeName = Path.GetFileName(target);
+                {
+                    var procExeName = Path.GetFileName(target);
+                    if (GitProcessIdentity.IsGitExecutable(procExeName) ||
+                        !GitProcessIdentity.IsGitExecutable(argvExeName))
+                        exeName = procExeName;
+                }
             }
             catch { }
 
-            if (!(exeName == "git" || exeName.StartsWith("git-", StringComparison.Ordinal)))
+            if (!GitProcessIdentity.IsGitExecutable(exeName))
                 continue;
 
             if (await GitProcessReferencesProtectedAsync(procDir, argv, protectedRoots))
@@ -772,11 +797,29 @@ internal static class GitProcessArguments
                 continue;
             }
 
+            if (TryGetEqualsOptionValue(argument, out var optionValue) &&
+                pointsIntoProtected(optionValue))
+                return true;
+
             if (!argument.StartsWith('-') && pointsIntoProtected(argument))
                 return true;
         }
 
         return false;
+    }
+
+    private static bool TryGetEqualsOptionValue(string argument, out string value)
+    {
+        value = "";
+        if (!argument.StartsWith('-'))
+            return false;
+
+        var equals = argument.IndexOf('=');
+        if (equals < 0 || equals == argument.Length - 1)
+            return false;
+
+        value = argument[(equals + 1)..];
+        return true;
     }
 
     private static bool TryGetEqualsPathSelector(string argument, out string value)
