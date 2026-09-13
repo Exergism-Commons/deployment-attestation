@@ -1,0 +1,49 @@
+name: Native AOT agent
+
+on:
+  push:
+    branches:
+      - native-aot-agent
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Native AOT toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+
+      - name: Build with AOT analyzers
+        run: dotnet build src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release
+
+      - name: Run managed self-test
+        run: dotnet run --project src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release -- self-test
+
+      - name: Publish linux-x64 Native AOT
+        run: |
+          dotnet publish src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj \
+            -c Release -r linux-x64 \
+            -o artifacts/linux-x64
+          test -x artifacts/linux-x64/ec-deployment-agent
+          file artifacts/linux-x64/ec-deployment-agent
+          ! ldd artifacts/linux-x64/ec-deployment-agent 2>&1 | grep -E 'libhostfxr|libcoreclr|hostpolicy'
+
+      - name: Run Native AOT self-test
+        run: ./artifacts/linux-x64/ec-deployment-agent self-test
+
+      - name: Upload Native AOT binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ec-deployment-agent-linux-x64
+          path: artifacts/linux-x64/ec-deployment-agent
+          if-no-files-found: error
