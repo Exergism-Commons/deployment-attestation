@@ -45,7 +45,7 @@ public sealed class DomainAndConfigTests
             AgentConfig.ParseValue("'literal # value'"));
         Assert.AreEqual(
             "literal # value",
-            AgentConfig.ParseValue("\\\"literal # value\\\""));
+            AgentConfig.ParseValue("\"literal # value\""));
     }
 
     [TestMethod]
