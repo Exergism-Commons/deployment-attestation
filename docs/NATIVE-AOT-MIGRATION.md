@@ -48,3 +48,17 @@ The switch is allowed only after:
 6. the stacked PR has no unresolved P1/P2 review findings.
 
 Until then, the Bash agent remains the production reference implementation.
+
+
+## Opt-in host installation
+
+The existing installer can stage a reviewed Native AOT binary without changing the default production path:
+
+```sh
+sudo EC_NATIVE_AGENT_BINARY=/path/to/ec-deployment-agent \
+  ./install/install-id-exergism.sh
+```
+
+The installer validates that the supplied path is a real executable file, installs it through the existing generation transaction, runs its dependency-free `self-test`, and keeps the same rollback artifact/journal semantics. If an installed agent already exists, pre-install transaction recovery prefers that installed generation so the implementation that created a journal is also the implementation that reconciles it.
+
+Without `EC_NATIVE_AGENT_BINARY`, the installer continues to install the Bash reference agent. This is deliberate until the Native AOT PR has parity review and a durable release/distribution channel.
