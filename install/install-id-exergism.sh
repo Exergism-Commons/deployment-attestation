@@ -14,6 +14,7 @@ TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 RECOVERY_UNIT="id-exergism-install-recovery.service"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
+AGENT_SOURCE="${EC_NATIVE_AGENT_BINARY:-$ROOT/agent/ec-deployment-agent.sh}"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
@@ -50,12 +51,21 @@ BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
 
-for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat sleep; do
+for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat sleep stat; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
   }
 done
+
+if [[ ! -f "$AGENT_SOURCE" || -L "$AGENT_SOURCE" ]]; then
+  echo "Agent source must be a real file: $AGENT_SOURCE" >&2
+  exit 1
+fi
+if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" && ! -x "$AGENT_SOURCE" ]]; then
+  echo "EC_NATIVE_AGENT_BINARY must point to an executable Native AOT binary." >&2
+  exit 1
+fi
 
 exec 9>"$INSTALL_LOCK"
 flock -n 9 || {
@@ -431,7 +441,14 @@ fi
 
 # Reconcile the updater's own durable transaction before measuring target state.
 if [[ -r "$ENV_FILE" ]]; then
-  if ! EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover; then
+  recovery_agent="$ROOT/agent/ec-deployment-agent.sh"
+  # Recover an existing transaction with the implementation that created it
+  # whenever possible. This keeps future journal evolution tied to the installed
+  # generation while preserving the Bash implementation for first install.
+  if [[ -x "$AGENT" && ! -d "$AGENT" ]]; then
+    recovery_agent="$AGENT"
+  fi
+  if ! EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover; then
     pretransaction_restore_timer=0
     echo "Deployment updater transaction could not be recovered; leaving updater/timer quiesced." >&2
     exit 1
@@ -562,7 +579,10 @@ stop_and_wait_quiescent "$TIMER_UNIT"
 stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
-install -o root -g root -m 0755 "$ROOT/agent/ec-deployment-agent.sh" "$AGENT"
+install -o root -g root -m 0755 "$AGENT_SOURCE" "$AGENT"
+if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
+  "$AGENT" self-test
+fi
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
