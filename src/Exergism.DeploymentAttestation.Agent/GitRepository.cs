@@ -144,11 +144,11 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task SyncSubmodulesAsync(string commit)
     {
         await PrepareGitlinksAsync(commit);
-        await GitRequiredAsync(["submodule", "sync", "--recursive"]);
-        await GitRequiredAsync(["submodule", "update", "--init", "--recursive", "--force"]);
+        await GitRequiredAsync([GIT_SUBCOMMAND_SUBMODULE, "sync", "--recursive"]);
+        await GitRequiredAsync([GIT_SUBCOMMAND_SUBMODULE, "update", "--init", "--recursive", "--force"]);
 
         var clean = await GitAsync([
-            "submodule", "foreach", "--recursive",
+            GIT_SUBCOMMAND_SUBMODULE, "foreach", "--recursive",
             "git reset --hard HEAD >/dev/null && git clean -ffdx >/dev/null"
         ]);
         if (!clean.Success)
@@ -158,7 +158,7 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task PrepareGitlinksAsync(string commit)
     {
         var entries = await ReadTreeAsync(_config.AppDirectory, commit);
-        foreach (var entry in entries.Where(e => e.Mode == "160000" && e.Kind == "commit"))
+        foreach (var entry in entries.Where(entry => entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT))
         {
             var path = Path.Combine(_config.AppDirectory, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
             if (!File.Exists(path) && !Directory.Exists(path))
@@ -196,7 +196,7 @@ internal sealed class GitRepository(AgentConfig config)
             if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
             {
                 submodules.Add((path, entry.ObjectId));
-                var gitMarker = Path.Combine(path, ".git");
+                var gitMarker = Path.Combine(path, GIT_METADATA_NAME);
                 if (!File.Exists(gitMarker) && !Directory.Exists(gitMarker))
                     throw new AgentException($"Submodule gitfile missing during fsync: {entry.RelativePath}");
                 if (File.Exists(gitMarker))
@@ -241,7 +241,7 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task<List<string>> GitMetadataRootsAsync(string repository)
     {
         var roots = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var flag in new[] { "--git-dir", "--git-common-dir" })
+        foreach (var flag in new[] { GIT_FLAG_DIR, "--git-common-dir" })
         {
             var result = await GitAtAsync(repository, ["rev-parse", "--path-format=absolute", flag]);
             roots.Add(Path.GetFullPath(result.StdOut.Trim()));
@@ -580,7 +580,7 @@ internal sealed class GitRepository(AgentConfig config)
     private static string GitBlobObjectId(byte[] data, string algorithm)
     {
         using var hash = IncrementalHash.CreateHash(algorithm == GIT_OBJECT_FORMAT_SHA1 ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256);
-        hash.AppendData(Encoding.ASCII.GetBytes($"blob {data.Length}\0"));
+        hash.AppendData(Encoding.ASCII.GetBytes($"{GIT_OBJECT_BLOB} {data.Length}\0"));
         hash.AppendData(data);
         return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
