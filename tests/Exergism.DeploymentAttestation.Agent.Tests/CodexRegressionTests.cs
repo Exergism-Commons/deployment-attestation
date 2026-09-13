@@ -236,6 +236,27 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void RegularTrackedFilePassesDescriptorBoundFsyncBarrier()
+    {
+        using var environment = TestEnvironment.Create();
+        var tracked = Path.Combine(environment.Root, "tracked");
+        File.WriteAllText(tracked, "content");
+
+        TrackedFileDurability.FsyncRegularFile(tracked, "tracked");
+    }
+
+    [TestMethod]
+    public void DirectorySubstitutionFailsTrackedRegularFsyncBarrier()
+    {
+        using var environment = TestEnvironment.Create();
+        var directory = Path.Combine(environment.Root, "tracked");
+        Directory.CreateDirectory(directory);
+
+        TestAssert.Throws<AgentException>(
+            () => TrackedFileDurability.FsyncRegularFile(directory, "tracked"));
+    }
+
+    [TestMethod]
     public void SymlinkSubstitutionFailsTrackedRegularFsyncBarrier()
     {
         using var environment = TestEnvironment.Create();
