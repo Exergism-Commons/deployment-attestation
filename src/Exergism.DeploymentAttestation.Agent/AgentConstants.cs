@@ -140,6 +140,27 @@ internal static class AgentConstants
     internal const string JSON_NEW_BINARY_SHA256 = "new_binary_sha256";
     internal const string JSON_NEW_RELEASE_MANIFEST_SHA256 = "new_release_manifest_sha256";
     internal const string JSON_OBSERVATION_ID = "observation_id";
+    internal const string JSON_AGENT_VERSION = "agent_version";
+    internal const string JSON_CHECKS = "checks";
+    internal const string JSON_DEPLOYED_COMMIT = "deployed_commit";
+    internal const string JSON_DEPLOYED_RUNTIME_SHA256 = "deployed_runtime_sha256";
+    internal const string JSON_ENVIRONMENT = "environment";
+    internal const string JSON_EXPECTED_COMMIT = "expected_commit";
+    internal const string JSON_EXPECTED_RUNTIME_SHA256 = "expected_runtime_sha256";
+    internal const string JSON_HOST_ID = "host_id";
+    internal const string JSON_OBSERVED_AT = "observed_at";
+    internal const string JSON_SERVICE = "service";
+    internal const string JSON_STATUS = "status";
+
+    internal const string JSON_HEALTH_STATE = "state";
+    internal const string JSON_HEALTH_ACTION = "action";
+    internal const string JSON_HEALTH_CYCLE_STARTED_AT = "cycle_started_at";
+    internal const string JSON_HEALTH_LAST_COMPLETED_AT = "last_completed_at";
+    internal const string JSON_HEALTH_LAST_SUCCESS_AT = "last_success_at";
+    internal const string JSON_HEALTH_LAST_ATTESTATION_AT = "last_attestation_at";
+    internal const string JSON_HEALTH_LAST_ATTESTATION_DELIVERED = "last_attestation_delivered";
+    internal const string JSON_HEALTH_LAST_ERROR = "last_error";
+    internal const string JSON_HEALTH_LAST_CYCLE = "last_cycle";
 
     internal const string DEFAULT_CONFIG_PATH = "/etc/ec-deployment-attestation/service.env";
     internal const string INSTALL_TRANSACTION_ROOT = "/var/lib/ec-deployment-attestation/install";
