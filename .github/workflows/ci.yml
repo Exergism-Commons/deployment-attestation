@@ -241,7 +241,7 @@ jobs:
           grep -Fq 'recovery_agent="$AGENT"' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
           grep -Fq 'install -o root -g root -m 0755 "$AGENT_SOURCE" "$AGENT"' install/install-id-exergism.sh
-          grep -Fq '"$AGENT" self-test' install/install-id-exergism.sh
+          grep -Fq '"$AGENT_SOURCE" self-test' install/install-id-exergism.sh
           grep -Fq 'EC_NATIVE_AGENT_BINARY must point to an executable Native AOT binary.' install/install-id-exergism.sh
           grep -Fq 'Deployment updater transaction could not be recovered' install/install-id-exergism.sh
           grep -Fq 'pretransaction_journal_published=0' install/install-id-exergism.sh
