@@ -96,6 +96,8 @@ internal static class AgentConstants
     internal const string COMMAND_GIT = "git";
     internal const string COMMAND_STAT = "stat";
     internal const string COMMAND_NSENTER = "nsenter";
+    internal const string COMMAND_HOSTNAME = "hostname";
+    internal const string HOSTNAME_FLAG_FQDN = "-f";
     internal const string CONFIG_BOOLEAN_TRUE = "1";
     internal const string STAT_FLAG_DEREFERENCE_FORMAT = "-Lc";
     internal const string STAT_FORMAT_DEVICE_INODE = "%d:%i";
