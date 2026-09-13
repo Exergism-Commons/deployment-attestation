@@ -17,6 +17,15 @@ internal enum AgentAction
 
 internal static class AgentActionParser
 {
+    internal static AgentAction ParseArgs(IReadOnlyList<string> args)
+        => args.Count switch
+        {
+            0 => AgentAction.Run,
+            1 => Parse(args[0]),
+            _ => throw new AgentException(
+                $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_SELF_TEST}]")
+        };
+
     internal static AgentAction Parse(string value) => value switch
     {
         ACTION_RUN => AgentAction.Run,
