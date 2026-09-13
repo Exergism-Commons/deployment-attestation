@@ -138,11 +138,16 @@ internal sealed class AgentConfig
                     _ => throw new AgentException("Unsupported escape in configuration value")
                 });
             }
-            return sb.ToString();
+            var parsed = sb.ToString();
+            if (parsed.Contains('$') || parsed.Contains('`'))
+                throw new AgentException("Shell expansion is not supported in agent configuration");
+            return parsed;
         }
 
-        if (value.Contains('    }
-
+        if (value.Contains('$') || value.Contains('`'))
+            throw new AgentException("Shell expansion is not supported in agent configuration");
+        return value;
+    }
     private static bool IsName(string key)
     {
         if (key.Length == 0 || !(char.IsAsciiLetter(key[0]) || key[0] == '_'))
