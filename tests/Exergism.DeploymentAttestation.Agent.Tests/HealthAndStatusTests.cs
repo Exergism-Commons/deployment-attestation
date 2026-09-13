@@ -13,7 +13,9 @@ public sealed class HealthAndStatusTests
         using var environment = TestEnvironment.Create(withAttestationEndpoint: true);
         var store = new AgentHealthStore(environment.Config);
         store.BeginCycle(AgentAction.Run);
-        store.RecordAttestation(true);
+        store.RecordRemoteAttestation(
+            delivered: true,
+            AttestationReceiverIdentity.FromConfiguredEndpoint(environment.Config.AttestationEndpoint));
         store.CompleteSuccess();
 
         var state = store.TryRead();
@@ -203,6 +205,56 @@ public sealed class HealthAndStatusTests
         Assert.AreEqual(HEALTH_STATE_IDLE, state.State);
         Assert.IsNotNull(state.LastSuccessAt);
         Assert.IsNull(state.LastError);
+    }
+
+
+    [TestMethod]
+    public void LocalOutputNeverCountsAsDeliveryToAReceiverEnabledLater()
+    {
+        using var environment = TestEnvironment.Create(withAttestationEndpoint: true);
+        var store = new AgentHealthStore(environment.Config);
+
+        store.BeginCycle(AgentAction.Attest);
+        store.RecordLocalAttestation();
+        store.CompleteSuccess();
+
+        var state = store.TryRead();
+        Assert.IsNotNull(state);
+        var now = DateTimeOffset.Parse(state.LastAttestationAt!);
+
+        Assert.IsFalse(AgentSelfHealthService.IsDeliveryHealthy(
+            state,
+            environment.Config.AttestationEndpoint,
+            TimeSpan.FromMinutes(25),
+            now));
+    }
+
+    [TestMethod]
+    public void RemoteDeliveryHealthIsBoundToTheExactReceiver()
+    {
+        using var environment = TestEnvironment.Create(withAttestationEndpoint: true);
+        var store = new AgentHealthStore(environment.Config);
+        var receiver = environment.Config.AttestationEndpoint;
+        var receiverIdentity = AttestationReceiverIdentity.FromConfiguredEndpoint(receiver);
+
+        store.BeginCycle(AgentAction.Attest);
+        store.RecordRemoteAttestation(delivered: true, receiverIdentity);
+        store.CompleteSuccess();
+
+        var state = store.TryRead();
+        Assert.IsNotNull(state);
+        var now = DateTimeOffset.Parse(state.LastAttestationAt!);
+
+        Assert.IsTrue(AgentSelfHealthService.IsDeliveryHealthy(
+            state,
+            receiver,
+            TimeSpan.FromMinutes(25),
+            now));
+        Assert.IsFalse(AgentSelfHealthService.IsDeliveryHealthy(
+            state,
+            "https://other.example.test/v1/attest",
+            TimeSpan.FromMinutes(25),
+            now));
     }
 
 }
