@@ -78,4 +78,72 @@ public sealed class HealthAndStatusTests
         checks[CHECK_SYSTEMD] = false;
         Assert.AreEqual(STATUS_UNHEALTHY, DeploymentAgent.StatusFromChecks(checks));
     }
+
+    [TestMethod]
+    public void SelfHealthStatusTreatsActiveJournalAsDegradedAndAbandonedJournalAsUnhealthy()
+    {
+        var checks = new Dictionary<string, bool>(StringComparer.Ordinal)
+        {
+            [SELF_CHECK_STATE_FILE] = true,
+            [SELF_CHECK_VERSION] = true,
+            [SELF_CHECK_RECENT_SUCCESS] = true,
+            [SELF_CHECK_CYCLE_NOT_STUCK] = true,
+            [SELF_CHECK_TRANSACTION_CLEAR] = false,
+            [SELF_CHECK_TIMER_ACTIVE] = true,
+            [SELF_CHECK_TIMER_ENABLED] = true,
+            [SELF_CHECK_ATTESTATION_DELIVERY] = true
+        };
+
+        var running = new AgentHealthState(
+            AGENT_VERSION,
+            "id.exergism.org",
+            HEALTH_STATE_RUNNING,
+            ACTION_RUN,
+            "2026-09-13T10:00:00Z",
+            null,
+            "2026-09-13T09:59:00Z",
+            "2026-09-13T09:59:00Z",
+            true,
+            null);
+        Assert.AreEqual(
+            STATUS_DEGRADED,
+            AgentSelfHealthService.StatusFromChecks(checks, running));
+
+        var idle = running with { State = HEALTH_STATE_IDLE };
+        Assert.AreEqual(
+            STATUS_UNHEALTHY,
+            AgentSelfHealthService.StatusFromChecks(checks, idle));
+
+        checks[SELF_CHECK_TRANSACTION_CLEAR] = true;
+        Assert.AreEqual(
+            STATUS_HEALTHY,
+            AgentSelfHealthService.StatusFromChecks(checks, idle));
+    }
+
+    [TestMethod]
+    public void SelfHealthStateRejectsWrongServiceIdentity()
+    {
+        using var environment = TestEnvironment.Create();
+        File.WriteAllText(
+            environment.Config.AgentHealthFile,
+            """
+            {
+              "schema_version": "0.1",
+              "agent_version": "0.2.0-aot-pre2",
+              "service": "other.example",
+              "state": "idle",
+              "action": null,
+              "cycle_started_at": null,
+              "last_completed_at": null,
+              "last_success_at": null,
+              "last_attestation_at": null,
+              "last_attestation_delivered": null,
+              "last_error": null
+            }
+            """);
+
+        TestAssert.Throws<AgentException>(
+            () => new AgentHealthStore(environment.Config).TryRead());
+    }
+
 }
