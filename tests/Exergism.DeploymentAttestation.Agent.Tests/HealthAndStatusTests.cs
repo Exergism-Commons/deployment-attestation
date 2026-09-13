@@ -162,4 +162,47 @@ public sealed class HealthAndStatusTests
         Assert.AreEqual(ACTION_RUN, state.Action);
     }
 
+
+    [TestMethod]
+    public void FailedAttestationCycleDoesNotAdvanceLastSuccess()
+    {
+        using var environment = TestEnvironment.Create();
+        var store = new AgentHealthStore(environment.Config);
+
+        store.BeginCycle(AgentAction.Run);
+        store.CompleteSuccess();
+        var before = store.TryRead();
+        Assert.IsNotNull(before);
+
+        store.BeginCycle(AgentAction.Attest);
+        AgentCycleLifecycle.Complete(
+            store,
+            AgentExecutionResult.FromAttestation(AttestationResult.FAILED));
+
+        var after = store.TryRead();
+        Assert.IsNotNull(after);
+        Assert.AreEqual(before.LastSuccessAt, after.LastSuccessAt);
+        Assert.AreEqual(HEALTH_STATE_ERROR, after.State);
+        Assert.AreEqual("Attestation could not be produced", after.LastError);
+    }
+
+    [TestMethod]
+    public void ProducedUnhealthyObservationIsStillSuccessfulAgentCycle()
+    {
+        using var environment = TestEnvironment.Create();
+        var store = new AgentHealthStore(environment.Config);
+
+        store.BeginCycle(AgentAction.Attest);
+        var result = AgentExecutionResult.FromAttestation(AttestationResult.UNHEALTHY);
+        AgentCycleLifecycle.Complete(store, result);
+
+        var state = store.TryRead();
+        Assert.IsNotNull(state);
+        Assert.AreEqual(1, result.ExitCode);
+        Assert.IsTrue(result.CycleSucceeded);
+        Assert.AreEqual(HEALTH_STATE_IDLE, state.State);
+        Assert.IsNotNull(state.LastSuccessAt);
+        Assert.IsNull(state.LastError);
+    }
+
 }
