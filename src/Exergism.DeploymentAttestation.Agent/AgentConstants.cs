@@ -124,6 +124,7 @@ internal static class AgentConstants
 
     internal const string GIT_FLAG_DIR = "--git-dir";
     internal const string GIT_FLAG_WORK_TREE = "--work-tree";
+    internal const string GIT_FLAG_SEPARATE_GIT_DIR = "--separate-git-dir";
     internal const string GIT_FLAG_CHDIR = "-C";
     internal const string GIT_FLAG_CONFIG = "-c";
     internal const string GIT_FLAG_CONFIG_ENV_PREFIX = "--config-env=";
