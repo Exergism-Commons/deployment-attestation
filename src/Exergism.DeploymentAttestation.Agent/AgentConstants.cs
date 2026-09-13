@@ -94,6 +94,29 @@ internal static class AgentConstants
     internal const string COMMAND_STAT = "stat";
     internal const string COMMAND_NSENTER = "nsenter";
 
+    internal const string GIT_ENV_DIR = "GIT_DIR";
+    internal const string GIT_ENV_WORK_TREE = "GIT_WORK_TREE";
+    internal const string GIT_ENV_COMMON_DIR = "GIT_COMMON_DIR";
+    internal const string GIT_ENV_INDEX_FILE = "GIT_INDEX_FILE";
+    internal const string GIT_ENV_OBJECT_DIRECTORY = "GIT_OBJECT_DIRECTORY";
+    internal const string GIT_ENV_ALTERNATE_OBJECT_DIRECTORIES = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+    internal const string GIT_ENV_CONFIG_COUNT = "GIT_CONFIG_COUNT";
+    internal const string GIT_ENV_CONFIG_PARAMETERS = "GIT_CONFIG_PARAMETERS";
+    internal const string GIT_ENV_CONFIG_SYSTEM = "GIT_CONFIG_SYSTEM";
+    internal const string GIT_ENV_CONFIG_GLOBAL = "GIT_CONFIG_GLOBAL";
+    internal const string GIT_ENV_CONFIG_NOSYSTEM = "GIT_CONFIG_NOSYSTEM";
+    internal const string GIT_ENV_CEILING_DIRECTORIES = "GIT_CEILING_DIRECTORIES";
+    internal const string GIT_ENV_DISCOVERY_ACROSS_FILESYSTEM = "GIT_DISCOVERY_ACROSS_FILESYSTEM";
+    internal const string GIT_ENV_CONFIG_KEY_PREFIX = "GIT_CONFIG_KEY_";
+    internal const string GIT_ENV_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_";
+    internal const string GIT_CONFIG_CORE_WORKTREE = "core.worktree";
+
+    internal const string GIT_FLAG_DIR = "--git-dir";
+    internal const string GIT_FLAG_WORK_TREE = "--work-tree";
+    internal const string GIT_FLAG_CHDIR = "-C";
+    internal const string GIT_FLAG_CONFIG = "-c";
+    internal const string GIT_FLAG_CONFIG_ENV_PREFIX = "--config-env=";
+
     internal const string HEADER_TIMESTAMP = "X-EC-Timestamp";
     internal const string HEADER_SIGNATURE = "X-EC-Signature";
     internal const string HEADER_IDEMPOTENCY_KEY = "Idempotency-Key";
