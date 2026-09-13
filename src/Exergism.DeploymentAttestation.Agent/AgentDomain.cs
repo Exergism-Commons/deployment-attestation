@@ -29,4 +29,16 @@ internal static class AgentActionParser
         _ => throw new AgentException(
             $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_SELF_TEST}]")
     };
+
+    internal static string ToWireValue(AgentAction action) => action switch
+    {
+        AgentAction.Run => ACTION_RUN,
+        AgentAction.Update => ACTION_UPDATE,
+        AgentAction.Attest => ACTION_ATTEST,
+        AgentAction.Health => ACTION_HEALTH,
+        AgentAction.Status => ACTION_STATUS,
+        AgentAction.Recover => ACTION_RECOVER,
+        AgentAction.SelfTest => ACTION_SELF_TEST,
+        _ => throw new AgentException("Unsupported agent action")
+    };
 }
