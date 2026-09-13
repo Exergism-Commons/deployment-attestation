@@ -23,4 +23,24 @@ internal static class TestAssert
 
         Assert.Fail($"Expected {typeof(TException).Name}");
     }
+
+    internal static async Task ThrowsAsync<TException>(Func<Task> action)
+        where TException : Exception
+    {
+        try
+        {
+            await action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            Assert.Fail(
+                $"Expected {typeof(TException).Name}, got {exception.GetType().Name}: {exception.Message}");
+        }
+
+        Assert.Fail($"Expected {typeof(TException).Name}");
+    }
 }
