@@ -98,4 +98,39 @@ public sealed class CodexRegressionTests
             () => GitProcessEnvironment.ReferencesProtectedWorktree(environment, _ => false));
     }
 
+
+    [TestMethod]
+    public async Task RollbackAttestationRunsBeforeDeploymentFailureIsPropagated()
+    {
+        var order = new List<string>();
+
+        await TestAssert.ThrowsAsync<AgentException>(
+            () => DeploymentFailureFlow.ThrowAfterRollbackAndReportAsync(
+                () =>
+                {
+                    order.Add("rollback");
+                    return Task.CompletedTask;
+                },
+                () =>
+                {
+                    order.Add("attest");
+                    return Task.CompletedTask;
+                },
+                "activation failed",
+                new InvalidOperationException("candidate")));
+
+        CollectionAssert.AreEqual(new[] { "rollback", "attest" }, order);
+    }
+
+    [TestMethod]
+    public void CanonicalFqdnWinsOverShortHostname()
+    {
+        Assert.AreEqual(
+            "node.example.org",
+            HostIdentity.SelectDefault("node.example.org\n", "node"));
+        Assert.AreEqual(
+            "node",
+            HostIdentity.SelectDefault("   ", "node"));
+    }
+
 }
