@@ -111,10 +111,24 @@ internal sealed class AgentHealthStore(AgentConfig config)
 
         using var document = JsonDocument.Parse(File.ReadAllBytes(_config.AgentHealthFile));
         var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new AgentException("Agent health state must be a JSON object");
+
+        EnsureUniqueProperties(root);
+
+        if (RequireString(root, JSON_SCHEMA_VERSION) != SCHEMA_VERSION)
+            throw new AgentException("Unsupported agent health schema");
+        if (RequireString(root, JSON_SERVICE) != _config.Service)
+            throw new AgentException("Agent health service identity mismatch");
+
+        var state = RequireString(root, JSON_HEALTH_STATE);
+        if (state is not (HEALTH_STATE_IDLE or HEALTH_STATE_RUNNING or HEALTH_STATE_ERROR))
+            throw new AgentException("Invalid agent health lifecycle state");
+
         return new AgentHealthState(
             RequireString(root, JSON_AGENT_VERSION),
-            RequireString(root, JSON_SERVICE),
-            RequireString(root, JSON_HEALTH_STATE),
+            _config.Service,
+            state,
             OptionalString(root, JSON_HEALTH_ACTION),
             OptionalString(root, JSON_HEALTH_CYCLE_STARTED_AT),
             OptionalString(root, JSON_HEALTH_LAST_COMPLETED_AT),
@@ -158,6 +172,16 @@ internal sealed class AgentHealthStore(AgentConfig config)
 
     private static string UtcNowText()
         => DateTimeOffset.UtcNow.ToString(RFC3339_UTC_FORMAT, CultureInfo.InvariantCulture);
+
+    private static void EnsureUniqueProperties(JsonElement root)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in root.EnumerateObject())
+        {
+            if (!names.Add(property.Name))
+                throw new AgentException($"Duplicate agent health property: {property.Name}");
+        }
+    }
 
     private static string RequireString(JsonElement root, string property)
     {
@@ -233,6 +257,14 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
             [SELF_CHECK_ATTESTATION_DELIVERY] = attestationDelivery
         };
 
+        var status = StatusFromChecks(checks, state);
+        return new AgentSelfHealthReport(status, checks, state);
+    }
+
+    internal static string StatusFromChecks(
+        IReadOnlyDictionary<string, bool> checks,
+        AgentHealthState? state)
+    {
         var mandatory = new[]
         {
             SELF_CHECK_STATE_FILE,
@@ -244,17 +276,16 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
             SELF_CHECK_ATTESTATION_DELIVERY
         };
 
-        string status;
-        if (mandatory.Any(key => !checks[key]))
-            status = STATUS_UNHEALTHY;
-        else if (!transactionClear && state?.State == HEALTH_STATE_RUNNING)
-            status = STATUS_DEGRADED;
-        else if (!transactionClear)
-            status = STATUS_UNHEALTHY;
-        else
-            status = STATUS_HEALTHY;
+        if (mandatory.Any(key => !checks.TryGetValue(key, out var value) || !value))
+            return STATUS_UNHEALTHY;
 
-        return new AgentSelfHealthReport(status, checks, state);
+        var transactionClear =
+            checks.TryGetValue(SELF_CHECK_TRANSACTION_CLEAR, out var clear) && clear;
+        if (!transactionClear && state?.State == HEALTH_STATE_RUNNING)
+            return STATUS_DEGRADED;
+        if (!transactionClear)
+            return STATUS_UNHEALTHY;
+        return STATUS_HEALTHY;
     }
 
     internal byte[] WriteJson(AgentSelfHealthReport report)
