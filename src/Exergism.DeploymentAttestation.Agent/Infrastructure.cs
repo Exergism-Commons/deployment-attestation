@@ -195,6 +195,8 @@ internal static class Durability
     private const int O_CLOEXEC = 0x80000;
     private const int AT_EMPTY_PATH = 0x1000;
     private const uint STATX_TYPE = 0x00000001;
+    private const uint STATX_INO = 0x00000100;
+    private const uint STATX_REQUIRED = STATX_TYPE | STATX_INO;
     private const ushort S_IFMT = 0xF000;
     private const ushort S_IFREG = 0x8000;
 
@@ -278,19 +280,39 @@ internal static class Durability
             throw new AgentException($"fsync failed for {path}: errno={Marshal.GetLastPInvokeError()}");
     }
 
-    public static void FsyncRegularFileNoFollow(string path, string displayPath)
+    public static VerifiedRegularFile ReadRegularFileNoFollow(string path, string displayPath)
     {
-        var fd = Native.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0)
-            throw new AgentException($"open tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
-
+        var fd = OpenRegularFileNoFollow(path, displayPath, out var stat);
         try
         {
-            if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_TYPE, out var stat) != 0)
-                throw new AgentException($"statx tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+            var identity = FileIdentity.From(stat);
+            var mode = (UnixFileMode)(stat.Mode & ~S_IFMT);
 
-            if ((stat.Mode & S_IFMT) != S_IFREG)
-                throw new AgentException($"Tracked path is not a regular file during fsync: {displayPath}");
+            using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
+            fd = -1;
+            using var stream = new FileStream(handle, FileAccess.Read);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            return new VerifiedRegularFile(buffer.ToArray(), identity, mode);
+        }
+        finally
+        {
+            if (fd >= 0)
+                _ = Native.close(fd);
+        }
+    }
+
+    public static void FsyncRegularFileNoFollow(
+        string path,
+        string displayPath,
+        FileIdentity expectedIdentity)
+    {
+        var fd = OpenRegularFileNoFollow(path, displayPath, out var stat);
+        try
+        {
+            var actualIdentity = FileIdentity.From(stat);
+            if (actualIdentity != expectedIdentity)
+                throw new AgentException($"Tracked regular file changed identity during fsync: {displayPath}");
 
             if (Native.fsync(fd) != 0)
                 throw new AgentException($"fsync tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
@@ -298,6 +320,35 @@ internal static class Durability
         finally
         {
             _ = Native.close(fd);
+        }
+    }
+
+    private static int OpenRegularFileNoFollow(
+        string path,
+        string displayPath,
+        out LinuxStatx stat)
+    {
+        var fd = Native.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException($"open tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_REQUIRED, out stat) != 0)
+                throw new AgentException($"statx tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+            if ((stat.Mask & STATX_REQUIRED) != STATX_REQUIRED)
+                throw new AgentException($"statx omitted tracked file identity for {displayPath}");
+
+            if ((stat.Mode & S_IFMT) != S_IFREG)
+                throw new AgentException($"Tracked path is not a regular file: {displayPath}");
+
+            return fd;
+        }
+        catch
+        {
+            _ = Native.close(fd);
+            throw;
         }
     }
 
@@ -326,11 +377,34 @@ internal static class Durability
     }
 }
 
+internal readonly record struct FileIdentity(uint DeviceMajor, uint DeviceMinor, ulong Inode)
+{
+    internal static FileIdentity From(LinuxStatx stat)
+        => new(stat.DeviceMajor, stat.DeviceMinor, stat.Inode);
+}
+
+internal readonly record struct VerifiedRegularFile(
+    byte[] Data,
+    FileIdentity Identity,
+    UnixFileMode Mode);
+
 [StructLayout(LayoutKind.Explicit, Size = 256)]
 internal struct LinuxStatx
 {
+    [FieldOffset(0)]
+    internal uint Mask;
+
     [FieldOffset(28)]
     internal ushort Mode;
+
+    [FieldOffset(32)]
+    internal ulong Inode;
+
+    [FieldOffset(136)]
+    internal uint DeviceMajor;
+
+    [FieldOffset(140)]
+    internal uint DeviceMinor;
 }
 
 internal static class Native
