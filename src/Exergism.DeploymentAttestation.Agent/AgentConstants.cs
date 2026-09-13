@@ -87,12 +87,20 @@ internal static class AgentConstants
     internal const string SYSTEMD_STATE_ACTIVE = "active";
     internal const string SYSTEMD_STATE_INACTIVE = "inactive";
     internal const string SYSTEMD_STATE_FAILED = "failed";
+    internal const string SYSTEMD_COMMAND_IS_ACTIVE = "is-active";
+    internal const string SYSTEMD_COMMAND_IS_ENABLED = "is-enabled";
+    internal const string SYSTEMD_FLAG_QUIET = "--quiet";
 
     internal const string COMMAND_SYSTEMCTL = "systemctl";
     internal const string COMMAND_SYSTEMD_RUN = "systemd-run";
     internal const string COMMAND_GIT = "git";
     internal const string COMMAND_STAT = "stat";
     internal const string COMMAND_NSENTER = "nsenter";
+    internal const string CONFIG_BOOLEAN_TRUE = "1";
+    internal const string STAT_FLAG_DEREFERENCE_FORMAT = "-Lc";
+    internal const string STAT_FORMAT_DEVICE_INODE = "%d:%i";
+    internal const string MOUNT_OPTION_READ_ONLY = "ro";
+    internal const string MOUNT_OPTION_READ_WRITE = "rw";
 
     internal const string GIT_ENV_DIR = "GIT_DIR";
     internal const string GIT_ENV_WORK_TREE = "GIT_WORK_TREE";
@@ -116,6 +124,22 @@ internal static class AgentConstants
     internal const string GIT_FLAG_CHDIR = "-C";
     internal const string GIT_FLAG_CONFIG = "-c";
     internal const string GIT_FLAG_CONFIG_ENV_PREFIX = "--config-env=";
+    internal const string GIT_SUBCOMMAND_REV_PARSE = "rev-parse";
+    internal const string GIT_SUBCOMMAND_FETCH = "fetch";
+    internal const string GIT_SUBCOMMAND_CHECKOUT = "checkout";
+    internal const string GIT_SUBCOMMAND_RESET = "reset";
+    internal const string GIT_SUBCOMMAND_CLEAN = "clean";
+    internal const string GIT_SUBCOMMAND_SUBMODULE = "submodule";
+    internal const string GIT_SUBCOMMAND_LS_TREE = "ls-tree";
+    internal const string GIT_OBJECT_BLOB = "blob";
+    internal const string GIT_OBJECT_COMMIT = "commit";
+    internal const string GIT_MODE_GITLINK = "160000";
+    internal const string GIT_MODE_SYMLINK = "120000";
+    internal const string GIT_MODE_FILE = "100644";
+    internal const string GIT_MODE_EXECUTABLE = "100755";
+    internal const string GIT_METADATA_NAME = ".git";
+    internal const string GIT_OBJECT_FORMAT_SHA1 = "sha1";
+    internal const string GIT_OBJECT_FORMAT_SHA256 = "sha256";
 
     internal const string HEADER_TIMESTAMP = "X-EC-Timestamp";
     internal const string HEADER_SIGNATURE = "X-EC-Signature";
