@@ -73,3 +73,28 @@ internal static class AgentActionParser
         _ => throw new AgentException("Unsupported agent action")
     };
 }
+
+internal static class DeploymentFailureFlow
+{
+    internal static async Task ThrowAfterRollbackAndReportAsync(
+        Func<Task> rollback,
+        Func<Task> report,
+        string context,
+        Exception original)
+    {
+        try
+        {
+            await rollback();
+        }
+        catch (Exception rollbackFailure)
+        {
+            throw new AgentException(
+                $"{context} and rollback failed",
+                new AggregateException(original, rollbackFailure));
+        }
+
+        await report();
+        throw new AgentException(context, original);
+    }
+}
+
