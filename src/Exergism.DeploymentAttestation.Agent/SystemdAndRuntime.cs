@@ -1,6 +1,21 @@
 using System.Text.RegularExpressions;
+using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
+
+internal static class ServiceQuiescence
+{
+    internal static bool IsQuiescentSnapshot(
+        string loadState,
+        string activeState,
+        string mainPid,
+        bool cgroupExists,
+        bool cgroupHasProcesses)
+        => loadState == SYSTEMD_STATE_LOADED
+           && activeState is SYSTEMD_STATE_INACTIVE or SYSTEMD_STATE_FAILED
+           && mainPid == "0"
+           && (!cgroupExists || !cgroupHasProcesses);
+}
 
 internal sealed class SystemdController(AgentConfig config)
 {
@@ -9,7 +24,7 @@ internal sealed class SystemdController(AgentConfig config)
     public async Task<string> ShowAsync(string property)
     {
         var result = await ProcessRunner.RunAsync(
-            "systemctl",
+            COMMAND_SYSTEMCTL,
             ["show", _config.ServiceUnit, $"-p={property}", "--value"],
             TimeSpan.FromSeconds(10));
         if (!result.Success)
@@ -19,55 +34,73 @@ internal sealed class SystemdController(AgentConfig config)
 
     public async Task<int> MainPidAsync()
     {
-        var value = await ShowAsync("MainPID");
+        var value = await ShowAsync(SYSTEMD_MAIN_PID);
         return int.TryParse(value, out var pid) && pid > 0
             ? pid
             : throw new AgentException("Target service has no live MainPID");
     }
 
-    public async Task<bool> IsActiveAsync()
-    {
-        var result = await ProcessRunner.RunAsync(
-            "systemctl", ["is-active", "--quiet", _config.ServiceUnit], TimeSpan.FromSeconds(10));
-        return result.Success;
-    }
+    public Task<bool> IsActiveAsync()
+        => HealthCheckRunner.RunAsync(async () =>
+        {
+            var result = await ProcessRunner.RunAsync(
+                COMMAND_SYSTEMCTL,
+                ["is-active", "--quiet", _config.ServiceUnit],
+                TimeSpan.FromSeconds(10));
+            return result.Success;
+        });
 
     public async Task StartAsync()
     {
-        var result = await ProcessRunner.RunAsync("systemctl", ["start", _config.ServiceUnit], TimeSpan.FromMinutes(2));
+        var result = await ProcessRunner.RunAsync(
+            COMMAND_SYSTEMCTL,
+            ["start", _config.ServiceUnit],
+            TimeSpan.FromMinutes(2));
         if (!result.Success)
             throw new AgentException($"Could not start {_config.ServiceUnit}: {result.StdErr.Trim()}");
     }
 
     public async Task StopAsync()
     {
-        _ = await ProcessRunner.RunAsync("systemctl", ["stop", _config.ServiceUnit], TimeSpan.FromMinutes(2));
+        _ = await ProcessRunner.RunAsync(
+            COMMAND_SYSTEMCTL,
+            ["stop", _config.ServiceUnit],
+            TimeSpan.FromMinutes(2));
     }
 
     public async Task<bool> IsQuiescentAsync()
     {
-        string load;
-        string active;
+        string loadState;
+        string activeState;
         string mainPid;
-        string cgroup;
+        string controlGroup;
+
         try
         {
-            load = await ShowAsync("LoadState");
-            active = await ShowAsync("ActiveState");
-            mainPid = await ShowAsync("MainPID");
-            cgroup = await ShowAsync("ControlGroup");
+            loadState = await ShowAsync(SYSTEMD_LOAD_STATE);
+            activeState = await ShowAsync(SYSTEMD_ACTIVE_STATE);
+            mainPid = await ShowAsync(SYSTEMD_MAIN_PID);
+            controlGroup = await ShowAsync(SYSTEMD_CONTROL_GROUP);
         }
         catch
         {
             return false;
         }
 
-        if (load != "loaded" || (active != "inactive" && active != "failed") || mainPid != "0" || string.IsNullOrWhiteSpace(cgroup))
+        if (!ServiceQuiescence.IsQuiescentSnapshot(
+                loadState,
+                activeState,
+                mainPid,
+                cgroupExists: false,
+                cgroupHasProcesses: false))
             return false;
 
-        var root = Path.Combine("/sys/fs/cgroup", cgroup.TrimStart('/'));
+        if (string.IsNullOrWhiteSpace(controlGroup))
+            return true;
+
+        var root = Path.Combine("/sys/fs/cgroup", controlGroup.TrimStart('/'));
         if (!Directory.Exists(root))
-            return false;
+            return true;
 
         try
         {
@@ -77,65 +110,82 @@ internal sealed class SystemdController(AgentConfig config)
                     return false;
             }
         }
+        catch (DirectoryNotFoundException)
+        {
+            // systemd may remove an already-empty cgroup after we sampled ControlGroup.
+            return true;
+        }
         catch
         {
             return false;
         }
-        return true;
+
+        return ServiceQuiescence.IsQuiescentSnapshot(
+            loadState,
+            activeState,
+            mainPid,
+            cgroupExists: true,
+            cgroupHasProcesses: false);
     }
 
     public async Task StopQuiescentAsync()
     {
         await StopAsync();
-        for (var i = 0; i < 30; i++)
+        for (var attempt = 0; attempt < 30; attempt++)
         {
             if (await IsQuiescentAsync())
                 return;
             await Task.Delay(1000);
         }
+
         throw new AgentException("Target service did not become provably quiescent");
     }
 
-    public async Task<bool> RunSmokeAsync()
-    {
-        if (string.IsNullOrEmpty(_config.SmokeScript))
-            return true;
-        if (!File.Exists(_config.SmokeScript))
-            return false;
-
-        var unit = $"ec-smoke-{Sanitize(_config.Service)}-{Environment.ProcessId}-{Guid.NewGuid():N}.service";
-        var args = new[]
+    public Task<bool> RunSmokeAsync()
+        => HealthCheckRunner.RunAsync(async () =>
         {
-            "--quiet", "--wait", "--collect", $"--unit={unit}",
-            "--property=Type=exec",
-            "--property=ExitType=cgroup",
-            "--property=KillMode=control-group",
-            "--property=DynamicUser=yes",
-            "--property=NoNewPrivileges=yes",
-            "--property=ProtectSystem=strict",
-            "--property=ProtectHome=yes",
-            "--property=ProtectControlGroups=yes",
-            "--property=ProtectKernelTunables=yes",
-            "--property=ProtectKernelModules=yes",
-            "--property=PrivateDevices=yes",
-            "--property=RestrictSUIDSGID=yes",
-            $"--property=RuntimeMaxSec={(int)_config.SmokeTimeout.TotalSeconds}s",
-            $"--property=ReadOnlyPaths={_config.AppDirectory}",
-            $"--property=ReadOnlyPaths={_config.AppBinary}",
-            $"--setenv=EC_PUBLIC_URL={_config.PublicUrl}",
-            $"--setenv=EC_LOCAL_URL={_config.LocalUrl}",
-            _config.SmokeScript
-        };
+            if (string.IsNullOrEmpty(_config.SmokeScript))
+                return true;
+            if (!File.Exists(_config.SmokeScript))
+                return false;
 
-        var result = await ProcessRunner.RunAsync(
-            "systemd-run",
-            args,
-            _config.SmokeTimeout + TimeSpan.FromSeconds(15));
-        return result.Success;
-    }
+            var unit = $"ec-smoke-{Sanitize(_config.Service)}-{Environment.ProcessId}-{Guid.NewGuid():N}.service";
+            var arguments = new[]
+            {
+                "--quiet",
+                "--wait",
+                "--collect",
+                $"--unit={unit}",
+                "--property=Type=exec",
+                "--property=ExitType=cgroup",
+                "--property=KillMode=control-group",
+                "--property=DynamicUser=yes",
+                "--property=NoNewPrivileges=yes",
+                "--property=ProtectSystem=strict",
+                "--property=ProtectHome=yes",
+                "--property=ProtectControlGroups=yes",
+                "--property=ProtectKernelTunables=yes",
+                "--property=ProtectKernelModules=yes",
+                "--property=PrivateDevices=yes",
+                "--property=RestrictSUIDSGID=yes",
+                $"--property=RuntimeMaxSec={(int)_config.SmokeTimeout.TotalSeconds}s",
+                $"--property=ReadOnlyPaths={_config.AppDirectory}",
+                $"--property=ReadOnlyPaths={_config.AppBinary}",
+                $"--setenv={ENV_PUBLIC_URL}={_config.PublicUrl}",
+                $"--setenv={ENV_LOCAL_URL}={_config.LocalUrl}",
+                _config.SmokeScript
+            };
+
+            var result = await ProcessRunner.RunAsync(
+                COMMAND_SYSTEMD_RUN,
+                arguments,
+                _config.SmokeTimeout + TimeSpan.FromSeconds(15));
+            return result.Success;
+        });
 
     private static string Sanitize(string value)
-        => new(value.Select(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-' ? c : '-').ToArray());
+        => new(value.Select(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '_' or '.' or '-' ? character : '-').ToArray());
 }
 
 internal sealed class RuntimeInspector(AgentConfig config, SystemdController systemd)
@@ -170,23 +220,30 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     private async Task<string> BoundRuntimeSha256Async(int pid)
     {
         var result = await ProcessRunner.RunAsync(
-            "stat",
+            COMMAND_STAT,
             ["-Lc", "%d:%i", $"/proc/{pid}/exe", _config.AppBinary],
             TimeSpan.FromSeconds(5));
         if (!result.Success)
             throw new AgentException("Could not stat live/configured runtime");
 
-        var identities = result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var identities = result.StdOut.Split(
+            '\n',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (identities.Length != 2 || identities[0] != identities[1])
             throw new AgentException("MainPID executable does not match EC_APP_BIN");
 
         var digest = Durability.Sha256($"/proc/{pid}/exe");
         var verify = await ProcessRunner.RunAsync(
-            "stat",
+            COMMAND_STAT,
             ["-Lc", "%d:%i", $"/proc/{pid}/exe", _config.AppBinary],
             TimeSpan.FromSeconds(5));
-        var after = verify.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (!verify.Success || after.Length != 2 || after[0] != identities[0] || after[1] != identities[1])
+        var after = verify.StdOut.Split(
+            '\n',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (!verify.Success ||
+            after.Length != 2 ||
+            after[0] != identities[0] ||
+            after[1] != identities[1])
             throw new AgentException("Live runtime object changed while hashing");
 
         return digest;
@@ -195,7 +252,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     private async Task VerifyArtifactFenceAsync(int pid)
     {
         var result = await ProcessRunner.RunAsync(
-            "nsenter",
+            COMMAND_NSENTER,
             ["--target", pid.ToString(), "--mount", "--", "cat", "/proc/self/mountinfo"],
             TimeSpan.FromSeconds(5));
         if (!result.Success)
@@ -218,13 +275,18 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
             var separator = raw.IndexOf(" - ", StringComparison.Ordinal);
             if (separator < 0)
                 throw new AgentException("Malformed mountinfo");
+
             var fields = raw[..separator].Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (fields.Length < 6)
                 throw new AgentException("Malformed mountinfo fields");
+
             result.Add(new MountEntry(
                 Path.GetFullPath(UnescapeMountPath(fields[4])),
-                fields[5].Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal)));
+                fields[5]
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .ToHashSet(StringComparer.Ordinal)));
         }
+
         return result;
     }
 
@@ -236,8 +298,8 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     {
         path = Path.GetFullPath(path);
         var covering = mounts
-            .Where(m => Contains(m.Target, path))
-            .OrderByDescending(m => m.Target.Length)
+            .Where(mount => Contains(mount.Target, path))
+            .OrderByDescending(mount => mount.Target.Length)
             .FirstOrDefault()
             ?? throw new AgentException($"No mount covers {label} path {path}");
 
@@ -247,7 +309,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
         if (!includeChildren)
             return;
 
-        foreach (var mount in mounts.Where(m => Contains(path, m.Target)))
+        foreach (var mount in mounts.Where(mount => Contains(path, mount.Target)))
         {
             if (!mount.Options.Contains("ro") || mount.Options.Contains("rw"))
                 throw new AgentException($"Writable source submount: {mount.Target}");
@@ -258,11 +320,15 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     {
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-        return path == root || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+        return path == root ||
+               path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     private static string UnescapeMountPath(string value)
-        => Regex.Replace(value, @"\\([0-7]{3})", static m => ((char)Convert.ToInt32(m.Groups[1].Value, 8)).ToString());
+        => Regex.Replace(
+            value,
+            @"\\([0-7]{3})",
+            static match => ((char)Convert.ToInt32(match.Groups[1].Value, 8)).ToString());
 }
 
 internal sealed record MountEntry(string Target, HashSet<string> Options);
