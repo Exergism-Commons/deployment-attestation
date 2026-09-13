@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AGENT_VERSION="0.1.0-pre16"
+AGENT_VERSION="0.1.0-pre17"
 CONFIG_FILE="${EC_ATTESTATION_CONFIG:-/etc/ec-deployment-attestation/service.env}"
 ACTION="${1:-run}"
 
@@ -33,6 +33,8 @@ EC_HMAC_SECRET_FILE="${EC_HMAC_SECRET_FILE:-}"
 EC_SMOKE_SCRIPT="${EC_SMOKE_SCRIPT:-}"
 EC_SMOKE_TIMEOUT="${EC_SMOKE_TIMEOUT:-60}"
 [[ "$EC_SMOKE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "EC_SMOKE_TIMEOUT must be a positive integer number of seconds"
+EC_DOWNLOAD_TIMEOUT="${EC_DOWNLOAD_TIMEOUT:-120}"
+[[ "$EC_DOWNLOAD_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "EC_DOWNLOAD_TIMEOUT must be a positive integer number of seconds"
 EC_STATE_DIR="${EC_STATE_DIR:-/var/lib/ec-deployment-attestation/${EC_SERVICE}}"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${EC_SERVICE//[^A-Za-z0-9_.-]/-}.agent.lock"
 INSTALL_TRANSACTION_ROOT="/var/lib/ec-deployment-attestation/install"
@@ -126,7 +128,8 @@ arch() {
 }
 
 download() {
-  curl --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 -fsSL \
+  curl --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+    --max-time "$EC_DOWNLOAD_TIMEOUT" -fsSL \
     "$EC_GITHUB_DOWNLOAD_BASE/$1" -o "$2"
 }
 
@@ -452,7 +455,7 @@ bootstrap_state() {
   # Never sample a transitional writer. If a live process exists in any unit
   # state, first prove its mount namespace fences both deployment artifacts.
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
-    artifact_write_fence || die "Bootstrap refused: live service process lacks the artifact write fence"
+    live_runtime_invariants || die "Bootstrap refused: live service process does not match the fenced configured runtime"
   fi
 
   case "$active_state" in
@@ -462,7 +465,7 @@ bootstrap_state() {
       [[ -z "$pid" ]] || die "Bootstrap refused: non-active service still has a live MainPID"
       systemctl start "$EC_SERVICE_UNIT" || die "Bootstrap refused: could not start target service"
       systemctl is-active --quiet "$EC_SERVICE_UNIT" || die "Bootstrap refused: target service did not become active"
-      artifact_write_fence || die "Bootstrap refused: started service lacks the artifact write fence"
+      live_runtime_invariants || die "Bootstrap refused: started service does not match the fenced configured runtime"
       ;;
     *)
       die "Bootstrap refused: target service is in transitional state ${active_state:-unknown}"
@@ -473,7 +476,7 @@ bootstrap_state() {
   # same mandatory local/semantic checks used when validating recovery.
   curl -fsS --max-time 15 "$EC_LOCAL_URL" >/dev/null || die "Bootstrap refused: local health check failed"
   run_smoke >/dev/null 2>&1 || die "Bootstrap refused: semantic smoke check failed"
-  artifact_write_fence || die "Bootstrap refused: artifact fence lost during health validation"
+  live_runtime_invariants || die "Bootstrap refused: live runtime invariant lost during health validation"
 
   if [[ -r "$EC_SOURCE_REVISION_FILE" ]]; then commit="$(tr -d '\r\n' < "$EC_SOURCE_REVISION_FILE")"
   else commit="$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)"; fi
@@ -484,7 +487,7 @@ bootstrap_state() {
   [[ "$binary" =~ ^[0-9a-f]{64}$ ]] || die "Bootstrap refused: runtime digest invalid"
   fsync_checkout "$commit" || die "Bootstrap refused: source durability barrier failed"
   verify_runtime_exact "$binary" || die "Bootstrap refused: runtime durability barrier failed"
-  artifact_write_fence || die "Bootstrap refused: artifact fence lost before state commit"
+  live_runtime_invariants || die "Bootstrap refused: live runtime invariant lost before state commit"
   source_tree_exact "$commit" || die "Bootstrap refused: source changed before state commit"
   [[ "$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)" == "$binary" ]] || die "Bootstrap refused: runtime changed before state commit"
   write_current_state "$commit" "$binary" "" || die "Could not bootstrap durable state"
@@ -567,6 +570,45 @@ service_main_pid() {
   pid="$(systemctl show "$EC_SERVICE_UNIT" -p MainPID --value 2>/dev/null)" || return 1
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
   printf '%s\n' "$pid"
+}
+
+running_runtime_sha256() {
+  local pid pid_after digest
+  pid="$(service_main_pid)" || return 1
+  digest="$(sha256sum "/proc/$pid/exe" 2>/dev/null | awk '{print $1}')" || return 1
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  pid_after="$(service_main_pid)" || return 1
+  [[ "$pid_after" == "$pid" ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+runtime_process_binding() {
+  local pid pid_after
+  pid="$(service_main_pid)" || return 1
+  python3 - "$pid" "$EC_APP_BIN" <<'PY' || return 1
+import os
+import stat
+import sys
+
+pid = sys.argv[1]
+runtime = sys.argv[2]
+try:
+    live = os.stat(f"/proc/{pid}/exe")
+    configured = os.stat(runtime)
+except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+    raise SystemExit(1)
+
+if not stat.S_ISREG(configured.st_mode):
+    raise SystemExit(1)
+
+# No implicit wrapper model: MainPID must execute the exact filesystem object
+# configured as EC_APP_BIN. If the binary path was replaced after exec, the
+# live executable retains the old inode and this fails closed.
+if (live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino):
+    raise SystemExit(1)
+PY
+  pid_after="$(service_main_pid)" || return 1
+  [[ "$pid_after" == "$pid" ]]
 }
 
 service_cgroup_has_processes() {
@@ -688,6 +730,16 @@ PY
   pid_after="$(service_main_pid)" || return 1
   [[ "$pid_after" == "$pid" ]] || return 1
 }
+
+live_runtime_invariants() {
+  local pid_before pid_after
+  pid_before="$(service_main_pid)" || return 1
+  artifact_write_fence || return 1
+  runtime_process_binding || return 1
+  pid_after="$(service_main_pid)" || return 1
+  [[ "$pid_after" == "$pid_before" ]]
+}
+
 verify_baseline() {
   local commit binary load active
   # Determine service state explicitly. A manager/DBus failure or a transitional
@@ -697,7 +749,7 @@ verify_baseline() {
   [[ "$load" == "loaded" ]] || return 1
   active="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value 2>/dev/null)" || return 1
   case "$active" in
-    active) artifact_write_fence || return 1 ;;
+    active) live_runtime_invariants || return 1 ;;
     inactive|failed) ;;
     *) return 1 ;;
   esac
@@ -1119,7 +1171,7 @@ post_start_integrity() {
   # Once this succeeds, the long-lived service cannot race either the source
   # traversal or runtime hashing: both deployment artifacts are read-only in
   # that service's live mount namespace.
-  artifact_write_fence || return 1
+  live_runtime_invariants || return 1
   artifact_integrity "$commit" "$binary"
 }
 
@@ -1213,34 +1265,41 @@ recover_transaction() {
 
 collect_checks() {
   local expected="$1" expected_binary="$2" deployed="$3" state_binary="$4"
-  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true artifact_fence=false source_tree=false state_integrity=false runtime_digest=false runtime_present=false
-  local actual
+  local systemd=false local_http=false public_https=true release_revision=false service_smoke=true artifact_fence=false runtime_process=false source_tree=false state_integrity=false runtime_digest=false runtime_present=false
+  local actual disk_actual
 
-  # The smoke hook runs first and cannot leave descendants behind. Before any
-  # artifact evidence is accepted, verify that the running service sees the
-  # source tree and runtime through read-only mounts. This provides one stable
-  # post-smoke view rather than two racy measurements around a writable service.
+  # The smoke hook runs first and cannot leave descendants behind. Accept live
+  # artifact evidence only from one stable service instance that both sees the
+  # artifacts read-only and executes the exact EC_APP_BIN inode.
   if [[ -n "$EC_SMOKE_SCRIPT" ]]; then
     service_smoke=false
     run_smoke >/dev/null 2>&1 && service_smoke=true
   fi
 
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && systemd=true
-  artifact_write_fence && artifact_fence=true
+  if live_runtime_invariants; then
+    artifact_fence=true
+    runtime_process=true
+  fi
   curl -fsS --max-time 10 "$EC_LOCAL_URL" >/dev/null 2>&1 && local_http=true
   if [[ "$EC_CHECK_PUBLIC" == 1 ]]; then
     public_https=false; curl -fsS --max-time 15 "$EC_PUBLIC_URL" >/dev/null 2>&1 && public_https=true
   fi
   [[ "$deployed" == "$expected" ]] && release_revision=true
-  actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
+
+  # deployed_runtime_sha256 is the digest of the executable held by MainPID,
+  # not merely bytes present at EC_APP_BIN. Keep the configured-file digest as
+  # an independent consistency input.
+  actual="$(running_runtime_sha256 2>/dev/null || true)"
+  disk_actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
   [[ "$actual" =~ ^[0-9a-f]{64}$ ]] && runtime_present=true
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
-  [[ "$actual" == "$state_binary" ]] && state_integrity=true
-  [[ "$actual" == "$expected_binary" ]] && runtime_digest=true
-  python3 - "$actual" "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$artifact_fence" "$source_tree" "$state_integrity" "$runtime_digest" "$runtime_present" <<'PY'
+  [[ "$runtime_process" == true && "$actual" == "$state_binary" && "$disk_actual" == "$state_binary" ]] && state_integrity=true
+  [[ "$runtime_process" == true && "$actual" == "$expected_binary" && "$disk_actual" == "$expected_binary" ]] && runtime_digest=true
+  python3 - "$actual" "$systemd" "$local_http" "$public_https" "$release_revision" "$service_smoke" "$artifact_fence" "$runtime_process" "$source_tree" "$state_integrity" "$runtime_digest" "$runtime_present" <<'PY'
 import json,sys
 actual=sys.argv[1] if len(sys.argv[1]) == 64 else None
-n=["systemd","local_http","public_https","release_revision","service_smoke","artifact_fence","source_tree","state_integrity","runtime_digest","runtime_present"]
+n=["systemd","local_http","public_https","release_revision","service_smoke","artifact_fence","runtime_process","source_tree","state_integrity","runtime_digest","runtime_present"]
 checks=dict(zip(n,[x=="true" for x in sys.argv[2:]]))
 print(json.dumps({"runtime_sha256":actual,"checks":checks},sort_keys=True,separators=(",",":")))
 PY
@@ -1249,7 +1308,7 @@ PY
 status_from_checks() {
   python3 - "$1" <<'PY'
 import json,sys
-c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","artifact_fence","source_tree","state_integrity","runtime_digest","runtime_present")
+c=json.loads(sys.argv[1]); mandatory=("systemd","local_http","release_revision","service_smoke","artifact_fence","runtime_process","source_tree","state_integrity","runtime_digest","runtime_present")
 print("unhealthy" if not all(c.get(k,False) for k in mandatory) else "degraded" if not c.get("public_https",False) else "healthy")
 PY
 }
