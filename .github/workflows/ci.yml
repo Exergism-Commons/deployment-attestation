@@ -235,13 +235,16 @@ jobs:
           grep -Fq 'Could not determine exact timer enablement state' install/install-id-exergism.sh
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
           grep -Fq 'AGENT_SOURCE="${EC_NATIVE_AGENT_BINARY:-$ROOT/agent/ec-deployment-agent.sh}"' install/install-id-exergism.sh
-          grep -Fq 'EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_SOURCE" validate-config' install/install-id-exergism.sh
+          grep -Fq 'AGENT_INSTALL_SOURCE="$AGENT_SOURCE"' install/install-id-exergism.sh
+          grep -Fq 'NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"' install/install-id-exergism.sh
+          grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"' install/install-id-exergism.sh
+          grep -Fq 'EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config' install/install-id-exergism.sh
           grep -Fq 'recovery_agent="$ROOT/agent/ec-deployment-agent.sh"' install/install-id-exergism.sh
           grep -Fq 'if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then' install/install-id-exergism.sh
           grep -Fq 'recovery_agent="$AGENT"' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
-          grep -Fq 'install -o root -g root -m 0755 "$AGENT_SOURCE" "$AGENT"' install/install-id-exergism.sh
-          grep -Fq '"$AGENT_SOURCE" self-test' install/install-id-exergism.sh
+          grep -Fq 'install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"' install/install-id-exergism.sh
+          grep -Fq '"$AGENT_INSTALL_SOURCE" self-test' install/install-id-exergism.sh
           grep -Fq 'EC_NATIVE_AGENT_BINARY must point to an executable Native AOT binary.' install/install-id-exergism.sh
           grep -Fq 'Deployment updater transaction could not be recovered' install/install-id-exergism.sh
           grep -Fq 'pretransaction_journal_published=0' install/install-id-exergism.sh
@@ -377,9 +380,11 @@ jobs:
           from pathlib import Path
 
           text = Path('install/install-id-exergism.sh').read_text()
-          native_preflight = text.index('EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_SOURCE" validate-config')
-          agent_replace = text.index('install -o root -g root -m 0755 "$AGENT_SOURCE" "$AGENT"')
-          assert native_preflight < agent_replace
+          native_stage = text.index('install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"')
+          native_preflight = text.index('EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config')
+          native_self_test = text.index('"$AGENT_INSTALL_SOURCE" self-test', native_preflight)
+          agent_replace = text.index('install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"')
+          assert native_stage < native_preflight < native_self_test < agent_replace
 
           validator = text.index('atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755')
           fence_auditor = text.index('atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755')
