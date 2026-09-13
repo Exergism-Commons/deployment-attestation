@@ -469,7 +469,9 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             Warn($"Could not read current state: {ex.Message}");
-            _health.RecordAttestation(false);
+            _health.RecordRemoteAttestation(
+                delivered: false,
+                AttestationReceiverIdentity.FromConfiguredEndpoint(_config.AttestationEndpoint));
             return AttestationResult.FAILED;
         }
 
