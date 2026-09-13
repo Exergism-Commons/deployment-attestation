@@ -37,6 +37,17 @@ internal readonly record struct AgentExecutionResult(int ExitCode, bool CycleSuc
         };
 }
 
+internal static class AgentCycleLifecycle
+{
+    internal static void Complete(AgentHealthStore store, AgentExecutionResult result)
+    {
+        if (result.CycleSucceeded)
+            store.CompleteSuccess();
+        else
+            store.CompleteFailure(result.FailureReason ?? "Agent cycle failed");
+    }
+}
+
 internal static class AgentActionParser
 {
     internal static AgentAction ParseArgs(IReadOnlyList<string> args)
