@@ -42,7 +42,16 @@ internal sealed class AgentHealthStore(AgentConfig config)
 
     internal void BeginCycle(AgentAction action)
     {
-        var previous = TryRead();
+        AgentHealthState? previous;
+        try
+        {
+            previous = TryRead();
+        }
+        catch
+        {
+            previous = null;
+        }
+
         var now = UtcNowText();
         Write(new AgentHealthState(
             AGENT_VERSION,
@@ -73,7 +82,17 @@ internal sealed class AgentHealthStore(AgentConfig config)
 
     internal void CompleteFailure(string error)
     {
-        var current = TryRead() ?? new AgentHealthState(
+        AgentHealthState? current;
+        try
+        {
+            current = TryRead();
+        }
+        catch
+        {
+            current = null;
+        }
+
+        current ??= new AgentHealthState(
             AGENT_VERSION,
             _config.Service,
             HEALTH_STATE_ERROR,
