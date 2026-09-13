@@ -141,8 +141,40 @@ internal sealed class AgentConfig
             return sb.ToString();
         }
 
-        if (value.Contains("$(", StringComparison.Ordinal))
-            throw new AgentException("Shell command substitution is not supported in agent configuration");
+        if (value.Contains('    }
+
+    private static bool IsName(string key)
+    {
+        if (key.Length == 0 || !(char.IsAsciiLetter(key[0]) || key[0] == '_'))
+            return false;
+        return key.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
+    }
+
+    private static string Sanitize(string value)
+        => new(value.Select(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-' ? c : '-').ToArray());
+
+    private static string RequireAbsolutePath(string key, string value)
+        => Path.IsPathFullyQualified(value)
+            ? Path.GetFullPath(value)
+            : throw new AgentException($"{key} must be an absolute path");
+
+    private static Uri RequireHttpUri(string key, string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            throw new AgentException($"{key} must be an absolute HTTP(S) URL");
+        return uri;
+    }
+
+    private static TimeSpan PositiveSeconds(string value, string key)
+    {
+        if (!int.TryParse(value, out var seconds) || seconds <= 0)
+            throw new AgentException($"{key} must be a positive integer number of seconds");
+        return TimeSpan.FromSeconds(seconds);
+    }
+}
+) || value.Contains('`'))
+            throw new AgentException("Shell expansion is not supported in agent configuration");
         return value;
     }
 
