@@ -45,7 +45,7 @@ internal sealed class SystemdController(AgentConfig config)
         {
             var result = await ProcessRunner.RunAsync(
                 COMMAND_SYSTEMCTL,
-                ["is-active", "--quiet", _config.ServiceUnit],
+                [SYSTEMD_COMMAND_IS_ACTIVE, SYSTEMD_FLAG_QUIET, _config.ServiceUnit],
                 TimeSpan.FromSeconds(10));
             return result.Success;
         });
@@ -221,7 +221,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     {
         var result = await ProcessRunner.RunAsync(
             COMMAND_STAT,
-            ["-Lc", "%d:%i", $"/proc/{pid}/exe", _config.AppBinary],
+            [STAT_FLAG_DEREFERENCE_FORMAT, STAT_FORMAT_DEVICE_INODE, $"/proc/{pid}/exe", _config.AppBinary],
             TimeSpan.FromSeconds(5));
         if (!result.Success)
             throw new AgentException("Could not stat live/configured runtime");
@@ -235,7 +235,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
         var digest = Durability.Sha256($"/proc/{pid}/exe");
         var verify = await ProcessRunner.RunAsync(
             COMMAND_STAT,
-            ["-Lc", "%d:%i", $"/proc/{pid}/exe", _config.AppBinary],
+            [STAT_FLAG_DEREFERENCE_FORMAT, STAT_FORMAT_DEVICE_INODE, $"/proc/{pid}/exe", _config.AppBinary],
             TimeSpan.FromSeconds(5));
         var after = verify.StdOut.Split(
             '\n',
@@ -303,7 +303,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
             .FirstOrDefault()
             ?? throw new AgentException($"No mount covers {label} path {path}");
 
-        if (!covering.Options.Contains("ro") || covering.Options.Contains("rw"))
+        if (!covering.Options.Contains(MOUNT_OPTION_READ_ONLY) || covering.Options.Contains(MOUNT_OPTION_READ_WRITE))
             throw new AgentException($"{label} is writable via {covering.Target}");
 
         if (!includeChildren)
@@ -311,7 +311,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
 
         foreach (var mount in mounts.Where(mount => Contains(path, mount.Target)))
         {
-            if (!mount.Options.Contains("ro") || mount.Options.Contains("rw"))
+            if (!mount.Options.Contains(MOUNT_OPTION_READ_ONLY) || mount.Options.Contains(MOUNT_OPTION_READ_WRITE))
                 throw new AgentException($"Writable source submount: {mount.Target}");
         }
     }
