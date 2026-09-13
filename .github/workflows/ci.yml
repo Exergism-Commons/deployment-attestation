@@ -135,7 +135,14 @@ jobs:
           grep -Fq 'submodule gitfile missing during fsync' agent/ec-deployment-agent.sh
           grep -Fq 'artifact_write_fence' agent/ec-deployment-agent.sh
           grep -Fq 'service_main_pid()' agent/ec-deployment-agent.sh
-          grep -Fq 'Bootstrap refused: live service process lacks the artifact write fence' agent/ec-deployment-agent.sh
+          grep -Fq 'running_runtime_sha256()' agent/ec-deployment-agent.sh
+          grep -Fq 'bound_running_runtime_sha256()' agent/ec-deployment-agent.sh
+          grep -Fq 'runtime_process_binding()' agent/ec-deployment-agent.sh
+          grep -Fq 'live_runtime_snapshot_sha256()' agent/ec-deployment-agent.sh
+          grep -Fq 'os.open(f"/proc/{pid}/exe", os.O_RDONLY)' agent/ec-deployment-agent.sh
+          grep -Fq '(live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino)' agent/ec-deployment-agent.sh
+          grep -Fq 'runtime_process' agent/ec-deployment-agent.sh
+          grep -Fq 'Bootstrap refused: live service process does not match the fenced configured runtime' agent/ec-deployment-agent.sh
           grep -Fq 'Bootstrap refused: semantic smoke check failed' agent/ec-deployment-agent.sh
           grep -Fq 'Bootstrap refused: target service is in transitional state' agent/ec-deployment-agent.sh
           grep -Fq 'open("/proc/self/mountinfo"' agent/ec-deployment-agent.sh
@@ -152,7 +159,7 @@ jobs:
           grep -Fq -- '--property=NoNewPrivileges=yes' agent/ec-deployment-agent.sh
           grep -Fq -- '--property=ProtectSystem=strict' agent/ec-deployment-agent.sh
           grep -Fq -- '--property=ProtectControlGroups=yes' agent/ec-deployment-agent.sh
-          grep -Fq 'AGENT_VERSION="0.1.0-pre16"' agent/ec-deployment-agent.sh
+          grep -Fq 'AGENT_VERSION="0.1.0-pre17"' agent/ec-deployment-agent.sh
           grep -Fq '"phase":"activating"' agent/ec-deployment-agent.sh
           grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
           grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
@@ -163,6 +170,8 @@ jobs:
           grep -Fq 'Determine service state explicitly.' agent/ec-deployment-agent.sh
           grep -Fq 'active="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value' agent/ec-deployment-agent.sh
           grep -Fq 'verify_runtime_exact "$RELEASE_ASSET_SHA256"' agent/ec-deployment-agent.sh
+          grep -Fq 'EC_DOWNLOAD_TIMEOUT="${EC_DOWNLOAD_TIMEOUT:-120}"' agent/ec-deployment-agent.sh
+          grep -Fq -- '--max-time "$EC_DOWNLOAD_TIMEOUT"' agent/ec-deployment-agent.sh
           grep -Fq 'EC_RELEASE_MANIFEST_VALIDATOR=' agent/ec-deployment-agent.sh
           grep -Fq 'EC_RELEASE_MANIFEST_SCHEMA=' agent/ec-deployment-agent.sh
           grep -Fq '"$EC_RELEASE_MANIFEST_VALIDATOR" "$EC_RELEASE_MANIFEST_SCHEMA" "$1"' agent/ec-deployment-agent.sh
@@ -257,10 +266,14 @@ jobs:
           grep -Fq 'writable source submount' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'runtime is writable via' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'Production resolver changed PID during artifact-fence audit' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'verify_runtime_process_binding()' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'Production resolver MainPID is not executing the configured runtime object.' install/verify-id-exergism-artifact-fence.sh
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/install-id-exergism.sh
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/recover-id-exergism-install.sh
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
+          grep -Fq -- '--connect-timeout 10 --max-time 120' install/install-id-exergism.sh
+          grep -Fq 'TimeoutStartSec=15min' packaging/ec-deployment-attestation@.service
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
           grep -Fq 'Recovery retained an actionable journal' install/install-id-exergism.sh
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
@@ -389,6 +402,16 @@ jobs:
 
           agent = Path('agent/ec-deployment-agent.sh').read_text()
           assert agent.index('recover)') < agent.index('run|update)')
+          live_snapshot = agent.index('live_runtime_snapshot_sha256()')
+          live_fence_agent = agent.index('artifact_write_fence || return 1', live_snapshot)
+          bound_digest = agent.index('digest="$(bound_running_runtime_sha256)"', live_snapshot)
+          post_start = agent.index('post_start_integrity()')
+          post_start_live = agent.index('live_runtime_invariants || return 1', post_start)
+          collect = agent.index('collect_checks()')
+          collect_snapshot = agent.index('actual="$(live_runtime_snapshot_sha256', collect)
+          assert live_snapshot < live_fence_agent < bound_digest
+          assert post_start < post_start_live
+          assert collect < collect_snapshot
           global_lock = agent.index('if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]] && ! flock -n 8; then')
           state_lock = agent.index('if ! flock -n 9; then')
           installer_phase_guard = agent.index('for phase in pending validated recovering recovered; do')
