@@ -67,6 +67,15 @@ if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" && ! -x "$AGENT_SOURCE" ]]; then
   exit 1
 fi
 
+if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
+  native_preflight_config="$ENV_FILE"
+  if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
+    native_preflight_config="$ROOT/examples/id.exergism.org.env.example"
+  fi
+  EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_SOURCE" validate-config
+  "$AGENT_SOURCE" self-test
+fi
+
 exec 9>"$INSTALL_LOCK"
 flock -n 9 || {
   echo "Another Deployment Attestation installation/recovery is already running." >&2
@@ -580,9 +589,6 @@ stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
 install -o root -g root -m 0755 "$AGENT_SOURCE" "$AGENT"
-if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
-  "$AGENT" self-test
-fi
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
