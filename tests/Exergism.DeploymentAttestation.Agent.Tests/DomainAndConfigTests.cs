@@ -35,6 +35,42 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void StaticConfigParserRejectsInlineComments()
+    {
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.ParseValue("/srv/id.exergism.org # checkout"));
+
+        Assert.AreEqual(
+            "literal # value",
+            AgentConfig.ParseValue("'literal # value'"));
+        Assert.AreEqual(
+            "literal # value",
+            AgentConfig.ParseValue(""literal # value""));
+    }
+
+    [TestMethod]
+    public void ReleaseAssetNameMustBeSingleSafeName()
+    {
+        Assert.AreEqual(
+            RELEASE_MANIFEST_DEFAULT,
+            AgentConfig.RequireSafeAssetName(ENV_RELEASE_MANIFEST, RELEASE_MANIFEST_DEFAULT));
+
+        foreach (var invalid in new[]
+                 {
+                     "../DEPLOYMENT_MANIFEST.json",
+                     "/tmp/DEPLOYMENT_MANIFEST.json",
+                     "nested/DEPLOYMENT_MANIFEST.json",
+                     @"nested\DEPLOYMENT_MANIFEST.json",
+                     "..",
+                     ".hidden"
+                 })
+        {
+            TestAssert.Throws<AgentException>(
+                () => AgentConfig.RequireSafeAssetName(ENV_RELEASE_MANIFEST, invalid));
+        }
+    }
+
+    [TestMethod]
     public void ConfigComputesSelfHealthPathsAndAge()
     {
         using var environment = TestEnvironment.Create();
