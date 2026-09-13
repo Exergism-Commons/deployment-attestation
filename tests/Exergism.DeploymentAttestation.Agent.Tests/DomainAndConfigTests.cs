@@ -23,14 +23,14 @@ public sealed class DomainAndConfigTests
 
     [TestMethod]
     public void InvalidActionFailsClosed()
-        => Assert.ThrowsException<AgentException>(() => AgentActionParser.Parse("deploy"));
+        => TestAssert.Throws<AgentException>(() => AgentActionParser.Parse("deploy"));
 
     [TestMethod]
     public void StaticConfigParserRejectsShellExpansion()
     {
-        Assert.ThrowsException<AgentException>(() => AgentConfig.ParseValue("$HOME/runtime"));
-        Assert.ThrowsException<AgentException>(() => AgentConfig.ParseValue("\"$HOME/runtime\""));
-        Assert.ThrowsException<AgentException>(() => AgentConfig.ParseValue("\u0060id\u0060"));
+        TestAssert.Throws<AgentException>(() => AgentConfig.ParseValue("$HOME/runtime"));
+        TestAssert.Throws<AgentException>(() => AgentConfig.ParseValue("\"$HOME/runtime\""));
+        TestAssert.Throws<AgentException>(() => AgentConfig.ParseValue("\u0060id\u0060"));
     }
 
     [TestMethod]
