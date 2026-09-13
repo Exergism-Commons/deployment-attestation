@@ -10,7 +10,7 @@ internal sealed class GitRepository(AgentConfig config)
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public async Task<string> HeadAsync()
-        => (await GitAsync(["rev-parse", "HEAD"])).StdOut.Trim();
+        => (await GitAsync([GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
 
     public async Task VerifySourceTreeExactAsync(string commit)
         => await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
@@ -19,12 +19,12 @@ internal sealed class GitRepository(AgentConfig config)
     {
         if (fetchFirst)
         {
-            await GitRequiredAsync(["fetch", "--force", "--depth", "1", "origin", commit]);
-            await GitRequiredAsync(["checkout", "--detach", "FETCH_HEAD"]);
+            await GitRequiredAsync([GIT_SUBCOMMAND_FETCH, "--force", "--depth", "1", "origin", commit]);
+            await GitRequiredAsync([GIT_SUBCOMMAND_CHECKOUT, "--detach", "FETCH_HEAD"]);
         }
 
-        await GitRequiredAsync(["reset", "--hard", commit]);
-        await GitRequiredAsync(["clean", "-ffdx"]);
+        await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
+        await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
         await SyncSubmodulesAsync(commit);
 
         if (await HeadAsync() != commit)
@@ -70,12 +70,12 @@ internal sealed class GitRepository(AgentConfig config)
         if (!Directory.Exists(repository) || new DirectoryInfo(repository).LinkTarget is not null)
             throw new AgentException($"Repository path is not a real directory: {repository}");
 
-        var head = (await GitAtAsync(repository, ["rev-parse", "HEAD"])).StdOut.Trim();
+        var head = (await GitAtAsync(repository, [GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
         if (head != commit)
             throw new AgentException($"HEAD mismatch in {repository}: {head} != {commit}");
 
-        var algorithm = (await GitAtAsync(repository, ["rev-parse", "--show-object-format"])).StdOut.Trim();
-        if (algorithm is not ("sha1" or "sha256"))
+        var algorithm = (await GitAtAsync(repository, [GIT_SUBCOMMAND_REV_PARSE, "--show-object-format"])).StdOut.Trim();
+        if (algorithm is not (GIT_OBJECT_FORMAT_SHA1 or GIT_OBJECT_FORMAT_SHA256))
             throw new AgentException($"Unsupported Git object format: {algorithm}");
 
         var entries = await ReadTreeAsync(repository, commit);
@@ -85,7 +85,7 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var entry in entries)
         {
             var fullPath = Path.Combine(repository, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
-            if (entry.Mode == "160000" && entry.Kind == "commit")
+            if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
             {
                 if (!Directory.Exists(fullPath) || new DirectoryInfo(fullPath).LinkTarget is not null)
                     throw new AgentException($"gitlink is not a real directory: {entry.RelativePath}");
@@ -93,26 +93,26 @@ internal sealed class GitRepository(AgentConfig config)
                 continue;
             }
 
-            if (entry.Kind != "blob")
+            if (entry.Kind != GIT_OBJECT_BLOB)
                 throw new AgentException($"Unexpected tree object {entry.Kind}: {entry.RelativePath}");
             expectedFiles.Add(entry.RelativePath);
 
             byte[] data;
             var info = new FileInfo(fullPath);
-            if (entry.Mode == "120000")
+            if (entry.Mode == GIT_MODE_SYMLINK)
             {
                 var target = info.LinkTarget;
                 if (target is null)
                     throw new AgentException($"Expected symlink: {entry.RelativePath}");
                 data = StrictUtf8.GetBytes(target);
             }
-            else if (entry.Mode is "100644" or "100755")
+            else if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
                 if (!File.Exists(fullPath) || info.LinkTarget is not null)
                     throw new AgentException($"Expected regular file: {entry.RelativePath}");
                 var mode = File.GetUnixFileMode(fullPath);
                 var executable = (mode & UnixFileMode.UserExecute) != 0;
-                if (executable != (entry.Mode == "100755"))
+                if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
                     throw new AgentException($"Executable bit mismatch: {entry.RelativePath}");
                 data = await File.ReadAllBytesAsync(fullPath);
             }
@@ -193,7 +193,7 @@ internal sealed class GitRepository(AgentConfig config)
             var path = Path.Combine(repository, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
             AddParentChain(directories, path, repository);
 
-            if (entry.Mode == "160000" && entry.Kind == "commit")
+            if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
             {
                 submodules.Add((path, entry.ObjectId));
                 var gitMarker = Path.Combine(path, ".git");
@@ -247,7 +247,7 @@ internal sealed class GitRepository(AgentConfig config)
             roots.Add(Path.GetFullPath(result.StdOut.Trim()));
         }
 
-        foreach (var marker in Directory.EnumerateFileSystemEntries(repository, ".git", SearchOption.AllDirectories))
+        foreach (var marker in Directory.EnumerateFileSystemEntries(repository, GIT_METADATA_NAME, SearchOption.AllDirectories))
         {
             if (Directory.Exists(marker) && new DirectoryInfo(marker).LinkTarget is null)
             {
@@ -387,7 +387,7 @@ internal sealed class GitRepository(AgentConfig config)
             var arg = argv[i];
             if (arg == "--")
                 break;
-            if (arg is "-C" or "-c" or "--git-dir" or "--work-tree")
+            if (arg is GIT_FLAG_CHDIR or GIT_FLAG_CONFIG or GIT_FLAG_DIR or GIT_FLAG_WORK_TREE)
             {
                 if (++i >= argv.Length)
                     throw new AgentException("Malformed Git global selector");
@@ -395,17 +395,17 @@ internal sealed class GitRepository(AgentConfig config)
                 probeArgs.Add(argv[i]);
                 continue;
             }
-            if ((arg.StartsWith("-C", StringComparison.Ordinal) && arg != "-C") ||
-                (arg.StartsWith("-c", StringComparison.Ordinal) && arg != "-c") ||
-                arg.StartsWith("--git-dir=", StringComparison.Ordinal) ||
-                arg.StartsWith("--work-tree=", StringComparison.Ordinal))
+            if ((arg.StartsWith(GIT_FLAG_CHDIR, StringComparison.Ordinal) && arg != GIT_FLAG_CHDIR) ||
+                (arg.StartsWith(GIT_FLAG_CONFIG, StringComparison.Ordinal) && arg != GIT_FLAG_CONFIG) ||
+                arg.StartsWith(GIT_FLAG_DIR + "=", StringComparison.Ordinal) ||
+                arg.StartsWith(GIT_FLAG_WORK_TREE + "=", StringComparison.Ordinal))
             {
                 probeArgs.Add(arg);
                 continue;
             }
-            if (arg.StartsWith("--config-env=", StringComparison.Ordinal))
+            if (arg.StartsWith(GIT_FLAG_CONFIG_ENV_PREFIX, StringComparison.Ordinal))
             {
-                var spec = arg["--config-env=".Length..];
+                var spec = arg[GIT_FLAG_CONFIG_ENV_PREFIX.Length..];
                 var eq = spec.IndexOf('=');
                 if (eq <= 0)
                     throw new AgentException("Malformed --config-env");
@@ -421,7 +421,7 @@ internal sealed class GitRepository(AgentConfig config)
             break;
         }
 
-        probeArgs.AddRange(["-c", "safe.directory=*", "rev-parse", "--path-format=absolute", "--show-toplevel"]);
+        probeArgs.AddRange([GIT_FLAG_CONFIG, "safe.directory=*", GIT_SUBCOMMAND_REV_PARSE, "--path-format=absolute", "--show-toplevel"]);
         var probe = await ProcessRunner.RunAsync(
             COMMAND_GIT, probeArgs, TimeSpan.FromSeconds(2), cwd, probeEnv, clearEnvironment: true);
         if (probe.Success)
@@ -495,7 +495,7 @@ internal sealed class GitRepository(AgentConfig config)
     {
         var bytes = await ProcessRunner.RunBytesAsync(
             COMMAND_GIT,
-            ["-C", repository, "ls-tree", "-rz", "--full-tree", commit],
+            [GIT_FLAG_CHDIR, repository, GIT_SUBCOMMAND_LS_TREE, "-rz", "--full-tree", commit],
             TimeSpan.FromSeconds(30));
 
         var result = new List<TreeEntry>();
@@ -535,7 +535,7 @@ internal sealed class GitRepository(AgentConfig config)
 
     private static async Task<ProcessResult> GitAtAsync(string repository, IEnumerable<string> args, bool required = true)
     {
-        var all = new List<string> { "-C", repository };
+        var all = new List<string> { GIT_FLAG_CHDIR, repository };
         all.AddRange(args);
         var result = await ProcessRunner.RunAsync(COMMAND_GIT, all, TimeSpan.FromMinutes(2));
         if (required && !result.Success)
@@ -556,7 +556,7 @@ internal sealed class GitRepository(AgentConfig config)
             {
                 var name = Path.GetFileName(entry);
                 var relative = string.IsNullOrEmpty(relativeDirectory) ? name : $"{relativeDirectory}/{name}";
-                if (relativeDirectory.Length == 0 && name == ".git")
+                if (relativeDirectory.Length == 0 && name == GIT_METADATA_NAME)
                     continue;
                 if (submoduleSet.Contains(relative))
                     continue;
@@ -579,7 +579,7 @@ internal sealed class GitRepository(AgentConfig config)
 
     private static string GitBlobObjectId(byte[] data, string algorithm)
     {
-        using var hash = IncrementalHash.CreateHash(algorithm == "sha1" ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256);
+        using var hash = IncrementalHash.CreateHash(algorithm == GIT_OBJECT_FORMAT_SHA1 ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256);
         hash.AppendData(Encoding.ASCII.GetBytes($"blob {data.Length}\0"));
         hash.AppendData(data);
         return Convert.ToHexStringLower(hash.GetHashAndReset());
