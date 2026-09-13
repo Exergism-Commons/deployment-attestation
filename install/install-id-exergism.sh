@@ -15,6 +15,8 @@ RECOVERY_UNIT="id-exergism-install-recovery.service"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
 AGENT_SOURCE="${EC_NATIVE_AGENT_BINARY:-$ROOT/agent/ec-deployment-agent.sh}"
+AGENT_INSTALL_SOURCE="$AGENT_SOURCE"
+NATIVE_AGENT_STAGE=""
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
@@ -65,15 +67,6 @@ fi
 if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" && ! -x "$AGENT_SOURCE" ]]; then
   echo "EC_NATIVE_AGENT_BINARY must point to an executable Native AOT binary." >&2
   exit 1
-fi
-
-if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
-  native_preflight_config="$ENV_FILE"
-  if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
-    native_preflight_config="$ROOT/examples/id.exergism.org.env.example"
-  fi
-  EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_SOURCE" validate-config
-  "$AGENT_SOURCE" self-test
 fi
 
 exec 9>"$INSTALL_LOCK"
@@ -251,6 +244,30 @@ PY
 rm -f "$tmp_manifest"
 trap - EXIT
 
+cleanup_native_stage() {
+  if [[ -n "$NATIVE_AGENT_STAGE" ]]; then
+    rm -rf -- "$NATIVE_AGENT_STAGE" || true
+    NATIVE_AGENT_STAGE=""
+  fi
+}
+
+if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
+  # Pin the exact candidate into a root-owned, process-private staging directory.
+  # All preflight checks and the eventual installation consume this same copy,
+  # so later mutation/replacement of EC_NATIVE_AGENT_BINARY cannot change what
+  # gets published.
+  NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
+  trap cleanup_native_stage EXIT
+  AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
+  install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"
+
+  native_preflight_config="$ENV_FILE"
+  if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
+    native_preflight_config="$ROOT/examples/id.exergism.org.env.example"
+  fi
+  EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config
+  "$AGENT_INSTALL_SOURCE" self-test
+fi
 
 current_boot_id="$(cat "$BOOT_ID_FILE")"
 [[ "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
@@ -427,6 +444,7 @@ restore_pretransaction_timer_on_exit() {
       stop_and_wait_quiescent "$TIMER_UNIT" || rc=1
     fi
   fi
+  cleanup_native_stage
   exit "$rc"
 }
 trap restore_pretransaction_timer_on_exit EXIT
@@ -573,6 +591,7 @@ rollback_install_on_exit() {
       rc=1
     fi
   fi
+  cleanup_native_stage
   exit "$rc"
 }
 
@@ -588,7 +607,7 @@ stop_and_wait_quiescent "$TIMER_UNIT"
 stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
-install -o root -g root -m 0755 "$AGENT_SOURCE" "$AGENT"
+install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
@@ -632,6 +651,7 @@ systemctl is-active --quiet "$TIMER_UNIT"
 
 finalize_install_transaction
 install_complete=1
+cleanup_native_stage
 trap - EXIT
 
 printf '\nInstalled Deployment Attestation agent for %s.\n' "$SERVICE"
