@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
 
@@ -47,18 +48,18 @@ internal static partial class Protocol
 
         var allowed = new HashSet<string>(StringComparer.Ordinal)
         {
-            "schema_version", "repository", "release_tag", "source_commit", "generated_at", "assets"
+            JSON_SCHEMA_VERSION, JSON_REPOSITORY, JSON_RELEASE_TAG, JSON_SOURCE_COMMIT, JSON_GENERATED_AT, JSON_ASSETS
         };
         RequireExactProperties(root, allowed, "$");
 
-        var schema = RequireString(root, "schema_version");
-        var repo = RequireString(root, "repository");
-        var tag = RequireString(root, "release_tag");
-        var commit = RequireString(root, "source_commit");
-        var generated = RequireString(root, "generated_at");
-        var assets = root.GetProperty("assets");
+        var schema = RequireString(root, JSON_SCHEMA_VERSION);
+        var repo = RequireString(root, JSON_REPOSITORY);
+        var tag = RequireString(root, JSON_RELEASE_TAG);
+        var commit = RequireString(root, JSON_SOURCE_COMMIT);
+        var generated = RequireString(root, JSON_GENERATED_AT);
+        var assets = root.GetProperty(JSON_ASSETS);
 
-        if (schema != "0.1")
+        if (schema != SCHEMA_VERSION)
             throw new AgentException("Release manifest schema_version must be 0.1");
         if (!RepositoryPattern.IsMatch(repo) || repo != repository)
             throw new AgentException("Release manifest repository mismatch");
@@ -82,9 +83,9 @@ internal static partial class Protocol
             var asset = property.Value;
             RequireObject(asset, $"$.assets.{property.Name}");
             EnsureNoDuplicateProperties(asset, $"$.assets.{property.Name}");
-            RequireExactProperties(asset, new HashSet<string>(StringComparer.Ordinal) { "name", "sha256" }, $"$.assets.{property.Name}");
-            var name = RequireString(asset, "name");
-            var digest = RequireString(asset, "sha256");
+            RequireExactProperties(asset, new HashSet<string>(StringComparer.Ordinal) { JSON_NAME, JSON_SHA256 }, $"$.assets.{property.Name}");
+            var name = RequireString(asset, JSON_NAME);
+            var digest = RequireString(asset, JSON_SHA256);
             if (!AssetNamePattern.IsMatch(name))
                 throw new AgentException($"Invalid release asset name for {property.Name}");
             if (!DigestPattern.IsMatch(digest))
@@ -110,14 +111,14 @@ internal static partial class Protocol
             root,
             new HashSet<string>(StringComparer.Ordinal)
             {
-                "source_commit", "binary_sha256", "release_manifest_sha256", "release_tag"
+                JSON_SOURCE_COMMIT, JSON_BINARY_SHA256, JSON_RELEASE_MANIFEST_SHA256, JSON_RELEASE_TAG
             },
             "$");
 
-        var commit = RequireString(root, "source_commit");
-        var binary = RequireString(root, "binary_sha256");
-        var tag = RequireString(root, "release_tag");
-        var manifest = OptionalNullableString(root, "release_manifest_sha256");
+        var commit = RequireString(root, JSON_SOURCE_COMMIT);
+        var binary = RequireString(root, JSON_BINARY_SHA256);
+        var tag = RequireString(root, JSON_RELEASE_TAG);
+        var manifest = OptionalNullableString(root, JSON_RELEASE_MANIFEST_SHA256);
         if (!CommitPattern.IsMatch(commit) || !DigestPattern.IsMatch(binary))
             throw new AgentException("Invalid current-state source/runtime digest");
         if (manifest is not null && !DigestPattern.IsMatch(manifest))
@@ -131,13 +132,13 @@ internal static partial class Protocol
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteString("binary_sha256", state.BinarySha256);
+            writer.WriteString(JSON_BINARY_SHA256, state.BinarySha256);
             if (state.ReleaseManifestSha256 is null)
-                writer.WriteNull("release_manifest_sha256");
+                writer.WriteNull(JSON_RELEASE_MANIFEST_SHA256);
             else
-                writer.WriteString("release_manifest_sha256", state.ReleaseManifestSha256);
-            writer.WriteString("release_tag", state.ReleaseTag);
-            writer.WriteString("source_commit", state.SourceCommit);
+                writer.WriteString(JSON_RELEASE_MANIFEST_SHA256, state.ReleaseManifestSha256);
+            writer.WriteString(JSON_RELEASE_TAG, state.ReleaseTag);
+            writer.WriteString(JSON_SOURCE_COMMIT, state.SourceCommit);
             writer.WriteEndObject();
         }
         return buffer.ToArray();
@@ -153,23 +154,23 @@ internal static partial class Protocol
             root,
             new HashSet<string>(StringComparer.Ordinal)
             {
-                "schema_version", "phase",
-                "old_source_commit", "old_binary_sha256", "old_release_manifest_sha256",
-                "backup_binary", "new_source_commit", "new_binary_sha256", "new_release_manifest_sha256"
+                JSON_SCHEMA_VERSION, JSON_PHASE,
+                JSON_OLD_SOURCE_COMMIT, JSON_OLD_BINARY_SHA256, JSON_OLD_RELEASE_MANIFEST_SHA256,
+                JSON_BACKUP_BINARY, JSON_NEW_SOURCE_COMMIT, JSON_NEW_BINARY_SHA256, JSON_NEW_RELEASE_MANIFEST_SHA256
             },
             "$");
 
-        if (RequireString(root, "schema_version") != "0.1")
+        if (RequireString(root, JSON_SCHEMA_VERSION) != SCHEMA_VERSION)
             throw new AgentException("Invalid transaction schema");
         var tx = new DeploymentTransaction(
-            RequireString(root, "phase"),
-            RequireString(root, "old_source_commit"),
-            RequireString(root, "old_binary_sha256"),
-            OptionalNullableString(root, "old_release_manifest_sha256"),
-            RequireString(root, "backup_binary"),
-            RequireString(root, "new_source_commit"),
-            RequireString(root, "new_binary_sha256"),
-            OptionalNullableString(root, "new_release_manifest_sha256"));
+            RequireString(root, JSON_PHASE),
+            RequireString(root, JSON_OLD_SOURCE_COMMIT),
+            RequireString(root, JSON_OLD_BINARY_SHA256),
+            OptionalNullableString(root, JSON_OLD_RELEASE_MANIFEST_SHA256),
+            RequireString(root, JSON_BACKUP_BINARY),
+            RequireString(root, JSON_NEW_SOURCE_COMMIT),
+            RequireString(root, JSON_NEW_BINARY_SHA256),
+            OptionalNullableString(root, JSON_NEW_RELEASE_MANIFEST_SHA256));
 
         if (!CommitPattern.IsMatch(tx.OldSourceCommit) ||
             !CommitPattern.IsMatch(tx.NewSourceCommit) ||
@@ -189,17 +190,17 @@ internal static partial class Protocol
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteString("backup_binary", tx.BackupBinary);
-            writer.WriteString("new_binary_sha256", tx.NewBinarySha256);
-            if (tx.NewReleaseManifestSha256 is null) writer.WriteNull("new_release_manifest_sha256");
-            else writer.WriteString("new_release_manifest_sha256", tx.NewReleaseManifestSha256);
-            writer.WriteString("new_source_commit", tx.NewSourceCommit);
-            writer.WriteString("old_binary_sha256", tx.OldBinarySha256);
-            if (tx.OldReleaseManifestSha256 is null) writer.WriteNull("old_release_manifest_sha256");
-            else writer.WriteString("old_release_manifest_sha256", tx.OldReleaseManifestSha256);
-            writer.WriteString("old_source_commit", tx.OldSourceCommit);
-            writer.WriteString("phase", tx.Phase);
-            writer.WriteString("schema_version", "0.1");
+            writer.WriteString(JSON_BACKUP_BINARY, tx.BackupBinary);
+            writer.WriteString(JSON_NEW_BINARY_SHA256, tx.NewBinarySha256);
+            if (tx.NewReleaseManifestSha256 is null) writer.WriteNull(JSON_NEW_RELEASE_MANIFEST_SHA256);
+            else writer.WriteString(JSON_NEW_RELEASE_MANIFEST_SHA256, tx.NewReleaseManifestSha256);
+            writer.WriteString(JSON_NEW_SOURCE_COMMIT, tx.NewSourceCommit);
+            writer.WriteString(JSON_OLD_BINARY_SHA256, tx.OldBinarySha256);
+            if (tx.OldReleaseManifestSha256 is null) writer.WriteNull(JSON_OLD_RELEASE_MANIFEST_SHA256);
+            else writer.WriteString(JSON_OLD_RELEASE_MANIFEST_SHA256, tx.OldReleaseManifestSha256);
+            writer.WriteString(JSON_OLD_SOURCE_COMMIT, tx.OldSourceCommit);
+            writer.WriteString(JSON_PHASE, tx.Phase);
+            writer.WriteString(JSON_SCHEMA_VERSION, SCHEMA_VERSION);
             writer.WriteEndObject();
         }
         return buffer.ToArray();
@@ -243,28 +244,28 @@ internal static partial class Protocol
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteString("agent_version", agentVersion);
-            writer.WritePropertyName("checks");
+            writer.WriteString(JSON_AGENT_VERSION, agentVersion);
+            writer.WritePropertyName(JSON_CHECKS);
             writer.WriteStartObject();
             foreach (var pair in checks.OrderBy(x => x.Key, StringComparer.Ordinal))
                 writer.WriteBoolean(pair.Key, pair.Value);
             writer.WriteEndObject();
-            writer.WriteString("deployed_commit", deployed);
-            if (actualRuntime is null) writer.WriteNull("deployed_runtime_sha256");
-            else writer.WriteString("deployed_runtime_sha256", actualRuntime);
-            writer.WriteString("environment", config.EnvironmentName);
-            writer.WriteString("expected_commit", expected);
-            writer.WriteString("expected_runtime_sha256", expectedRuntime);
-            writer.WriteString("host_id", config.HostId);
+            writer.WriteString(JSON_DEPLOYED_COMMIT, deployed);
+            if (actualRuntime is null) writer.WriteNull(JSON_DEPLOYED_RUNTIME_SHA256);
+            else writer.WriteString(JSON_DEPLOYED_RUNTIME_SHA256, actualRuntime);
+            writer.WriteString(JSON_ENVIRONMENT, config.EnvironmentName);
+            writer.WriteString(JSON_EXPECTED_COMMIT, expected);
+            writer.WriteString(JSON_EXPECTED_RUNTIME_SHA256, expectedRuntime);
+            writer.WriteString(JSON_HOST_ID, config.HostId);
             if (observationId is not null)
-                writer.WriteString("observation_id", observationId);
-            writer.WriteString("observed_at", observedAt);
-            writer.WriteString("release_manifest_sha256", manifest);
-            writer.WriteString("release_tag", config.ReleaseTag);
-            writer.WriteString("repository", config.Repository);
-            writer.WriteString("schema_version", "0.1");
-            writer.WriteString("service", config.Service);
-            writer.WriteString("status", status);
+                writer.WriteString(JSON_OBSERVATION_ID, observationId);
+            writer.WriteString(JSON_OBSERVED_AT, observedAt);
+            writer.WriteString(JSON_RELEASE_MANIFEST_SHA256, manifest);
+            writer.WriteString(JSON_RELEASE_TAG, config.ReleaseTag);
+            writer.WriteString(JSON_REPOSITORY, config.Repository);
+            writer.WriteString(JSON_SCHEMA_VERSION, SCHEMA_VERSION);
+            writer.WriteString(JSON_SERVICE, config.Service);
+            writer.WriteString(JSON_STATUS, status);
             writer.WriteEndObject();
         }
         return buffer.ToArray();
@@ -273,7 +274,7 @@ internal static partial class Protocol
     public static string ReadObservationId(byte[] attestation)
     {
         using var doc = JsonDocument.Parse(attestation);
-        return RequireString(doc.RootElement, "observation_id");
+        return RequireString(doc.RootElement, JSON_OBSERVATION_ID);
     }
 
     private static void EnsureNoDuplicateProperties(JsonElement element, string path)
