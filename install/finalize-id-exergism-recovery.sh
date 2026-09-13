@@ -259,6 +259,17 @@ target_active_state() {
   printf '%s\n' "$active"
 }
 
+quiesce_target_after_failed_validation() {
+  local i
+  systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+  for i in {1..30}; do
+    target_quiescent && return 0
+    sleep 1
+  done
+  echo "CRITICAL: target could not be proven quiescent after failed recovery validation." >&2
+  return 1
+}
+
 wait_target_healthy_active() {
   local i state
   for i in {1..30}; do
@@ -287,6 +298,7 @@ wait_target_healthy_active() {
   fi
   "$ARTIFACT_FENCE_AUDITOR" || {
     echo "Production resolver failed the live artifact-fence audit during recovery finalization." >&2
+    quiesce_target_after_failed_validation || true
     return 1
   }
 }
