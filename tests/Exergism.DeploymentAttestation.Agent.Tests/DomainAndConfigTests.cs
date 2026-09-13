@@ -41,4 +41,10 @@ public sealed class DomainAndConfigTests
         Assert.AreEqual("ec-deployment-attestation@id.exergism.org.timer", environment.Config.AgentTimerUnit);
         Assert.AreEqual(TimeSpan.FromSeconds(1500), environment.Config.AgentHealthMaxAge);
     }
+
+    [TestMethod]
+    public void ExtraCliArgumentsFailClosed()
+        => TestAssert.Throws<AgentException>(
+            () => AgentActionParser.ParseArgs(new[] { ACTION_STATUS, "--unexpected" }));
+
 }
