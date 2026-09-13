@@ -109,3 +109,37 @@ internal static class DeploymentFailureFlow
     }
 }
 
+internal static class CommittedTransactionJournal
+{
+    internal static void Cleanup(Action delete)
+    {
+        try
+        {
+            delete();
+        }
+        catch (Exception exception)
+        {
+            throw new AgentException(
+                "Verified committed candidate is healthy but transaction journal cleanup failed; retaining committed recovery state for retry",
+                exception);
+        }
+    }
+}
+
+internal static class AttestationReceiverIdentity
+{
+    internal static string? FromConfiguredEndpoint(string endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint))
+            return null;
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+            return null;
+        return FromUri(uri);
+    }
+
+    internal static string FromUri(Uri endpoint)
+        => Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(endpoint.AbsoluteUri)));
+}
+
