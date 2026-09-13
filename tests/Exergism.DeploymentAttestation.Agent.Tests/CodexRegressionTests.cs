@@ -226,23 +226,43 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
-    public void MissingTrackedRegularFileFailsFsyncBarrier()
+    public void MissingTrackedRegularFileFailsVerification()
     {
         using var environment = TestEnvironment.Create();
         var missing = Path.Combine(environment.Root, "missing-tracked-file");
 
         TestAssert.Throws<AgentException>(
-            () => TrackedFileDurability.FsyncRegularFile(missing, "missing-tracked-file"));
+            () => TrackedFileDurability.ReadVerifiedRegularFile(missing, "missing-tracked-file"));
     }
 
     [TestMethod]
-    public void RegularTrackedFilePassesDescriptorBoundFsyncBarrier()
+    public void RegularTrackedFilePassesIdentityBoundFsyncBarrier()
     {
         using var environment = TestEnvironment.Create();
         var tracked = Path.Combine(environment.Root, "tracked");
         File.WriteAllText(tracked, "content");
 
-        TrackedFileDurability.FsyncRegularFile(tracked, "tracked");
+        var verified = TrackedFileDurability.ReadVerifiedRegularFile(tracked, "tracked");
+        TrackedFileDurability.FsyncRegularFile(tracked, "tracked", verified.Identity);
+    }
+
+    [TestMethod]
+    public void RegularFileSubstitutionFailsIdentityBoundFsyncBarrier()
+    {
+        using var environment = TestEnvironment.Create();
+        var tracked = Path.Combine(environment.Root, "tracked");
+        var original = Path.Combine(environment.Root, "original");
+        File.WriteAllText(tracked, "expected");
+
+        var verified = TrackedFileDurability.ReadVerifiedRegularFile(tracked, "tracked");
+        File.Move(tracked, original);
+        File.WriteAllText(tracked, "substitute");
+
+        TestAssert.Throws<AgentException>(
+            () => TrackedFileDurability.FsyncRegularFile(
+                tracked,
+                "tracked",
+                verified.Identity));
     }
 
     [TestMethod]
@@ -253,7 +273,7 @@ public sealed class CodexRegressionTests
         Directory.CreateDirectory(directory);
 
         TestAssert.Throws<AgentException>(
-            () => TrackedFileDurability.FsyncRegularFile(directory, "tracked"));
+            () => TrackedFileDurability.ReadVerifiedRegularFile(directory, "tracked"));
     }
 
     [TestMethod]
@@ -266,7 +286,7 @@ public sealed class CodexRegressionTests
         File.CreateSymbolicLink(link, target);
 
         TestAssert.Throws<AgentException>(
-            () => TrackedFileDurability.FsyncRegularFile(link, "tracked"));
+            () => TrackedFileDurability.ReadVerifiedRegularFile(link, "tracked"));
     }
 
     [TestMethod]
