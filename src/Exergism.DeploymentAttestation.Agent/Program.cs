@@ -59,10 +59,14 @@ static async Task<int> RunAsync(string[] args)
 
         using var http = HttpClientFactory.Create();
         var agent = new DeploymentAgent(config, http, healthStore);
-        var exitCode = await agent.ExecuteAsync(action);
+        var result = await agent.ExecuteAsync(action);
 
-        healthStore.CompleteSuccess();
-        return exitCode;
+        if (result.CycleSucceeded)
+            healthStore.CompleteSuccess();
+        else
+            healthStore.CompleteFailure(result.FailureReason ?? "Agent cycle failed");
+
+        return result.ExitCode;
     }
     catch (AgentException ex)
     {
