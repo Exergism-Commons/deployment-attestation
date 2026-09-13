@@ -64,6 +64,35 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void SeparateGitDirEqualsPathIsDetected()
+    {
+        const string protectedRoot = "/srv/id.exergism.org";
+        var argv = new[] { "git", "init", $"--separate-git-dir={protectedRoot}", "/tmp/work" };
+
+        Assert.IsTrue(GitProcessArguments.ReferencesProtectedPath(
+            argv,
+            value => value == protectedRoot));
+    }
+
+    [TestMethod]
+    public void SeparateGitDirSeparateValueIsDetected()
+    {
+        const string protectedRoot = "/srv/id.exergism.org";
+        var argv = new[] { "git", "init", "--separate-git-dir", protectedRoot, "/tmp/work" };
+
+        Assert.IsTrue(GitProcessArguments.ReferencesProtectedPath(
+            argv,
+            value => value == protectedRoot));
+    }
+
+    [TestMethod]
+    public void EmptyEqualsPathSelectorFailsClosed()
+        => TestAssert.Throws<AgentException>(
+            () => GitProcessArguments.ReferencesProtectedPath(
+                new[] { "git", "init", "--separate-git-dir=", "/tmp/work" },
+                _ => false));
+
+    [TestMethod]
     public void CoreWorktreeConfigIsDetected()
     {
         const string protectedRoot = "/srv/id.exergism.org";
