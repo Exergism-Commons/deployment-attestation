@@ -7,7 +7,7 @@ namespace Exergism.DeploymentAttestation.Agent.Tests;
 [TestClass]
 public sealed class DomainAndConfigTests
 {
-    [DataTestMethod]
+    [TestMethod]
     [DataRow(ACTION_RUN)]
     [DataRow(ACTION_UPDATE)]
     [DataRow(ACTION_ATTEST)]
