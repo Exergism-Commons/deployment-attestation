@@ -15,6 +15,28 @@ internal enum AgentAction
     SelfTest
 }
 
+
+
+internal readonly record struct AttestationResult(bool Produced, bool Healthy)
+{
+    internal static readonly AttestationResult FAILED = new(false, false);
+    internal static readonly AttestationResult HEALTHY = new(true, true);
+    internal static readonly AttestationResult UNHEALTHY = new(true, false);
+}
+
+internal readonly record struct AgentExecutionResult(int ExitCode, bool CycleSucceeded, string? FailureReason)
+{
+    internal static readonly AgentExecutionResult SUCCESS = new(0, true, null);
+
+    internal static AgentExecutionResult FromAttestation(AttestationResult result)
+        => result switch
+        {
+            { Produced: true, Healthy: true } => SUCCESS,
+            { Produced: true, Healthy: false } => new(1, true, null),
+            _ => new(1, false, "Attestation could not be produced")
+        };
+}
+
 internal static class AgentActionParser
 {
     internal static AgentAction ParseArgs(IReadOnlyList<string> args)
