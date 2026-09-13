@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
 
@@ -8,44 +9,48 @@ internal sealed class AgentConfig
     private AgentConfig(Dictionary<string, string> values)
     {
         string Required(string key)
-            => values.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v)
-                ? v
+            => values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
+                ? value
                 : throw new AgentException($"Missing required configuration: {key}");
 
         string Optional(string key, string fallback = "")
-            => values.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v) ? v : fallback;
+            => values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : fallback;
 
-        Service = Required("EC_SERVICE");
-        Repository = Required("EC_REPOSITORY");
-        EnvironmentName = Required("EC_ENVIRONMENT");
-        ReleaseTag = Required("EC_RELEASE_TAG");
-        AppDirectory = RequireAbsolutePath("EC_APP_DIR", Required("EC_APP_DIR"));
-        AppBinary = RequireAbsolutePath("EC_APP_BIN", Required("EC_APP_BIN"));
-        ServiceUnit = Required("EC_SERVICE_UNIT");
-        SourceRevisionFile = RequireAbsolutePath("EC_SOURCE_REVISION_FILE", Required("EC_SOURCE_REVISION_FILE"));
-        LocalUrl = RequireHttpUri("EC_LOCAL_URL", Required("EC_LOCAL_URL"));
-        PublicUrl = RequireHttpUri("EC_PUBLIC_URL", Required("EC_PUBLIC_URL"));
+        Service = Required(ENV_SERVICE);
+        Repository = Required(ENV_REPOSITORY);
+        EnvironmentName = Required(ENV_ENVIRONMENT);
+        ReleaseTag = Required(ENV_RELEASE_TAG);
+        AppDirectory = RequireAbsolutePath(ENV_APP_DIR, Required(ENV_APP_DIR));
+        AppBinary = RequireAbsolutePath(ENV_APP_BIN, Required(ENV_APP_BIN));
+        ServiceUnit = Required(ENV_SERVICE_UNIT);
+        SourceRevisionFile = RequireAbsolutePath(ENV_SOURCE_REVISION_FILE, Required(ENV_SOURCE_REVISION_FILE));
+        LocalUrl = RequireHttpUri(ENV_LOCAL_URL, Required(ENV_LOCAL_URL));
+        PublicUrl = RequireHttpUri(ENV_PUBLIC_URL, Required(ENV_PUBLIC_URL));
 
-        HostId = Optional("EC_HOST_ID", Dns.GetHostName());
+        HostId = Optional(ENV_HOST_ID, Dns.GetHostName());
         GitHubDownloadBase = new Uri(Optional(
-            "EC_GITHUB_DOWNLOAD_BASE",
+            ENV_GITHUB_DOWNLOAD_BASE,
             $"https://github.com/{Repository}/releases/download/{ReleaseTag}").TrimEnd('/') + "/", UriKind.Absolute);
-        ReleaseManifestName = Optional("EC_RELEASE_MANIFEST", "DEPLOYMENT_MANIFEST.json");
-        AttestationEndpoint = Optional("EC_ATTESTATION_ENDPOINT");
-        HmacSecretFile = Optional("EC_HMAC_SECRET_FILE");
-        SmokeScript = Optional("EC_SMOKE_SCRIPT");
-        SmokeTimeout = PositiveSeconds(Optional("EC_SMOKE_TIMEOUT", "60"), "EC_SMOKE_TIMEOUT");
-        DownloadTimeout = PositiveSeconds(Optional("EC_DOWNLOAD_TIMEOUT", "120"), "EC_DOWNLOAD_TIMEOUT");
-        CheckPublic = Optional("EC_CHECK_PUBLIC", "1") == "1";
+        ReleaseManifestName = Optional(ENV_RELEASE_MANIFEST, RELEASE_MANIFEST_DEFAULT);
+        AttestationEndpoint = Optional(ENV_ATTESTATION_ENDPOINT);
+        HmacSecretFile = Optional(ENV_HMAC_SECRET_FILE);
+        SmokeScript = Optional(ENV_SMOKE_SCRIPT);
+        SmokeTimeout = PositiveSeconds(Optional(ENV_SMOKE_TIMEOUT, "60"), ENV_SMOKE_TIMEOUT);
+        DownloadTimeout = PositiveSeconds(Optional(ENV_DOWNLOAD_TIMEOUT, "120"), ENV_DOWNLOAD_TIMEOUT);
+        AgentHealthMaxAge = PositiveSeconds(Optional(ENV_AGENT_HEALTH_MAX_AGE, "1500"), ENV_AGENT_HEALTH_MAX_AGE);
+        CheckPublic = Optional(ENV_CHECK_PUBLIC, "1") == "1";
         StateDirectory = RequireAbsolutePath(
-            "EC_STATE_DIR",
-            Optional("EC_STATE_DIR", $"/var/lib/ec-deployment-attestation/{Service}"));
+            ENV_STATE_DIR,
+            Optional(ENV_STATE_DIR, $"/var/lib/ec-deployment-attestation/{Service}"));
 
-        CurrentStateFile = Path.Combine(StateDirectory, "current-state.json");
-        TransactionFile = Path.Combine(StateDirectory, "transaction.json");
-        BackupDirectory = Path.Combine(StateDirectory, "backups");
-        StateLockPath = Path.Combine(StateDirectory, "agent.lock");
+        CurrentStateFile = Path.Combine(StateDirectory, FILE_CURRENT_STATE);
+        TransactionFile = Path.Combine(StateDirectory, FILE_TRANSACTION);
+        AgentHealthFile = Path.Combine(StateDirectory, FILE_AGENT_HEALTH);
+        BackupDirectory = Path.Combine(StateDirectory, DIRECTORY_BACKUPS);
+        StateLockPath = Path.Combine(StateDirectory, FILE_STATE_LOCK);
         CoordinationLockPath = $"/run/lock/ec-deployment-attestation-{Sanitize(Service)}.agent.lock";
+        AgentServiceUnit = $"ec-deployment-attestation@{Service}.service";
+        AgentTimerUnit = $"ec-deployment-attestation@{Service}.timer";
     }
 
     public string Service { get; }
@@ -66,14 +71,18 @@ internal sealed class AgentConfig
     public string SmokeScript { get; }
     public TimeSpan SmokeTimeout { get; }
     public TimeSpan DownloadTimeout { get; }
+    public TimeSpan AgentHealthMaxAge { get; }
     public bool CheckPublic { get; }
     public string StateDirectory { get; }
     public string CurrentStateFile { get; }
     public string TransactionFile { get; }
+    public string AgentHealthFile { get; }
     public string BackupDirectory { get; }
     public string StateLockPath { get; }
     public string CoordinationLockPath { get; }
-    public string InstallTransactionRoot { get; } = "/var/lib/ec-deployment-attestation/install";
+    public string AgentServiceUnit { get; }
+    public string AgentTimerUnit { get; }
+    public string InstallTransactionRoot { get; } = INSTALL_TRANSACTION_ROOT;
 
     public Uri ReleaseUri(string name) => new(GitHubDownloadBase, Uri.EscapeDataString(name));
 
@@ -91,17 +100,17 @@ internal sealed class AgentConfig
             if (line.StartsWith("export ", StringComparison.Ordinal))
                 line = line[7..].TrimStart();
 
-            var eq = line.IndexOf('=');
-            if (eq <= 0)
+            var equals = line.IndexOf('=');
+            if (equals <= 0)
                 throw new AgentException($"Invalid configuration line in {path}: {raw}");
 
-            var key = line[..eq].Trim();
+            var key = line[..equals].Trim();
             if (!IsName(key))
                 throw new AgentException($"Invalid configuration key: {key}");
-            values[key] = ParseValue(line[(eq + 1)..].Trim());
+            values[key] = ParseValue(line[(equals + 1)..].Trim());
         }
 
-        foreach (System.Collections.DictionaryEntry entry in System.Environment.GetEnvironmentVariables())
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
             var key = (string)entry.Key;
             if (key.StartsWith("EC_", StringComparison.Ordinal) && !values.ContainsKey(key))
@@ -119,16 +128,17 @@ internal sealed class AgentConfig
         if (value.Length >= 2 && value[0] == '"' && value[^1] == '"')
         {
             var inner = value[1..^1];
-            var sb = new StringBuilder(inner.Length);
+            var builder = new StringBuilder(inner.Length);
             for (var i = 0; i < inner.Length; i++)
             {
                 if (inner[i] != '\\' || i + 1 >= inner.Length)
                 {
-                    sb.Append(inner[i]);
+                    builder.Append(inner[i]);
                     continue;
                 }
+
                 var next = inner[++i];
-                sb.Append(next switch
+                builder.Append(next switch
                 {
                     'n' => '\n',
                     'r' => '\r',
@@ -138,25 +148,32 @@ internal sealed class AgentConfig
                     _ => throw new AgentException("Unsupported escape in configuration value")
                 });
             }
-            var parsed = sb.ToString();
-            if (parsed.Contains('$') || parsed.Contains('`'))
-                throw new AgentException("Shell expansion is not supported in agent configuration");
+
+            var parsed = builder.ToString();
+            RejectShellExpansion(parsed);
             return parsed;
         }
 
-        if (value.Contains('$') || value.Contains('`'))
-            throw new AgentException("Shell expansion is not supported in agent configuration");
+        RejectShellExpansion(value);
         return value;
     }
+
+    private static void RejectShellExpansion(string value)
+    {
+        if (value.Contains('$') || value.Contains('`'))
+            throw new AgentException("Shell expansion is not supported in agent configuration");
+    }
+
     private static bool IsName(string key)
     {
         if (key.Length == 0 || !(char.IsAsciiLetter(key[0]) || key[0] == '_'))
             return false;
-        return key.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
+        return key.All(character => char.IsAsciiLetterOrDigit(character) || character == '_');
     }
 
     private static string Sanitize(string value)
-        => new(value.Select(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-' ? c : '-').ToArray());
+        => new(value.Select(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '_' or '.' or '-' ? character : '-').ToArray());
 
     private static string RequireAbsolutePath(string key, string value)
         => Path.IsPathFullyQualified(value)
