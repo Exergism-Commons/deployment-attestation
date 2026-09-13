@@ -27,7 +27,7 @@ static async Task<int> RunAsync(string[] args)
 
         using var coordination = AgentLock.Acquire(
             config.CoordinationLockPath,
-            alreadyHeld: Environment.GetEnvironmentVariable(ENV_AGENT_COORDINATION_LOCK_HELD) == "1",
+            alreadyHeld: Environment.GetEnvironmentVariable(ENV_AGENT_COORDINATION_LOCK_HELD) == CONFIG_BOOLEAN_TRUE,
             recovery: action == AgentAction.Recover);
         if (coordination is null)
             return 0;
