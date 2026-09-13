@@ -14,7 +14,8 @@ internal sealed record AgentHealthState(
     string? LastSuccessAt,
     string? LastAttestationAt,
     bool? LastAttestationDelivered,
-    string? LastError);
+    string? LastError,
+    string? LastAttestationReceiverSha256 = null);
 
 internal sealed record AgentSelfHealthReport(
     string Status,
@@ -23,6 +24,19 @@ internal sealed record AgentSelfHealthReport(
 
 internal static class HealthCheckRunner
 {
+    internal static T? Try<T>(Func<T> check)
+        where T : class
+    {
+        try
+        {
+            return check();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     internal static async Task<bool> RunAsync(Func<Task<bool>> check)
     {
         try
@@ -63,7 +77,8 @@ internal sealed class AgentHealthStore(AgentConfig config)
             previous?.LastSuccessAt,
             previous?.LastAttestationAt,
             previous?.LastAttestationDelivered,
-            null));
+            null,
+            previous?.LastAttestationReceiverSha256));
     }
 
     internal void CompleteSuccess()
@@ -113,13 +128,25 @@ internal sealed class AgentHealthStore(AgentConfig config)
         });
     }
 
-    internal void RecordAttestation(bool delivered)
+    internal void RecordRemoteAttestation(bool delivered, string? receiverSha256)
     {
         var current = RequireCurrent();
         Write(current with
         {
             LastAttestationAt = UtcNowText(),
-            LastAttestationDelivered = delivered
+            LastAttestationDelivered = delivered,
+            LastAttestationReceiverSha256 = receiverSha256
+        });
+    }
+
+    internal void RecordLocalAttestation()
+    {
+        var current = RequireCurrent();
+        Write(current with
+        {
+            LastAttestationAt = UtcNowText(),
+            LastAttestationDelivered = null,
+            LastAttestationReceiverSha256 = null
         });
     }
 
@@ -154,7 +181,8 @@ internal sealed class AgentHealthStore(AgentConfig config)
             OptionalString(root, JSON_HEALTH_LAST_SUCCESS_AT),
             OptionalString(root, JSON_HEALTH_LAST_ATTESTATION_AT),
             OptionalBool(root, JSON_HEALTH_LAST_ATTESTATION_DELIVERED),
-            OptionalString(root, JSON_HEALTH_LAST_ERROR));
+            OptionalString(root, JSON_HEALTH_LAST_ERROR),
+            OptionalString(root, JSON_HEALTH_LAST_ATTESTATION_RECEIVER_SHA256));
     }
 
     private AgentHealthState RequireCurrent()
@@ -179,6 +207,7 @@ internal sealed class AgentHealthStore(AgentConfig config)
                 writer.WriteBoolean(JSON_HEALTH_LAST_ATTESTATION_DELIVERED, delivered);
             else
                 writer.WriteNull(JSON_HEALTH_LAST_ATTESTATION_DELIVERED);
+            WriteNullableString(writer, JSON_HEALTH_LAST_ATTESTATION_RECEIVER_SHA256, state.LastAttestationReceiverSha256);
             WriteNullableString(writer, JSON_HEALTH_LAST_ERROR, state.LastError);
             writer.WriteEndObject();
         }
@@ -260,8 +289,11 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
         var transactionClear = !File.Exists(_config.TransactionFile);
         var timerActive = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ACTIVE, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
         var timerEnabled = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ENABLED, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
+        var configuredReceiver = AttestationReceiverIdentity.FromConfiguredEndpoint(_config.AttestationEndpoint);
         var attestationDelivery = string.IsNullOrEmpty(_config.AttestationEndpoint) ||
-            (state?.LastAttestationDelivered == true &&
+            (configuredReceiver is not null &&
+             state?.LastAttestationDelivered == true &&
+             state.LastAttestationReceiverSha256 == configuredReceiver &&
              IsRecent(state.LastAttestationAt, _config.AgentHealthMaxAge));
 
         var checks = new Dictionary<string, bool>(StringComparer.Ordinal)
@@ -341,6 +373,7 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
                     writer.WriteBoolean(JSON_HEALTH_LAST_ATTESTATION_DELIVERED, delivered);
                 else
                     writer.WriteNull(JSON_HEALTH_LAST_ATTESTATION_DELIVERED);
+                WriteNullableString(writer, JSON_HEALTH_LAST_ATTESTATION_RECEIVER_SHA256, report.State.LastAttestationReceiverSha256);
                 WriteNullableString(writer, JSON_HEALTH_LAST_ERROR, report.State.LastError);
                 writer.WriteEndObject();
             }
