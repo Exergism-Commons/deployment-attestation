@@ -53,4 +53,49 @@ public sealed class CodexRegressionTests
         var argv = new[] { "git", "-c", $"core.worktree={protectedRoot}", "status" };
         Assert.IsTrue(GitProcessArguments.ReferencesProtectedPath(argv, value => value == protectedRoot));
     }
+
+    [TestMethod]
+    public void ConfigEnvCoreWorktreeIsDetected()
+    {
+        const string protectedRoot = "/srv/id.exergism.org";
+        var argv = new[] { "git", "--config-env=core.worktree=WORKTREE", "status" };
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["WORKTREE"] = protectedRoot
+        };
+
+        Assert.IsTrue(GitProcessArguments.ReferencesProtectedPath(
+            argv,
+            value => value == protectedRoot,
+            name => environment.TryGetValue(name, out var value) ? value : null));
+    }
+
+    [TestMethod]
+    public void GitConfigCountCoreWorktreeIsDetected()
+    {
+        const string protectedRoot = "/srv/id.exergism.org";
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [GIT_ENV_CONFIG_COUNT] = "1",
+            [$"{GIT_ENV_CONFIG_KEY_PREFIX}0"] = GIT_CONFIG_CORE_WORKTREE,
+            [$"{GIT_ENV_CONFIG_VALUE_PREFIX}0"] = protectedRoot
+        };
+
+        Assert.IsTrue(GitProcessEnvironment.ReferencesProtectedWorktree(
+            environment,
+            value => value == protectedRoot));
+    }
+
+    [TestMethod]
+    public void MalformedGitConfigCountFailsClosed()
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [GIT_ENV_CONFIG_COUNT] = "not-a-number"
+        };
+
+        TestAssert.Throws<AgentException>(
+            () => GitProcessEnvironment.ReferencesProtectedWorktree(environment, _ => false));
+    }
+
 }
