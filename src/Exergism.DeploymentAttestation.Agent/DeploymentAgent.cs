@@ -260,6 +260,7 @@ internal sealed class DeploymentAgent
         var tx = Protocol.ReadTransaction(_config.TransactionFile);
         if (tx.Phase == PHASE_COMMITTED)
         {
+            var committedCandidateVerified = false;
             try
             {
                 var state = Protocol.ReadCurrentState(_config.CurrentStateFile);
@@ -268,14 +269,21 @@ internal sealed class DeploymentAgent
                     await VerifyBaselineAsync())
                 {
                     await ResumeCommittedServiceAsync(tx.NewSourceCommit, tx.NewBinarySha256);
-                    Durability.DurableDelete(_config.TransactionFile);
-                    return;
+                    committedCandidateVerified = true;
                 }
             }
             catch
             {
-                // Fall through to the durable last-known-good rollback pair.
+                // Verification failure falls through to the durable last-known-good rollback pair.
             }
+
+            if (committedCandidateVerified)
+            {
+                CommittedTransactionJournal.Cleanup(
+                    () => Durability.DurableDelete(_config.TransactionFile));
+                return;
+            }
+
             Warn("Committed candidate failed final service verification; restoring last-known-good pair");
         }
 
@@ -447,7 +455,9 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             Warn($"Could not load release manifest: {ex.Message}");
-            _health.RecordAttestation(false);
+            _health.RecordRemoteAttestation(
+                delivered: false,
+                AttestationReceiverIdentity.FromConfiguredEndpoint(_config.AttestationEndpoint));
             return AttestationResult.FAILED;
         }
 
@@ -524,7 +534,7 @@ internal sealed class DeploymentAgent
         if (_config.CheckPublic)
             checks[CHECK_PUBLIC_HTTPS] = await ProbeAsync(_config.PublicUrl, TimeSpan.FromSeconds(15));
 
-        var diskActual = File.Exists(_config.AppBinary) ? Durability.Sha256(_config.AppBinary) : null;
+        var diskActual = HealthCheckRunner.Try(() => Durability.Sha256(_config.AppBinary));
         checks[CHECK_RUNTIME_PRESENT] = IsDigest(actual);
 
         try
@@ -603,7 +613,7 @@ internal sealed class DeploymentAgent
         if (string.IsNullOrEmpty(_config.AttestationEndpoint))
         {
             Console.WriteLine(Encoding.UTF8.GetString(body));
-            _health.RecordAttestation(true);
+            _health.RecordLocalAttestation();
             return;
         }
 
@@ -635,7 +645,9 @@ internal sealed class DeploymentAgent
                 using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
                 if (response.IsSuccessStatusCode)
                 {
-                    _health.RecordAttestation(true);
+                    _health.RecordRemoteAttestation(
+                        delivered: true,
+                        AttestationReceiverIdentity.FromUri(endpoint));
                     return;
                 }
                 last = new AgentException($"Attestation receiver returned {(int)response.StatusCode}");
@@ -649,7 +661,9 @@ internal sealed class DeploymentAgent
                 await Task.Delay(TimeSpan.FromSeconds(2));
         }
 
-        _health.RecordAttestation(false);
+        _health.RecordRemoteAttestation(
+            delivered: false,
+            AttestationReceiverIdentity.FromUri(endpoint));
         throw new AgentException("Attestation delivery failed after retries", last);
     }
 
