@@ -32,6 +32,9 @@ jobs:
       - name: Run managed self-test
         run: dotnet run --project src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release -- self-test
 
+      - name: Validate managed host config
+        run: EC_ATTESTATION_CONFIG="$PWD/examples/id.exergism.org.env.example" dotnet run --project src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release -- validate-config
+
       - name: Publish linux-x64 Native AOT
         run: |
           dotnet publish src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj \
@@ -43,6 +46,9 @@ jobs:
 
       - name: Run Native AOT self-test
         run: ./artifacts/linux-x64/ec-deployment-agent self-test
+
+      - name: Validate Native AOT host config
+        run: EC_ATTESTATION_CONFIG="$PWD/examples/id.exergism.org.env.example" ./artifacts/linux-x64/ec-deployment-agent validate-config
 
       - name: Upload Native AOT binary
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
