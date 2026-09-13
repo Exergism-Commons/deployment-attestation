@@ -289,12 +289,10 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
         var transactionClear = !File.Exists(_config.TransactionFile);
         var timerActive = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ACTIVE, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
         var timerEnabled = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ENABLED, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
-        var configuredReceiver = AttestationReceiverIdentity.FromConfiguredEndpoint(_config.AttestationEndpoint);
-        var attestationDelivery = string.IsNullOrEmpty(_config.AttestationEndpoint) ||
-            (configuredReceiver is not null &&
-             state?.LastAttestationDelivered == true &&
-             state.LastAttestationReceiverSha256 == configuredReceiver &&
-             IsRecent(state.LastAttestationAt, _config.AgentHealthMaxAge));
+        var attestationDelivery = IsDeliveryHealthy(
+            state,
+            _config.AttestationEndpoint,
+            _config.AgentHealthMaxAge);
 
         var checks = new Dictionary<string, bool>(StringComparer.Ordinal)
         {
@@ -310,6 +308,22 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
 
         var status = StatusFromChecks(checks, state);
         return new AgentSelfHealthReport(status, checks, state);
+    }
+
+    internal static bool IsDeliveryHealthy(
+        AgentHealthState? state,
+        string endpoint,
+        TimeSpan maxAge,
+        DateTimeOffset? now = null)
+    {
+        if (string.IsNullOrEmpty(endpoint))
+            return true;
+
+        var configuredReceiver = AttestationReceiverIdentity.FromConfiguredEndpoint(endpoint);
+        return configuredReceiver is not null &&
+               state?.LastAttestationDelivered == true &&
+               state.LastAttestationReceiverSha256 == configuredReceiver &&
+               IsRecent(state.LastAttestationAt, maxAge, now);
     }
 
     internal static string StatusFromChecks(
