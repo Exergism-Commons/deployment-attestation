@@ -25,12 +25,12 @@ internal sealed class DeploymentAgent
         _git = new GitRepository(config);
     }
 
-    public async Task<int> ExecuteAsync(AgentAction action)
+    public async Task<AgentExecutionResult> ExecuteAsync(AgentAction action)
     {
         if (action == AgentAction.Recover)
         {
             await RecoverTransactionAsync();
-            return 0;
+            return AgentExecutionResult.SUCCESS;
         }
 
         if (action == AgentAction.Run || action == AgentAction.Update)
@@ -38,14 +38,14 @@ internal sealed class DeploymentAgent
             await BootstrapStateAsync();
             await RecoverTransactionAsync();
             await UpdateReleaseAsync();
-            return 0;
+            return AgentExecutionResult.SUCCESS;
         }
 
         if (action == AgentAction.Attest)
         {
             await BootstrapStateAsync();
             await RecoverTransactionAsync();
-            return await AttestAsync() ? 0 : 1;
+            return AgentExecutionResult.FromAttestation(await AttestAsync());
         }
 
         throw new AgentException("Unsupported agent action");
@@ -377,7 +377,6 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             await RollbackAfterFailureAsync("Runtime switch/durability failed", ex);
-            await TryAttestAsync();
             return;
         }
 
@@ -393,7 +392,6 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             await RollbackAfterFailureAsync("Health/post-start integrity failed", ex);
-            await TryAttestAsync();
             return;
         }
 
@@ -404,7 +402,6 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             await RollbackAfterFailureAsync("Quiescent state commit failed", ex);
-            await TryAttestAsync();
             return;
         }
 
@@ -415,7 +412,6 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             await RollbackAfterFailureAsync("Could not persist committed recovery phase", ex);
-            await TryAttestAsync();
             return;
         }
 
@@ -426,7 +422,6 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             await RollbackAfterFailureAsync("Final service verification failed", ex);
-            await TryAttestAsync();
             return;
         }
 
@@ -435,20 +430,14 @@ internal sealed class DeploymentAgent
         await TryAttestAsync();
     }
 
-    private async Task RollbackAfterFailureAsync(string context, Exception original)
-    {
-        try
-        {
-            await RollbackTransactionAsync();
-        }
-        catch (Exception rollback)
-        {
-            throw new AgentException($"{context} and rollback failed", new AggregateException(original, rollback));
-        }
-        throw new AgentException(context, original);
-    }
+    private Task RollbackAfterFailureAsync(string context, Exception original)
+        => DeploymentFailureFlow.ThrowAfterRollbackAndReportAsync(
+            RollbackTransactionAsync,
+            TryAttestAsync,
+            context,
+            original);
 
-    private async Task<bool> AttestAsync()
+    private async Task<AttestationResult> AttestAsync()
     {
         ReleaseSnapshot release;
         try
@@ -460,7 +449,7 @@ internal sealed class DeploymentAgent
         {
             Warn($"Could not load release manifest: {ex.Message}");
             _health.RecordAttestation(false);
-            return false;
+            return AttestationResult.FAILED;
         }
 
         CurrentState state;
@@ -493,7 +482,9 @@ internal sealed class DeploymentAgent
             AGENT_VERSION);
 
         await SendAttestationAsync(body);
-        return status == STATUS_HEALTHY;
+        return status == STATUS_HEALTHY
+            ? AttestationResult.HEALTHY
+            : AttestationResult.UNHEALTHY;
     }
 
     private async Task<CheckSnapshot> CollectChecksAsync(ReleaseSnapshot release, CurrentState state)
