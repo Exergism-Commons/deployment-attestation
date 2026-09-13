@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deployment-attestation.exergism.org/spec/attestation-v0.1.schema.json",
+  "title": "Exergism Commons Deployment Attestation v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "observation_id",
+    "service",
+    "repository",
+    "environment",
+    "release_tag",
+    "deployed_commit",
+    "expected_commit",
+    "release_manifest_sha256",
+    "deployed_runtime_sha256",
+    "expected_runtime_sha256",
+    "status",
+    "checks",
+    "observed_at",
+    "agent_version"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "observation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "service": {"type": "string", "minLength": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "environment": {"type": "string", "minLength": 1},
+    "release_tag": {"type": "string", "minLength": 1},
+    "deployed_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "expected_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "release_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "deployed_runtime_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "expected_runtime_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"enum": ["healthy", "degraded", "unhealthy"]},
+    "checks": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "boolean"}
+    },
+    "observed_at": {"type": "string", "format": "date-time"},
+    "agent_version": {"type": "string", "minLength": 1},
+    "host_id": {"type": "string", "minLength": 1},
+    "details": {
+      "type": "object",
+      "additionalProperties": {"type": ["string", "number", "boolean", "null"]}
+    }
+  }
+}

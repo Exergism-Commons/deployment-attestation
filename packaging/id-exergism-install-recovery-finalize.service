@@ -1,0 +1,13 @@
+[Unit]
+Description=Finalize recovered Exergism Commons installer runtime state
+After=id-exergism-install-recovery.service
+ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.recovered
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ec-deployment-install-recovery-finalize
+User=root
+Group=root
+Restart=on-failure
+RestartSec=5s

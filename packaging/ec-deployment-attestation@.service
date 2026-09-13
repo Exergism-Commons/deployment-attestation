@@ -1,0 +1,15 @@
+[Unit]
+Description=Exergism Commons deployment attestation/update for %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=EC_ATTESTATION_CONFIG=/etc/ec-deployment-attestation/%i.env
+ExecStart=/usr/local/libexec/ec-deployment-agent run
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+UMask=0077
