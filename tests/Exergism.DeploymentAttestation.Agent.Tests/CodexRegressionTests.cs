@@ -48,6 +48,14 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void DeletedProcExeStillIdentifiesGit()
+    {
+        Assert.IsTrue(GitProcessIdentity.IsGitExecutable("git (deleted)"));
+        Assert.IsTrue(GitProcessIdentity.IsGitExecutable("git-remote-https (deleted)"));
+        Assert.IsFalse(GitProcessIdentity.IsGitExecutable("not-git (deleted)"));
+    }
+
+    [TestMethod]
     public void GitInitPositionalTargetIsDetected()
     {
         const string protectedRoot = "/srv/id.exergism.org";
@@ -91,6 +99,28 @@ public sealed class CodexRegressionTests
             () => GitProcessArguments.ReferencesProtectedPath(
                 new[] { "git", "init", "--separate-git-dir=", "/tmp/work" },
                 _ => false));
+
+    [TestMethod]
+    public void CheckoutIndexPrefixEqualsPathIsDetected()
+    {
+        const string protectedRoot = "/srv/id.exergism.org/";
+        var argv = new[] { "git", "checkout-index", "-a", $"--prefix={protectedRoot}" };
+
+        Assert.IsTrue(GitProcessArguments.ReferencesProtectedPath(
+            argv,
+            value => value == protectedRoot));
+    }
+
+    [TestMethod]
+    public void ArbitraryEqualsOptionPathIsDetected()
+    {
+        const string protectedRoot = "/srv/id.exergism.org";
+        var argv = new[] { "git", "future-command", $"--future-output={protectedRoot}" };
+
+        Assert.IsTrue(GitProcessArguments.ReferencesProtectedPath(
+            argv,
+            value => value == protectedRoot));
+    }
 
     [TestMethod]
     public void CoreWorktreeConfigIsDetected()
