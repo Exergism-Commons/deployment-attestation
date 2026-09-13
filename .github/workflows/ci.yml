@@ -312,6 +312,7 @@ jobs:
           grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
           grep -Fq 'previously active resolver could not be restored healthy after direct recovery' install/recover-id-exergism-install.sh
           grep -Fq '|| ! "$ARTIFACT_FENCE_AUDITOR"; then' install/recover-id-exergism-install.sh
+          grep -Fq 'quiesce_unit "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Restore timer activation only after the old generation is fully restored' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Timer enablement restore mismatch' install/recover-id-exergism-install.sh
@@ -333,6 +334,8 @@ jobs:
           grep -Fq 'Never' install/finalize-id-exergism-recovery.sh
           grep -Fq 'preserve any later explicit start' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Production resolver failed the live artifact-fence audit during recovery finalization.' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'quiesce_target_after_failed_validation()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Timer did not reach a provably quiescent terminal state.' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Could not re-check timer enablement after runtime restoration.' install/finalize-id-exergism-recovery.sh
@@ -378,10 +381,11 @@ jobs:
           retire = recovery.index('mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
           direct_start = recovery.index('if ! systemctl start "$TARGET_UNIT"')
           direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR"', direct_start)
+          direct_quiesce = recovery.index('quiesce_unit "$TARGET_UNIT"', direct_fence)
           direct_restart = recovery.index('previously active resolver could not be restored healthy after direct recovery')
           timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
           assert hard_quiesce < first_restore
-          assert validate < retire < direct_start < direct_fence < direct_restart < timer_restore
+          assert validate < retire < direct_start < direct_fence < direct_quiesce < direct_restart < timer_restore
 
           agent = Path('agent/ec-deployment-agent.sh').read_text()
           assert agent.index('recover)') < agent.index('run|update)')
@@ -422,10 +426,11 @@ jobs:
           finalizer_text = Path('install/finalize-id-exergism-recovery.sh').read_text()
           finalizer_health = finalizer_text.index('wait_target_healthy_active()')
           finalizer_fence = finalizer_text.index('"$ARTIFACT_FENCE_AUDITOR"', finalizer_health)
+          finalizer_quiesce = finalizer_text.index('quiesce_target_after_failed_validation || true', finalizer_fence)
           timer_terminal = finalizer_text.index('expected_active="$(expected_timer_active)"')
           enablement_recheck = finalizer_text.index('Could not re-check timer enablement after runtime restoration.')
           marker_retire = finalizer_text.index('mv "$RECOVERED_DIR" "$FINALIZED_DIR"')
-          assert finalizer_health < finalizer_fence < timer_terminal < enablement_recheck < marker_retire
+          assert finalizer_health < finalizer_fence < finalizer_quiesce < timer_terminal < enablement_recheck < marker_retire
           PY
 
       - name: Reject obvious committed secrets
