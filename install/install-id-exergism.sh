@@ -209,7 +209,7 @@ durable_sync_paths "$INSTALL_STATE_ROOT"
 
 tmp_manifest="$(mktemp)"
 trap 'rm -f "$tmp_manifest"' EXIT
-curl --retry 3 --retry-all-errors --connect-timeout 10 -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
+curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
 python3 "$ROOT/agent/validate-release-manifest.py" "$ROOT/spec/release-manifest-v0.1.schema.json" "$tmp_manifest" || {
   echo "runtime-main publishes a schema-invalid DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2
   exit 1
