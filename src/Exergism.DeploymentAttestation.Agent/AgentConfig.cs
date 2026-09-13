@@ -161,11 +161,17 @@ internal sealed class AgentConfig
             return parsed;
         }
 
-        if (value.Contains('#'))
-            throw new AgentException("Inline comments are not supported in agent configuration");
-
+        RejectUnsupportedUnquotedShellSyntax(value);
         RejectShellExpansion(value);
         return value;
+    }
+
+    private static void RejectUnsupportedUnquotedShellSyntax(string value)
+    {
+        if (value.Any(character =>
+                char.IsWhiteSpace(character) ||
+                character is '\\' or '\'' or '"' or '#' or ';' or '&' or '|' or '<' or '>' or '(' or ')' or '{' or '}' or '~'))
+            throw new AgentException("Unsupported shell syntax in unquoted agent configuration value");
     }
 
     internal static string RequireSafeAssetName(string key, string value)
