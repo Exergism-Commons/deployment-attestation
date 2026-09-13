@@ -464,7 +464,9 @@ if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
        || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null \
        || { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; } \
        || ! "$ARTIFACT_FENCE_AUDITOR"; then
-      systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+      if ! quiesce_unit "$TARGET_UNIT"; then
+        echo "CRITICAL: failed restored resolver could not be proven quiescent; recovered marker retained." >&2
+      fi
       echo "CRITICAL: previously active resolver could not be restored healthy after direct recovery; recovered marker retained." >&2
       exit 1
     fi
