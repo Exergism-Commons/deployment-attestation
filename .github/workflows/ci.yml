@@ -265,12 +265,10 @@ jobs:
           grep -Fq 'Recovery retained an actionable journal' install/install-id-exergism.sh
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
           grep -Fq 'target_was_active' install/install-id-exergism.sh
-          grep -Fq 'for key in agent smoke service_unit timer_unit env fence manifest_validator manifest_schema' install/install-id-exergism.sh
-          grep -Fq 'manifest_validator) printf' install/install-id-exergism.sh
-          grep -Fq 'manifest_schema) printf' install/install-id-exergism.sh
+          grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/install-id-exergism.sh
           grep -Fq 'cp -a -- "$path" "$stage/backups/$key"' install/install-id-exergism.sh
-          grep -Fq 'validate-release-manifest.py" "$MANIFEST_VALIDATOR"' install/install-id-exergism.sh
-          grep -Fq 'release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA"' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA" 0644' install/install-id-exergism.sh
           grep -Fq 'TARGET_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
           grep -Fq 'AGENT_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
           grep -Fq 'id-exergism-agent-recovery-interlock.conf' install/install-id-exergism.sh
@@ -355,6 +353,8 @@ jobs:
           text = Path('install/install-id-exergism.sh').read_text()
           validator = text.index('atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755')
           fence_auditor = text.index('atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755')
+          manifest_validator = text.index('atomic_install_root_file "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755')
+          manifest_schema = text.index('atomic_install_root_file "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA" 0644')
           finalizer = text.index('atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755')
           finalizer_unit = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644')
           helper = text.index('atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755')
@@ -365,6 +365,8 @@ jobs:
           agent_interlock = text.index('atomic_install_root_file "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK" 0644')
           assert validator < helper_gate < helper
           assert fence_auditor < finalizer < helper_gate < helper
+          assert manifest_validator < helper_gate < helper
+          assert manifest_schema < helper_gate < helper
           assert finalizer_unit < helper_gate < helper
           assert helper < recovery_unit < core_barrier < target_interlock
           assert helper < recovery_unit < core_barrier < agent_interlock
