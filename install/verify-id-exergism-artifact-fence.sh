@@ -21,6 +21,32 @@ pid="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)" ||
   exit 1
 }
 
+verify_runtime_process_binding() {
+  local candidate_pid="$1"
+  python3 - "$candidate_pid" "$APP_BIN" <<'PY'
+import os
+import stat
+import sys
+
+pid, runtime = sys.argv[1:]
+try:
+    live = os.stat(f"/proc/{pid}/exe")
+    configured = os.stat(runtime)
+except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+    raise SystemExit(1)
+
+if not stat.S_ISREG(configured.st_mode):
+    raise SystemExit(1)
+if (live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino):
+    raise SystemExit(1)
+PY
+}
+
+verify_runtime_process_binding "$pid" || {
+  echo "Production resolver MainPID is not executing the configured runtime object." >&2
+  exit 1
+}
+
 # Audit the live process mount namespace, not merely the unit-file settings.
 # Every mount at/below the source tree and the deepest mount covering the
 # runtime must be read-only.
@@ -83,6 +109,10 @@ pid_after="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/nul
 }
 [[ "$pid_after" == "$pid" ]] || {
   echo "Production resolver changed PID during artifact-fence audit." >&2
+  exit 1
+}
+verify_runtime_process_binding "$pid_after" || {
+  echo "Production resolver executable changed during artifact-fence audit." >&2
   exit 1
 }
 systemctl is-active --quiet "$TARGET_UNIT"
