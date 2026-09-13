@@ -5,6 +5,9 @@ namespace Exergism.DeploymentAttestation.Agent;
 
 internal static class ServiceQuiescence
 {
+    internal static bool TraversalFailureIsQuiescent(bool rootExists)
+        => !rootExists;
+
     internal static bool IsQuiescentSnapshot(
         string loadState,
         string activeState,
@@ -112,8 +115,9 @@ internal sealed class SystemdController(AgentConfig config)
         }
         catch (DirectoryNotFoundException)
         {
-            // systemd may remove an already-empty cgroup after we sampled ControlGroup.
-            return true;
+            // A nested cgroup can disappear while a sibling still contains processes.
+            // Accept the race only when the sampled service cgroup root itself is gone.
+            return ServiceQuiescence.TraversalFailureIsQuiescent(Directory.Exists(root));
         }
         catch
         {

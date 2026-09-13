@@ -230,6 +230,24 @@ public sealed class HealthAndStatusTests
     }
 
     [TestMethod]
+    public void RemoteDeliveryFailureInvalidatesPriorSuccessForCurrentReceiver()
+    {
+        using var environment = TestEnvironment.Create(withAttestationEndpoint: true);
+        var store = new AgentHealthStore(environment.Config);
+        var receiverIdentity = AttestationReceiverIdentity.FromConfiguredEndpoint(
+            environment.Config.AttestationEndpoint);
+
+        store.BeginCycle(AgentAction.Run);
+        store.RecordRemoteAttestation(delivered: true, receiverIdentity);
+        store.RecordRemoteAttestation(delivered: false, receiverIdentity);
+
+        var state = store.TryRead();
+        Assert.IsNotNull(state);
+        Assert.IsFalse(state.LastAttestationDelivered);
+        Assert.AreEqual(receiverIdentity, state.LastAttestationReceiverSha256);
+    }
+
+    [TestMethod]
     public void RemoteDeliveryHealthIsBoundToTheExactReceiver()
     {
         using var environment = TestEnvironment.Create(withAttestationEndpoint: true);

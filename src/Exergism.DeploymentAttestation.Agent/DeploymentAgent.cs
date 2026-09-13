@@ -9,16 +9,22 @@ namespace Exergism.DeploymentAttestation.Agent;
 internal sealed class DeploymentAgent
 {
     private readonly AgentConfig _config;
-    private readonly HttpClient _http;
+    private readonly HttpClient _getHttp;
+    private readonly HttpClient _attestationHttp;
     private readonly SystemdController _systemd;
     private readonly RuntimeInspector _runtime;
     private readonly GitRepository _git;
     private readonly AgentHealthStore _health;
 
-    public DeploymentAgent(AgentConfig config, HttpClient http, AgentHealthStore health)
+    public DeploymentAgent(
+        AgentConfig config,
+        HttpClient getHttp,
+        HttpClient attestationHttp,
+        AgentHealthStore health)
     {
         _config = config;
-        _http = http;
+        _getHttp = getHttp;
+        _attestationHttp = attestationHttp;
         _health = health;
         _systemd = new SystemdController(config);
         _runtime = new RuntimeInspector(config, _systemd);
@@ -619,12 +625,32 @@ internal sealed class DeploymentAgent
             return;
         }
 
-        if (string.IsNullOrEmpty(_config.HmacSecretFile) || !File.Exists(_config.HmacSecretFile))
-            throw new AgentException("HMAC secret not readable");
         if (!Uri.TryCreate(_config.AttestationEndpoint, UriKind.Absolute, out var endpoint))
             throw new AgentException("Invalid attestation endpoint");
 
-        var key = TrimAsciiWhitespace(await File.ReadAllBytesAsync(_config.HmacSecretFile));
+        var receiverIdentity = AttestationReceiverIdentity.FromUri(endpoint);
+        if (string.IsNullOrEmpty(_config.HmacSecretFile) || !File.Exists(_config.HmacSecretFile))
+        {
+            _health.RecordRemoteAttestation(delivered: false, receiverIdentity);
+            throw new AgentException("HMAC secret not readable");
+        }
+
+        byte[] key;
+        try
+        {
+            key = TrimAsciiWhitespace(await File.ReadAllBytesAsync(_config.HmacSecretFile));
+        }
+        catch (Exception ex)
+        {
+            _health.RecordRemoteAttestation(delivered: false, receiverIdentity);
+            throw new AgentException("HMAC secret not readable", ex);
+        }
+
+        if (key.Length == 0)
+        {
+            _health.RecordRemoteAttestation(delivered: false, receiverIdentity);
+            throw new AgentException("HMAC secret is empty");
+        }
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
         var bodyText = Encoding.UTF8.GetString(body);
         var signed = Encoding.UTF8.GetBytes(timestamp + "." + bodyText);
@@ -644,12 +670,12 @@ internal sealed class DeploymentAgent
                 request.Headers.Add(HEADER_IDEMPOTENCY_KEY, observationId);
 
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                using var response = await _attestationHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
                 if (response.IsSuccessStatusCode)
                 {
                     _health.RecordRemoteAttestation(
                         delivered: true,
-                        AttestationReceiverIdentity.FromUri(endpoint));
+                        receiverIdentity);
                     return;
                 }
                 last = new AgentException($"Attestation receiver returned {(int)response.StatusCode}");
@@ -665,7 +691,7 @@ internal sealed class DeploymentAgent
 
         _health.RecordRemoteAttestation(
             delivered: false,
-            AttestationReceiverIdentity.FromUri(endpoint));
+            receiverIdentity);
         throw new AgentException("Attestation delivery failed after retries", last);
     }
 
@@ -685,7 +711,7 @@ internal sealed class DeploymentAgent
             try
             {
                 using var cts = new CancellationTokenSource(_config.DownloadTimeout);
-                using var response = await _http.GetAsync(
+                using var response = await _getHttp.GetAsync(
                     _config.ReleaseUri(name),
                     HttpCompletionOption.ResponseHeadersRead,
                     cts.Token);
@@ -716,7 +742,7 @@ internal sealed class DeploymentAgent
         try
         {
             using var cts = new CancellationTokenSource(timeout);
-            using var response = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            using var response = await _getHttp.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             return response.IsSuccessStatusCode;
         }
         catch

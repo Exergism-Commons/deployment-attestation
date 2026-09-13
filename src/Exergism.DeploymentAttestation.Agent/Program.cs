@@ -57,8 +57,9 @@ static async Task<int> RunAsync(string[] args)
         healthStore = new AgentHealthStore(config);
         healthStore.BeginCycle(action);
 
-        using var http = HttpClientFactory.Create();
-        var agent = new DeploymentAgent(config, http, healthStore);
+        using var getHttp = HttpClientFactory.CreateGet();
+        using var attestationHttp = HttpClientFactory.CreateAttestation();
+        var agent = new DeploymentAgent(config, getHttp, attestationHttp, healthStore);
         var result = await agent.ExecuteAsync(action);
 
         AgentCycleLifecycle.Complete(healthStore, result);

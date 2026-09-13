@@ -23,6 +23,23 @@ public sealed class CodexRegressionTests
             SYSTEMD_STATE_LOADED, SYSTEMD_STATE_INACTIVE, "0", true, true));
 
     [TestMethod]
+    public void NestedCgroupTraversalFailureFailsClosedWhileRootStillExists()
+    {
+        Assert.IsFalse(ServiceQuiescence.TraversalFailureIsQuiescent(rootExists: true));
+        Assert.IsTrue(ServiceQuiescence.TraversalFailureIsQuiescent(rootExists: false));
+    }
+
+    [TestMethod]
+    public void SignedAttestationClientRejectsRedirectsWhileGetClientRetainsThem()
+    {
+        using var getHandler = HttpClientFactory.CreateGetHandler();
+        using var attestationHandler = HttpClientFactory.CreateAttestationHandler();
+
+        Assert.IsTrue(getHandler.AllowAutoRedirect);
+        Assert.IsFalse(attestationHandler.AllowAutoRedirect);
+    }
+
+    [TestMethod]
     public async Task ProbeExceptionsBecomeFailedChecks()
     {
         var result = await HealthCheckRunner.RunAsync(

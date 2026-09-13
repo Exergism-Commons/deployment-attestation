@@ -8,16 +8,25 @@ namespace Exergism.DeploymentAttestation.Agent;
 
 internal static class HttpClientFactory
 {
-    public static HttpClient Create()
-    {
-        var handler = new SocketsHttpHandler
+    public static HttpClient CreateGet()
+        => new(CreateGetHandler(), disposeHandler: true);
+
+    public static HttpClient CreateAttestation()
+        => new(CreateAttestationHandler(), disposeHandler: true);
+
+    internal static SocketsHttpHandler CreateGetHandler()
+        => CreateHandler(allowAutoRedirect: true);
+
+    internal static SocketsHttpHandler CreateAttestationHandler()
+        => CreateHandler(allowAutoRedirect: false);
+
+    private static SocketsHttpHandler CreateHandler(bool allowAutoRedirect)
+        => new()
         {
             ConnectTimeout = TimeSpan.FromSeconds(10),
             AutomaticDecompression = DecompressionMethods.All,
-            AllowAutoRedirect = true
+            AllowAutoRedirect = allowAutoRedirect
         };
-        return new HttpClient(handler, disposeHandler: true);
-    }
 }
 
 internal sealed record ProcessResult(int ExitCode, string StdOut, string StdErr)
