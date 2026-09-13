@@ -354,7 +354,6 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             await RollbackAfterFailureAsync("Source switch/durability failed", ex);
-            await TryAttestAsync();
             return;
         }
 
@@ -461,7 +460,7 @@ internal sealed class DeploymentAgent
         {
             Warn($"Could not read current state: {ex.Message}");
             _health.RecordAttestation(false);
-            return false;
+            return AttestationResult.FAILED;
         }
 
         var snapshot = await CollectChecksAsync(release, state);
