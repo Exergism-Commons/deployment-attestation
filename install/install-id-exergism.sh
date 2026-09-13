@@ -17,6 +17,9 @@ AGENT="/usr/local/libexec/ec-deployment-agent"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
+ARTIFACT_FENCE_AUDITOR="/usr/local/libexec/ec-id-production-artifact-fence"
+MANIFEST_VALIDATOR="/usr/local/libexec/ec-release-manifest-validator"
+MANIFEST_SCHEMA="/usr/local/libexec/release-manifest-v0.1.schema.json"
 APP_DIR="/srv/id.exergism.org"
 APP_BIN="/usr/local/bin/idresolver"
 AGENT_SERVICE_UNIT="/etc/systemd/system/ec-deployment-attestation@.service"
@@ -160,9 +163,10 @@ fi
 # a host where the old helper continues to run; never expose a helper whose
 # finalizer/validator does not yet exist durably.
 atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755
+atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755
 atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755
 atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644
-durable_sync_paths   "$VALIDATOR"   "$RECOVERY_FINALIZER"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
+durable_sync_paths   "$VALIDATOR"   "$ARTIFACT_FENCE_AUDITOR"   "$RECOVERY_FINALIZER"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
 systemctl daemon-reload
 
@@ -204,6 +208,10 @@ durable_sync_paths "$INSTALL_STATE_ROOT"
 tmp_manifest="$(mktemp)"
 trap 'rm -f "$tmp_manifest"' EXIT
 curl --retry 3 --retry-all-errors --connect-timeout 10 -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
+python3 "$ROOT/agent/validate-release-manifest.py" "$ROOT/spec/release-manifest-v0.1.schema.json" "$tmp_manifest" || {
+  echo "runtime-main publishes a schema-invalid DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2
+  exit 1
+}
 python3 - "$tmp_manifest" <<'PY'
 import json, pathlib, re, sys
 m = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -436,84 +444,7 @@ fi
 target_was_active="$(capture_active_baseline "$TARGET_UNIT")"
 
 verify_production_artifact_fence() {
-  local pid pid_after
-  if ! pid="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)"; then
-    echo "Could not determine production resolver MainPID." >&2
-    return 1
-  fi
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || {
-    echo "Production resolver has no live MainPID." >&2
-    return 1
-  }
-
-  # Audit the target process mount namespace as a whole. Requiring only the
-  # mount containing APP_DIR misses ReadWritePaths/bind mounts nested beneath
-  # the source tree. Every mount whose target is APP_DIR or a descendant must
-  # be ro, and the deepest mount covering APP_BIN must also be ro.
-  nsenter --target "$pid" --mount -- python3 - "$APP_DIR" "$APP_BIN" <<'PY' || return 1
-import os
-import re
-import sys
-
-app_dir = os.path.normpath(sys.argv[1])
-app_bin = os.path.normpath(sys.argv[2])
-if not (app_dir.startswith("/") and app_bin.startswith("/")):
-    raise SystemExit("deployment artifact paths must be absolute")
-
-_octal = re.compile(r"\\([0-7]{3})")
-def unescape_mountinfo(value):
-    return _octal.sub(lambda m: chr(int(m.group(1), 8)), value)
-
-mounts = []
-with open("/proc/self/mountinfo", "r", encoding="utf-8") as fh:
-    for raw in fh:
-        left, sep, _right = raw.rstrip("\n").partition(" - ")
-        if not sep:
-            raise SystemExit("malformed mountinfo")
-        fields = left.split()
-        if len(fields) < 6:
-            raise SystemExit("malformed mountinfo fields")
-        target = os.path.normpath(unescape_mountinfo(fields[4]))
-        options = set(fields[5].split(","))
-        mounts.append((target, options))
-
-def contains(root, path):
-    try:
-        return os.path.commonpath((root, path)) == root
-    except ValueError:
-        return False
-
-def deepest_cover(path):
-    candidates = [(target, opts) for target, opts in mounts if contains(target, path)]
-    if not candidates:
-        raise SystemExit(f"no mount covers {path}")
-    return max(candidates, key=lambda item: len(item[0]))
-
-source_cover, source_opts = deepest_cover(app_dir)
-if "ro" not in source_opts or "rw" in source_opts:
-    raise SystemExit(f"source root is writable via {source_cover}: {sorted(source_opts)}")
-
-for target, options in mounts:
-    if target == app_dir or (contains(app_dir, target) and target != app_dir):
-        if "ro" not in options or "rw" in options:
-            raise SystemExit(f"writable source submount {target}: {sorted(options)}")
-
-binary_cover, binary_opts = deepest_cover(app_bin)
-if "ro" not in binary_opts or "rw" in binary_opts:
-    raise SystemExit(f"runtime is writable via {binary_cover}: {sorted(binary_opts)}")
-PY
-
-  # Do not accept evidence from a process that exited/restarted while its
-  # namespace was being inspected.
-  if ! pid_after="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)"; then
-    echo "Could not re-check production resolver MainPID after fence audit." >&2
-    return 1
-  fi
-  [[ "$pid_after" == "$pid" ]] || {
-    echo "Production resolver changed PID during artifact-fence audit." >&2
-    return 1
-  }
-  systemctl is-active --quiet "$TARGET_UNIT"
+  "$ARTIFACT_FENCE_AUDITOR"
 }
 
 artifact_path() {
@@ -524,6 +455,8 @@ artifact_path() {
     timer_unit) printf '%s\n' "$AGENT_TIMER_UNIT" ;;
     env) printf '%s\n' "$ENV_FILE" ;;
     fence) printf '%s\n' "$FENCE_DROPIN" ;;
+    manifest_validator) printf '%s\n' "$MANIFEST_VALIDATOR" ;;
+    manifest_schema) printf '%s\n' "$MANIFEST_SCHEMA" ;;
     *) return 1 ;;
   esac
 }
@@ -541,7 +474,7 @@ create_install_transaction() {
   printf '%s\n' "$timer_was_active" > "$stage/timer_was_active"
   printf '%s\n' "$target_was_active" > "$stage/target_was_active"
 
-  for key in agent smoke service_unit timer_unit env fence; do
+  for key in agent smoke service_unit timer_unit env fence manifest_validator manifest_schema; do
     path="$(artifact_path "$key")"
     present=0
     if [[ -e "$path" || -L "$path" ]]; then
@@ -585,7 +518,7 @@ PY
 
 persist_installed_generation() {
   local timer_wants="/etc/systemd/system/timers.target.wants"
-  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
+  durable_sync_paths     "$AGENT" "$SMOKE" "$MANIFEST_VALIDATOR" "$MANIFEST_SCHEMA" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
   durable_sync_ancestor_chain     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR" "$timer_wants"
 }
 
@@ -630,6 +563,8 @@ stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
 install -o root -g root -m 0755 "$ROOT/agent/ec-deployment-agent.sh" "$AGENT"
+install -o root -g root -m 0755 "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR"
+install -o root -g root -m 0644 "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA"
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
