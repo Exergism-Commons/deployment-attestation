@@ -4,6 +4,20 @@ using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
 
+internal static class TrackedFileDurability
+{
+    internal static void FsyncRegularFile(string path, string relativePath)
+    {
+        if (!File.Exists(path))
+            throw new AgentException($"Tracked regular file disappeared during fsync: {relativePath}");
+
+        if (new FileInfo(path).LinkTarget is not null)
+            throw new AgentException($"Tracked regular file became a symlink during fsync: {relativePath}");
+
+        Durability.FsyncFile(path);
+    }
+}
+
 internal sealed class GitRepository(AgentConfig config)
 {
     private readonly AgentConfig _config = config;
@@ -37,6 +51,7 @@ internal sealed class GitRepository(AgentConfig config)
     {
         await VerifySourceTreeExactAsync(commit);
         await FsyncRepositoryAsync(_config.AppDirectory, commit);
+        await VerifySourceTreeExactAsync(commit);
     }
 
     public async Task ReconcileStaleGitLocksAsync()
@@ -206,8 +221,23 @@ internal sealed class GitRepository(AgentConfig config)
                 continue;
             }
 
-            if (File.Exists(path) && new FileInfo(path).LinkTarget is null)
-                Durability.FsyncFile(path);
+            if (entry.Kind != GIT_OBJECT_BLOB)
+                throw new AgentException($"Unexpected tree object during fsync {entry.Kind}: {entry.RelativePath}");
+
+            if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
+            {
+                TrackedFileDurability.FsyncRegularFile(path, entry.RelativePath);
+                continue;
+            }
+
+            if (entry.Mode == GIT_MODE_SYMLINK)
+            {
+                if (new FileInfo(path).LinkTarget is null)
+                    throw new AgentException($"Tracked symlink changed type during fsync: {entry.RelativePath}");
+                continue;
+            }
+
+            throw new AgentException($"Unsupported Git mode during fsync {entry.Mode}: {entry.RelativePath}");
         }
 
         foreach (var directory in directories.OrderByDescending(x => x.Count(c => c == Path.DirectorySeparatorChar)))
