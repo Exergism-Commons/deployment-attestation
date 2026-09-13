@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
 
@@ -323,39 +324,25 @@ internal sealed class GitRepository(AgentConfig config)
         var environment = await ReadProcessEnvironmentAsync(procDir);
         foreach (var key in new[]
                  {
-                     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                     "GIT_OBJECT_DIRECTORY", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"
+                     GIT_ENV_DIR, GIT_ENV_WORK_TREE, GIT_ENV_COMMON_DIR, GIT_ENV_INDEX_FILE,
+                     GIT_ENV_OBJECT_DIRECTORY, GIT_ENV_CONFIG_SYSTEM, GIT_ENV_CONFIG_GLOBAL
                  })
         {
             if (environment.TryGetValue(key, out var value) && PointsIntoProtected(value, cwd, protectedRoots))
                 return true;
         }
 
-        if (environment.TryGetValue("GIT_ALTERNATE_OBJECT_DIRECTORIES", out var alternatives))
+        if (environment.TryGetValue(GIT_ENV_ALTERNATE_OBJECT_DIRECTORIES, out var alternatives))
         {
             foreach (var value in alternatives.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
                 if (PointsIntoProtected(value, cwd, protectedRoots))
                     return true;
         }
 
-        for (var i = 1; i < argv.Length; i++)
-        {
-            var arg = argv[i];
-            string? value = null;
-            if (arg.StartsWith("--git-dir=", StringComparison.Ordinal) || arg.StartsWith("--work-tree=", StringComparison.Ordinal))
-                value = arg[(arg.IndexOf('=') + 1)..];
-            else if (arg is "--git-dir" or "--work-tree" or "-C")
-            {
-                if (++i >= argv.Length)
-                    throw new AgentException($"Malformed Git selector in process {Path.GetFileName(procDir)}");
-                value = argv[i];
-            }
-            else if (arg.StartsWith("-C", StringComparison.Ordinal) && arg.Length > 2)
-                value = arg[2..];
-
-            if (value is not null && PointsIntoProtected(value, cwd, protectedRoots))
-                return true;
-        }
+        if (GitProcessArguments.ReferencesProtectedPath(
+                argv,
+                value => PointsIntoProtected(value, cwd, protectedRoots)))
+            return true;
 
         var fdDir = Path.Combine(procDir, "fd");
         try
@@ -384,13 +371,13 @@ internal sealed class GitRepository(AgentConfig config)
         };
         foreach (var pair in environment)
         {
-            if (pair.Key is "HOME" or "XDG_CONFIG_HOME" or "GIT_DIR" or "GIT_WORK_TREE" or
-                "GIT_COMMON_DIR" or "GIT_INDEX_FILE" or "GIT_OBJECT_DIRECTORY" or
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES" or "GIT_CONFIG_COUNT" or "GIT_CONFIG_PARAMETERS" or
-                "GIT_CONFIG_SYSTEM" or "GIT_CONFIG_GLOBAL" or "GIT_CONFIG_NOSYSTEM" or
-                "GIT_CEILING_DIRECTORIES" or "GIT_DISCOVERY_ACROSS_FILESYSTEM" ||
-                pair.Key.StartsWith("GIT_CONFIG_KEY_", StringComparison.Ordinal) ||
-                pair.Key.StartsWith("GIT_CONFIG_VALUE_", StringComparison.Ordinal))
+            if (pair.Key is "HOME" or "XDG_CONFIG_HOME" or GIT_ENV_DIR or GIT_ENV_WORK_TREE or
+                GIT_ENV_COMMON_DIR or GIT_ENV_INDEX_FILE or GIT_ENV_OBJECT_DIRECTORY or
+                GIT_ENV_ALTERNATE_OBJECT_DIRECTORIES or GIT_ENV_CONFIG_COUNT or GIT_ENV_CONFIG_PARAMETERS or
+                GIT_ENV_CONFIG_SYSTEM or GIT_ENV_CONFIG_GLOBAL or GIT_ENV_CONFIG_NOSYSTEM or
+                GIT_ENV_CEILING_DIRECTORIES or GIT_ENV_DISCOVERY_ACROSS_FILESYSTEM ||
+                pair.Key.StartsWith(GIT_ENV_CONFIG_KEY_PREFIX, StringComparison.Ordinal) ||
+                pair.Key.StartsWith(GIT_ENV_CONFIG_VALUE_PREFIX, StringComparison.Ordinal))
                 probeEnv[pair.Key] = pair.Value;
         }
 
@@ -436,7 +423,7 @@ internal sealed class GitRepository(AgentConfig config)
 
         probeArgs.AddRange(["-c", "safe.directory=*", "rev-parse", "--path-format=absolute", "--show-toplevel"]);
         var probe = await ProcessRunner.RunAsync(
-            "git", probeArgs, TimeSpan.FromSeconds(2), cwd, probeEnv, clearEnvironment: true);
+            COMMAND_GIT, probeArgs, TimeSpan.FromSeconds(2), cwd, probeEnv, clearEnvironment: true);
         if (probe.Success)
         {
             var effective = probe.StdOut.Trim();
@@ -445,7 +432,7 @@ internal sealed class GitRepository(AgentConfig config)
             if (protectedRoots.Any(root => PathsIntersect(effective, root)))
                 return true;
         }
-        else if (environment.ContainsKey("GIT_CONFIG_PARAMETERS"))
+        else if (environment.ContainsKey(GIT_ENV_CONFIG_PARAMETERS))
         {
             throw new AgentException("Cannot resolve GIT_CONFIG_PARAMETERS for live Git process");
         }
@@ -507,7 +494,7 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task<List<TreeEntry>> ReadTreeAsync(string repository, string commit)
     {
         var bytes = await ProcessRunner.RunBytesAsync(
-            "git",
+            COMMAND_GIT,
             ["-C", repository, "ls-tree", "-rz", "--full-tree", commit],
             TimeSpan.FromSeconds(30));
 
@@ -550,7 +537,7 @@ internal sealed class GitRepository(AgentConfig config)
     {
         var all = new List<string> { "-C", repository };
         all.AddRange(args);
-        var result = await ProcessRunner.RunAsync("git", all, TimeSpan.FromMinutes(2));
+        var result = await ProcessRunner.RunAsync(COMMAND_GIT, all, TimeSpan.FromMinutes(2));
         if (required && !result.Success)
             throw new AgentException($"Git command failed in {repository}: {result.StdErr.Trim()}");
         return result;
@@ -646,3 +633,81 @@ internal sealed class GitRepository(AgentConfig config)
 
     private sealed record TreeEntry(string Mode, string Kind, string ObjectId, string RelativePath);
 }
+
+internal static class GitProcessArguments
+{
+    internal static bool ReferencesProtectedPath(
+        IReadOnlyList<string> argv,
+        Func<string, bool> pointsIntoProtected)
+    {
+        for (var index = 1; index < argv.Count; index++)
+        {
+            var argument = argv[index];
+
+            if (argument is GIT_FLAG_DIR or GIT_FLAG_WORK_TREE or GIT_FLAG_CHDIR)
+            {
+                if (++index >= argv.Count)
+                    throw new AgentException("Malformed Git path selector");
+                if (pointsIntoProtected(argv[index]))
+                    return true;
+                continue;
+            }
+
+            if (argument.StartsWith(GIT_FLAG_DIR + "=", StringComparison.Ordinal) ||
+                argument.StartsWith(GIT_FLAG_WORK_TREE + "=", StringComparison.Ordinal))
+            {
+                var value = argument[(argument.IndexOf('=') + 1)..];
+                if (pointsIntoProtected(value))
+                    return true;
+                continue;
+            }
+
+            if (argument.StartsWith(GIT_FLAG_CHDIR, StringComparison.Ordinal) &&
+                argument.Length > GIT_FLAG_CHDIR.Length)
+            {
+                if (pointsIntoProtected(argument[GIT_FLAG_CHDIR.Length..]))
+                    return true;
+                continue;
+            }
+
+            if (argument == GIT_FLAG_CONFIG)
+            {
+                if (++index >= argv.Count)
+                    throw new AgentException("Malformed Git config selector");
+                if (CoreWorktreePointsIntoProtected(argv[index], pointsIntoProtected))
+                    return true;
+                continue;
+            }
+
+            if (argument.StartsWith(GIT_FLAG_CONFIG, StringComparison.Ordinal) &&
+                argument.Length > GIT_FLAG_CONFIG.Length)
+            {
+                if (CoreWorktreePointsIntoProtected(
+                        argument[GIT_FLAG_CONFIG.Length..],
+                        pointsIntoProtected))
+                    return true;
+                continue;
+            }
+
+            if (!argument.StartsWith('-') && pointsIntoProtected(argument))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool CoreWorktreePointsIntoProtected(
+        string config,
+        Func<string, bool> pointsIntoProtected)
+    {
+        var equals = config.IndexOf('=');
+        if (equals <= 0)
+            return false;
+
+        var key = config[..equals];
+        var value = config[(equals + 1)..];
+        return key.Equals(GIT_CONFIG_CORE_WORKTREE, StringComparison.OrdinalIgnoreCase) &&
+               pointsIntoProtected(value);
+    }
+}
+
