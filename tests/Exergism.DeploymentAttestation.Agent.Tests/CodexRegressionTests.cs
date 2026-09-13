@@ -133,4 +133,29 @@ public sealed class CodexRegressionTests
             HostIdentity.SelectDefault("   ", "node"));
     }
 
+
+    [TestMethod]
+    public void CommittedJournalCleanupFailureIsPropagatedWithoutRollbackSemantics()
+    {
+        var deleteCalls = 0;
+
+        TestAssert.Throws<AgentException>(
+            () => CommittedTransactionJournal.Cleanup(() =>
+            {
+                deleteCalls++;
+                throw new IOException("fsync failed");
+            }));
+
+        Assert.AreEqual(1, deleteCalls);
+    }
+
+    [TestMethod]
+    public void BinaryHashIoFailureBecomesMissingProbeValue()
+    {
+        var digest = HealthCheckRunner.Try<string>(
+            () => throw new IOException("binary disappeared"));
+
+        Assert.IsNull(digest);
+    }
+
 }
