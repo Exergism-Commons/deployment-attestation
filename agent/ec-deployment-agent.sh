@@ -582,33 +582,57 @@ running_runtime_sha256() {
   printf '%s\n' "$digest"
 }
 
-runtime_process_binding() {
-  local pid pid_after
+bound_running_runtime_sha256() {
+  local pid pid_after digest
   pid="$(service_main_pid)" || return 1
-  python3 - "$pid" "$EC_APP_BIN" <<'PY' || return 1
+  digest="$(python3 - "$pid" "$EC_APP_BIN" <<'PY'
+import hashlib
 import os
 import stat
 import sys
 
-pid = sys.argv[1]
-runtime = sys.argv[2]
+pid, runtime = sys.argv[1:]
+fd = None
 try:
-    live = os.stat(f"/proc/{pid}/exe")
+    fd = os.open(f"/proc/{pid}/exe", os.O_RDONLY)
+    live = os.fstat(fd)
     configured = os.stat(runtime)
-except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
-    raise SystemExit(1)
+    if not stat.S_ISREG(configured.st_mode):
+        raise RuntimeError("configured runtime is not a regular file")
 
-if not stat.S_ISREG(configured.st_mode):
-    raise SystemExit(1)
+    # No implicit wrapper model: MainPID must execute the exact filesystem
+    # object configured as EC_APP_BIN. An atomic path replacement leaves the
+    # running executable on the old inode and therefore fails this check.
+    if (live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino):
+        raise RuntimeError("MainPID executable does not match EC_APP_BIN")
 
-# No implicit wrapper model: MainPID must execute the exact filesystem object
-# configured as EC_APP_BIN. If the binary path was replaced after exec, the
-# live executable retains the old inode and this fails closed.
-if (live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino):
+    h = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        h.update(chunk)
+
+    # The opened executable object itself must remain stable while hashed.
+    after = os.fstat(fd)
+    if (after.st_dev, after.st_ino, after.st_size) != (live.st_dev, live.st_ino, live.st_size):
+        raise RuntimeError("live executable changed while hashing")
+    print(h.hexdigest())
+except (FileNotFoundError, PermissionError, ProcessLookupError, OSError, RuntimeError):
     raise SystemExit(1)
+finally:
+    if fd is not None:
+        os.close(fd)
 PY
+)" || return 1
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
   pid_after="$(service_main_pid)" || return 1
-  [[ "$pid_after" == "$pid" ]]
+  [[ "$pid_after" == "$pid" ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+runtime_process_binding() {
+  bound_running_runtime_sha256 >/dev/null
 }
 
 service_cgroup_has_processes() {
@@ -731,13 +755,18 @@ PY
   [[ "$pid_after" == "$pid" ]] || return 1
 }
 
-live_runtime_invariants() {
-  local pid_before pid_after
+live_runtime_snapshot_sha256() {
+  local pid_before pid_after digest
   pid_before="$(service_main_pid)" || return 1
   artifact_write_fence || return 1
-  runtime_process_binding || return 1
+  digest="$(bound_running_runtime_sha256)" || return 1
   pid_after="$(service_main_pid)" || return 1
-  [[ "$pid_after" == "$pid_before" ]]
+  [[ "$pid_after" == "$pid_before" ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+live_runtime_invariants() {
+  live_runtime_snapshot_sha256 >/dev/null
 }
 
 verify_baseline() {
@@ -1277,9 +1306,14 @@ collect_checks() {
   fi
 
   systemctl is-active --quiet "$EC_SERVICE_UNIT" && systemd=true
-  if live_runtime_invariants; then
+  actual="$(live_runtime_snapshot_sha256 2>/dev/null || true)"
+  if [[ "$actual" =~ ^[0-9a-f]{64}$ ]]; then
     artifact_fence=true
     runtime_process=true
+  else
+    # Preserve evidence about what MainPID actually executes even when the
+    # configured-path binding or mount fence is invalid.
+    actual="$(running_runtime_sha256 2>/dev/null || true)"
   fi
   curl -fsS --max-time 10 "$EC_LOCAL_URL" >/dev/null 2>&1 && local_http=true
   if [[ "$EC_CHECK_PUBLIC" == 1 ]]; then
@@ -1290,7 +1324,6 @@ collect_checks() {
   # deployed_runtime_sha256 is the digest of the executable held by MainPID,
   # not merely bytes present at EC_APP_BIN. Keep the configured-file digest as
   # an independent consistency input.
-  actual="$(running_runtime_sha256 2>/dev/null || true)"
   disk_actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
   [[ "$actual" =~ ^[0-9a-f]{64}$ ]] && runtime_present=true
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
