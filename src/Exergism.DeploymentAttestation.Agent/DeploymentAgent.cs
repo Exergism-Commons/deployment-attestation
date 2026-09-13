@@ -2,22 +2,24 @@ using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
 
 internal sealed class DeploymentAgent
 {
-    private const string AgentVersion = "0.2.0-aot-pre1";
     private readonly AgentConfig _config;
     private readonly HttpClient _http;
     private readonly SystemdController _systemd;
     private readonly RuntimeInspector _runtime;
     private readonly GitRepository _git;
+    private readonly AgentHealthStore _health;
 
-    public DeploymentAgent(AgentConfig config, HttpClient http)
+    public DeploymentAgent(AgentConfig config, HttpClient http, AgentHealthStore health)
     {
         _config = config;
         _http = http;
+        _health = health;
         _systemd = new SystemdController(config);
         _runtime = new RuntimeInspector(config, _systemd);
         _git = new GitRepository(config);
@@ -39,7 +41,7 @@ internal sealed class DeploymentAgent
             return 0;
         }
 
-        if (action == AgentAction.Attest || action == AgentAction.Health)
+        if (action == AgentAction.Attest)
         {
             await BootstrapStateAsync();
             await RecoverTransactionAsync();
@@ -54,7 +56,7 @@ internal sealed class DeploymentAgent
         if (File.Exists(_config.CurrentStateFile))
             return;
 
-        var activeState = await _systemd.ShowAsync("ActiveState");
+        var activeState = await _systemd.ShowAsync(SYSTEMD_ACTIVE_STATE);
         var pid = await TryMainPidAsync();
 
         if (pid is not null)
@@ -62,10 +64,10 @@ internal sealed class DeploymentAgent
 
         switch (activeState)
         {
-            case "active":
+            case SYSTEMD_STATE_ACTIVE:
                 break;
-            case "inactive":
-            case "failed":
+            case SYSTEMD_STATE_INACTIVE:
+            case SYSTEMD_STATE_FAILED:
                 if (pid is not null)
                     throw new AgentException("Bootstrap refused: non-active service still has a live MainPID");
                 await _systemd.StartAsync();
@@ -110,16 +112,16 @@ internal sealed class DeploymentAgent
     {
         try
         {
-            if (await _systemd.ShowAsync("LoadState") != "loaded")
+            if (await _systemd.ShowAsync(SYSTEMD_LOAD_STATE) != SYSTEMD_STATE_LOADED)
                 return false;
-            var active = await _systemd.ShowAsync("ActiveState");
+            var active = await _systemd.ShowAsync(SYSTEMD_ACTIVE_STATE);
             switch (active)
             {
-                case "active":
+                case SYSTEMD_STATE_ACTIVE:
                     await _runtime.VerifyLiveRuntimeInvariantsAsync();
                     break;
-                case "inactive":
-                case "failed":
+                case SYSTEMD_STATE_INACTIVE:
+                case SYSTEMD_STATE_FAILED:
                     break;
                 default:
                     return false;
@@ -256,7 +258,7 @@ internal sealed class DeploymentAgent
             return;
 
         var tx = Protocol.ReadTransaction(_config.TransactionFile);
-        if (tx.Phase == "committed")
+        if (tx.Phase == PHASE_COMMITTED)
         {
             try
             {
@@ -326,7 +328,7 @@ internal sealed class DeploymentAgent
         Durability.FsyncFileAndParent(backup);
 
         WriteTransaction(new DeploymentTransaction(
-            "activating",
+            PHASE_ACTIVATING,
             current.SourceCommit,
             current.BinarySha256,
             current.ReleaseManifestSha256,
@@ -457,6 +459,7 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             Warn($"Could not load release manifest: {ex.Message}");
+            _health.RecordAttestation(false);
             return false;
         }
 
@@ -468,13 +471,14 @@ internal sealed class DeploymentAgent
         catch (Exception ex)
         {
             Warn($"Could not read current state: {ex.Message}");
+            _health.RecordAttestation(false);
             return false;
         }
 
         var snapshot = await CollectChecksAsync(release, state);
         var status = StatusFromChecks(snapshot.Checks);
         var observedAt = DateTimeOffset.UtcNow.ToString(
-            "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+            RFC3339_UTC_FORMAT,
             System.Globalization.CultureInfo.InvariantCulture);
         var body = Protocol.BuildAttestation(
             _config,
@@ -486,73 +490,73 @@ internal sealed class DeploymentAgent
             snapshot.RuntimeSha256,
             release.AssetSha256,
             observedAt,
-            AgentVersion);
+            AGENT_VERSION);
 
         await SendAttestationAsync(body);
-        return status == "healthy";
+        return status == STATUS_HEALTHY;
     }
 
     private async Task<CheckSnapshot> CollectChecksAsync(ReleaseSnapshot release, CurrentState state)
     {
         var checks = new Dictionary<string, bool>(StringComparer.Ordinal)
         {
-            ["systemd"] = false,
-            ["local_http"] = false,
-            ["public_https"] = !_config.CheckPublic,
-            ["release_revision"] = state.SourceCommit == release.SourceCommit,
-            ["service_smoke"] = string.IsNullOrEmpty(_config.SmokeScript),
-            ["artifact_fence"] = false,
-            ["runtime_process"] = false,
-            ["source_tree"] = false,
-            ["state_integrity"] = false,
-            ["runtime_digest"] = false,
-            ["runtime_present"] = false
+            [CHECK_SYSTEMD] = false,
+            [CHECK_LOCAL_HTTP] = false,
+            [CHECK_PUBLIC_HTTPS] = !_config.CheckPublic,
+            [CHECK_RELEASE_REVISION] = state.SourceCommit == release.SourceCommit,
+            [CHECK_SERVICE_SMOKE] = string.IsNullOrEmpty(_config.SmokeScript),
+            [CHECK_ARTIFACT_FENCE] = false,
+            [CHECK_RUNTIME_PROCESS] = false,
+            [CHECK_SOURCE_TREE] = false,
+            [CHECK_STATE_INTEGRITY] = false,
+            [CHECK_RUNTIME_DIGEST] = false,
+            [CHECK_RUNTIME_PRESENT] = false
         };
 
         if (!string.IsNullOrEmpty(_config.SmokeScript))
-            checks["service_smoke"] = await _systemd.RunSmokeAsync();
+            checks[CHECK_SERVICE_SMOKE] = await _systemd.RunSmokeAsync();
 
-        checks["systemd"] = await _systemd.IsActiveAsync();
+        checks[CHECK_SYSTEMD] = await _systemd.IsActiveAsync();
 
         string? actual = null;
         try
         {
             actual = await _runtime.LiveRuntimeSnapshotSha256Async();
-            checks["artifact_fence"] = true;
-            checks["runtime_process"] = true;
+            checks[CHECK_ARTIFACT_FENCE] = true;
+            checks[CHECK_RUNTIME_PROCESS] = true;
         }
         catch
         {
             try { actual = await _runtime.RunningRuntimeSha256Async(); } catch { }
         }
 
-        checks["local_http"] = await ProbeAsync(_config.LocalUrl, TimeSpan.FromSeconds(10));
+        checks[CHECK_LOCAL_HTTP] = await ProbeAsync(_config.LocalUrl, TimeSpan.FromSeconds(10));
         if (_config.CheckPublic)
-            checks["public_https"] = await ProbeAsync(_config.PublicUrl, TimeSpan.FromSeconds(15));
+            checks[CHECK_PUBLIC_HTTPS] = await ProbeAsync(_config.PublicUrl, TimeSpan.FromSeconds(15));
 
         var diskActual = File.Exists(_config.AppBinary) ? Durability.Sha256(_config.AppBinary) : null;
-        checks["runtime_present"] = IsDigest(actual);
+        checks[CHECK_RUNTIME_PRESENT] = IsDigest(actual);
 
         try
         {
             if (await _git.HeadAsync() == state.SourceCommit)
             {
                 await _git.VerifySourceTreeExactAsync(state.SourceCommit);
-                checks["source_tree"] = true;
+                checks[CHECK_SOURCE_TREE] = true;
             }
         }
         catch { }
 
-        checks["state_integrity"] =
-            checks["runtime_process"] &&
+        checks[CHECK_STATE_INTEGRITY] =
+            checks[CHECK_RUNTIME_PROCESS] &&
             actual == state.BinarySha256 &&
             diskActual == state.BinarySha256;
-        checks["runtime_digest"] =
-            checks["runtime_process"] &&
+        checks[CHECK_RUNTIME_DIGEST] =
+            checks[CHECK_RUNTIME_PROCESS] &&
             actual == release.AssetSha256 &&
             diskActual == release.AssetSha256;
 
-        if (checks["runtime_process"])
+        if (checks[CHECK_RUNTIME_PROCESS])
         {
             try
             {
@@ -575,23 +579,30 @@ internal sealed class DeploymentAgent
         string? finalActual)
     {
         actual = finalActual;
-        checks["artifact_fence"] = false;
-        checks["runtime_process"] = false;
-        checks["state_integrity"] = false;
-        checks["runtime_digest"] = false;
-        checks["runtime_present"] = IsDigest(actual);
+        checks[CHECK_ARTIFACT_FENCE] = false;
+        checks[CHECK_RUNTIME_PROCESS] = false;
+        checks[CHECK_STATE_INTEGRITY] = false;
+        checks[CHECK_RUNTIME_DIGEST] = false;
+        checks[CHECK_RUNTIME_PRESENT] = IsDigest(actual);
     }
 
-    private static string StatusFromChecks(IReadOnlyDictionary<string, bool> checks)
+    internal static string StatusFromChecks(IReadOnlyDictionary<string, bool> checks)
     {
         var mandatory = new[]
         {
-            "systemd", "local_http", "release_revision", "service_smoke",
-            "artifact_fence", "runtime_process", "source_tree",
-            "state_integrity", "runtime_digest", "runtime_present"
+            CHECK_SYSTEMD,
+            CHECK_LOCAL_HTTP,
+            CHECK_RELEASE_REVISION,
+            CHECK_SERVICE_SMOKE,
+            CHECK_ARTIFACT_FENCE,
+            CHECK_RUNTIME_PROCESS,
+            CHECK_SOURCE_TREE,
+            CHECK_STATE_INTEGRITY,
+            CHECK_RUNTIME_DIGEST,
+            CHECK_RUNTIME_PRESENT
         };
         if (mandatory.Any(key => !checks.TryGetValue(key, out var value) || !value))
-            return "unhealthy";
+            return STATUS_UNHEALTHY;
         return checks.TryGetValue("public_https", out var publicOk) && !publicOk
             ? "degraded"
             : "healthy";
@@ -602,6 +613,7 @@ internal sealed class DeploymentAgent
         if (string.IsNullOrEmpty(_config.AttestationEndpoint))
         {
             Console.WriteLine(Encoding.UTF8.GetString(body));
+            _health.RecordAttestation(true);
             return;
         }
 
@@ -625,14 +637,17 @@ internal sealed class DeploymentAgent
                 using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
                 request.Content = new ByteArrayContent(body);
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-                request.Headers.Add("X-EC-Timestamp", timestamp);
-                request.Headers.Add("X-EC-Signature", $"sha256={signature}");
-                request.Headers.Add("Idempotency-Key", observationId);
+                request.Headers.Add(HEADER_TIMESTAMP, timestamp);
+                request.Headers.Add(HEADER_SIGNATURE, $"sha256={signature}");
+                request.Headers.Add(HEADER_IDEMPOTENCY_KEY, observationId);
 
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
                 if (response.IsSuccessStatusCode)
+                {
+                    _health.RecordAttestation(true);
                     return;
+                }
                 last = new AgentException($"Attestation receiver returned {(int)response.StatusCode}");
             }
             catch (Exception ex)
@@ -644,6 +659,7 @@ internal sealed class DeploymentAgent
                 await Task.Delay(TimeSpan.FromSeconds(2));
         }
 
+        _health.RecordAttestation(false);
         throw new AgentException("Attestation delivery failed after retries", last);
     }
 
@@ -742,7 +758,7 @@ internal sealed class DeploymentAgent
         var tx = Protocol.ReadTransaction(_config.TransactionFile);
         WriteTransaction(tx with
         {
-            Phase = "committed",
+            Phase = PHASE_COMMITTED,
             NewSourceCommit = commit,
             NewBinarySha256 = binary,
             NewReleaseManifestSha256 = manifest
