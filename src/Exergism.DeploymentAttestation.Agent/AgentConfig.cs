@@ -214,11 +214,17 @@ internal static class HostIdentity
             };
             process.StartInfo.ArgumentList.Add(HOSTNAME_FLAG_FQDN);
 
-            if (process.Start() && process.WaitForExit(5000) && process.ExitCode == 0)
+            if (process.Start())
             {
-                var fqdn = process.StandardOutput.ReadToEnd().Trim();
-                if (!string.IsNullOrWhiteSpace(fqdn))
-                    return fqdn;
+                if (!process.WaitForExit(5000))
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit();
+                }
+                else if (process.ExitCode == 0)
+                {
+                    return SelectDefault(process.StandardOutput.ReadToEnd(), Dns.GetHostName());
+                }
             }
         }
         catch
