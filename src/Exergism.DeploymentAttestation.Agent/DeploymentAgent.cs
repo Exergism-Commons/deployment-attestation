@@ -753,17 +753,23 @@ internal sealed class DeploymentAgent
 
     private void VerifyRuntimeExact(string expected)
     {
-        if (!File.Exists(_config.AppBinary))
-            throw new AgentException("Runtime binary missing");
-        var mode = File.GetUnixFileMode(_config.AppBinary);
-        if ((mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
-            throw new AgentException("Runtime binary is not executable");
+        var verified = Durability.VerifyAndFsyncRegularFileNoFollow(
+            _config.AppBinary,
+            "Runtime binary",
+            expected,
+            requireExecutable: true);
 
-        if (Durability.Sha256(_config.AppBinary) != expected)
-            throw new AgentException("Runtime digest mismatch");
-        Durability.FsyncFileAndParent(_config.AppBinary);
-        if (Durability.Sha256(_config.AppBinary) != expected)
-            throw new AgentException("Runtime digest changed across durability barrier");
+        var parent = Path.GetDirectoryName(_config.AppBinary)
+            ?? throw new AgentException("Runtime binary has no parent directory");
+        Durability.FsyncRequiredDirectory(parent, parent);
+
+        var final = Durability.ReadRegularFileNoFollow(_config.AppBinary, "Runtime binary");
+        if (final.Snapshot != verified ||
+            !string.Equals(final.Snapshot.Sha256, expected, StringComparison.Ordinal))
+            throw new AgentException("Runtime snapshot changed across durability barrier");
+
+        if ((final.Mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
+            throw new AgentException("Runtime binary lost executable mode across durability barrier");
     }
 
     private void WriteCurrentState(CurrentState state)
