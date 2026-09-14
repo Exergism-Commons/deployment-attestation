@@ -193,7 +193,7 @@ jobs:
           grep -Fq 'GIT_INDEX_FILE' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_COUNT' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_PARAMETERS' agent/ec-deployment-agent.sh
-          grep -Fq 'rev-parse", "--path-format=absolute", "--show-toplevel' agent/ec-deployment-agent.sh
+          grep -Fq 'for selector in ("--show-toplevel", "--git-dir", "--git-common-dir"):' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_KEY_' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_VALUE_' agent/ec-deployment-agent.sh
           grep -Fq 'def validate_roots(repo, own_roots, parent_roots):' agent/ec-deployment-agent.sh
@@ -313,10 +313,10 @@ jobs:
           grep -Fxq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-agent-recovery-interlock.conf
           ! grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'After=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
-          grep -Fq 'TXN_PHASE="pending"' install/recover-id-exergism-install.sh
-          grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
+          grep -Fq 'select_transaction()' install/recover-id-exergism-install.sh
+          grep -Fq 'TXN_PHASE="$phase"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="recovering"' install/recover-id-exergism-install.sh
-          grep -Fq 'TXN_PHASE="recovered"' install/recover-id-exergism-install.sh
+          grep -Fq 'recovered) path="$INSTALL_RECOVERED_DIR" ;;' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_FINALIZE_UNIT=' install/recover-id-exergism-install.sh
           grep -Fq '"$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$RECOVERY_FINALIZE_UNIT"' install/recover-id-exergism-install.sh
