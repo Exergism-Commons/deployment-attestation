@@ -1011,72 +1011,232 @@ PY
 }
 
 reconcile_stale_git_locks() {
-  # Recovery owns both agent locks, but manual Git does not honor them. Prove
-  # no live Git writer references the checkout through cwd, global selectors,
-  # GIT_* environment variables or open fds before removing stale lockfiles.
-  python3 - "$EC_APP_DIR" <<'PY'
+  local rollback_commit="${1:-}"
+  # Recovery derives metadata only from the verified Git topology: the current
+  # checkout plus the durable rollback target. Never trust arbitrary .git
+  # markers discovered by walking the filesystem.
+  python3 - "$EC_APP_DIR" "$rollback_commit" <<'PY'
 import os
 import pathlib
 import stat
 import subprocess
 import sys
 
-app = pathlib.Path(sys.argv[1]).resolve()
+app = pathlib.Path(os.path.normpath(sys.argv[1]))
+rollback_commit = sys.argv[2].strip()
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
-def under(child, parent):
+def git(repo, *args, check=True):
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        raise RuntimeError(f"git failed in {repo}: {result.stderr.strip()}")
+    return result
+
+def lexical_under(path, root):
+    path = os.path.normpath(str(path))
+    root = os.path.normpath(str(root))
     try:
-        pathlib.Path(child).resolve(strict=False).relative_to(pathlib.Path(parent).resolve(strict=False))
-        return True
-    except (ValueError, OSError):
+        return os.path.commonpath((path, root)) == root
+    except ValueError:
         return False
 
-def git_path(flag):
-    out = subprocess.check_output(
-        ["git", "-C", str(app), "rev-parse", "--path-format=absolute", flag],
-        stderr=subprocess.DEVNULL,
-        text=True,
-    ).strip()
-    return pathlib.Path(out).resolve(strict=False)
+def safe_tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    parts = pure.parts
+    if (
+        not relative
+        or pure.is_absolute()
+        or any(part in {"", ".", "..", ".git"} for part in parts)
+    ):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    candidate = pathlib.Path(os.path.normpath(str(repo.joinpath(*parts))))
+    if not lexical_under(candidate, repo) or candidate == repo:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    return candidate
 
-roots = []
-for flag in ("--git-dir", "--git-common-dir"):
-    root = git_path(flag)
-    if root not in roots:
-        roots.append(root)
+def git_roots(repo):
+    roots = []
+    for flag in ("--git-dir", "--git-common-dir"):
+        result = git(repo, "rev-parse", "--path-format=absolute", flag)
+        value = result.stdout.strip()
+        if not value:
+            raise RuntimeError(f"Git returned empty {flag} for {repo}")
+        root = pathlib.Path(os.path.normpath(value))
+        if not root.is_absolute():
+            raise RuntimeError(f"Git returned non-absolute {flag} for {repo}")
+        if root not in roots:
+            roots.append(root)
+    return roots
 
-# Include gitfile targets for populated submodules, even if they live outside
-# the superproject common-dir.
-for marker in app.rglob(".git"):
+def validate_real_directory_chain(path, boundary):
+    if not lexical_under(path, boundary):
+        raise RuntimeError(f"Git metadata escapes hierarchy: {path}")
+    current = path
+    while True:
+        try:
+            st = os.lstat(current)
+        except OSError as exc:
+            raise RuntimeError(f"cannot inspect Git metadata path: {current}") from exc
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            raise RuntimeError(f"Git metadata path is not a real directory: {current}")
+        if current == boundary:
+            return
+        if current == current.parent:
+            raise RuntimeError(f"Git metadata escaped boundary: {path}")
+        current = current.parent
+
+def validate_roots(repo, own_roots, parent_roots):
+    if not own_roots:
+        raise RuntimeError("Git metadata hierarchy is empty")
+
+    if parent_roots is None:
+        embedded = repo / ".git"
+        try:
+            st = os.lstat(embedded)
+        except OSError as exc:
+            raise RuntimeError("top-level repository must have in-tree .git directory") from exc
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            raise RuntimeError("top-level repository must have a real in-tree .git directory")
+        for root in own_roots:
+            validate_real_directory_chain(root, embedded)
+        return
+
+    parents = list(dict.fromkeys(parent_roots))
+    for root in own_roots:
+        if root in parents:
+            raise RuntimeError("submodule Git metadata aliases ancestor metadata")
+
+    allowed = list(parents)
+    embedded = repo / ".git"
     try:
-        if marker.is_file() and not marker.is_symlink():
-            text = marker.read_text(encoding="utf-8").strip()
-            if not text.lower().startswith("gitdir:"):
-                raise RuntimeError(f"malformed gitfile: {marker}")
-            raw = text.split(":", 1)[1].strip()
-            root = pathlib.Path(raw)
-            if not root.is_absolute():
-                root = marker.parent / root
-            root = root.resolve(strict=False)
-            if root not in roots:
-                roots.append(root)
-        elif marker.is_dir() and not marker.is_symlink():
-            root = marker.resolve(strict=False)
-            if root not in roots:
-                roots.append(root)
-    except (OSError, UnicodeError) as exc:
-        raise RuntimeError(f"cannot inspect git metadata marker {marker}") from exc
+        embedded_st = os.lstat(embedded)
+    except FileNotFoundError:
+        embedded_st = None
+    if embedded_st is not None and stat.S_ISDIR(embedded_st.st_mode) and not stat.S_ISLNK(embedded_st.st_mode):
+        allowed.append(embedded)
+
+    for root in own_roots:
+        candidates = [boundary for boundary in allowed if lexical_under(root, boundary)]
+        if not candidates:
+            raise RuntimeError(f"submodule Git metadata escapes verified hierarchy: {root}")
+        boundary = max(candidates, key=lambda value: len(str(value)))
+        validate_real_directory_chain(root, boundary)
+
+def gitlinks(repo, commit):
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", "-rz", "--full-tree", commit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"cannot read Git tree {commit} in {repo}")
+    links = []
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            meta, raw_path = record.split(b"\t", 1)
+            mode, kind, oid = meta.decode("ascii").split()
+            relative = raw_path.decode("utf-8", "strict")
+        except (ValueError, UnicodeError) as exc:
+            raise RuntimeError("malformed git ls-tree record") from exc
+        if mode == "160000" and kind == "commit":
+            links.append((relative, oid))
+    return links
+
+def populated_marker(submodule):
+    try:
+        st = os.lstat(submodule)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        return None
+    marker = submodule / ".git"
+    try:
+        marker_st = os.lstat(marker)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(marker_st.st_mode):
+        return None
+    if not (stat.S_ISREG(marker_st.st_mode) or stat.S_ISDIR(marker_st.st_mode)):
+        return None
+    return marker
+
+def collect(repo, commit, parent_roots, mode):
+    repo = pathlib.Path(os.path.normpath(str(repo)))
+    own_roots = git_roots(repo)
+    validate_roots(repo, own_roots, parent_roots)
+    hierarchy = list(dict.fromkeys([*(parent_roots or []), *own_roots]))
+
+    for relative, target_oid in gitlinks(repo, commit):
+        child = safe_tree_path(repo, relative)
+        if populated_marker(child) is None:
+            continue
+
+        child_own = git_roots(child)
+        validate_roots(child, child_own, hierarchy)
+
+        child_commit = target_oid
+        if mode == "current":
+            head = git(child, "rev-parse", "HEAD", check=False)
+            if head.returncode != 0 or not head.stdout.strip():
+                hierarchy.extend(root for root in child_own if root not in hierarchy)
+                continue
+            child_commit = head.stdout.strip()
+        else:
+            target = git(child, "cat-file", "-e", f"{target_oid}^{{commit}}", check=False)
+            if target.returncode != 0:
+                head = git(child, "rev-parse", "HEAD", check=False)
+                if head.returncode != 0 or not head.stdout.strip():
+                    hierarchy.extend(root for root in child_own if root not in hierarchy)
+                    continue
+                child_commit = head.stdout.strip()
+
+        child_roots = collect(child, child_commit, hierarchy, mode)
+        hierarchy.extend(root for root in child_roots if root not in hierarchy)
+
+    return hierarchy
+
+current_head = git(app, "rev-parse", "HEAD").stdout.strip()
+roots = collect(app, current_head, None, "current")
+if rollback_commit and rollback_commit != current_head:
+    rollback_roots = collect(app, rollback_commit, None, "rollback")
+    roots.extend(root for root in rollback_roots if root not in roots)
 
 protected = [app, *roots]
 
-def resolve_from(value, cwd):
-    p = pathlib.Path(value)
-    if not p.is_absolute():
-        p = cwd / p
-    return p.resolve(strict=False)
+def resolved(path):
+    try:
+        return pathlib.Path(path).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+def under(child, parent):
+    child = resolved(child)
+    parent = resolved(parent)
+    if child is None or parent is None:
+        return False
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 def points_into_protected(value, cwd):
     try:
-        p = resolve_from(value, cwd)
+        p = pathlib.Path(value)
+        if not p.is_absolute():
+            p = cwd / p
+        p = p.resolve(strict=False)
     except (OSError, RuntimeError):
         return True
     return any(under(p, root) or under(root, p) for root in protected)
@@ -1107,7 +1267,10 @@ def process_is_git(proc):
     if argv:
         names.append(pathlib.Path(argv[0]).name)
     try:
-        names.append((proc / "exe").resolve().name)
+        target = os.readlink(proc / "exe")
+        if target.endswith(" (deleted)"):
+            target = target[:-10]
+        names.append(pathlib.Path(target).name)
     except (FileNotFoundError, ProcessLookupError):
         pass
     except PermissionError as exc:
@@ -1121,7 +1284,6 @@ def git_process_references_checkout(proc, argv):
         return False
     except PermissionError as exc:
         raise RuntimeError(f"cannot inspect cwd for git process {proc.name}") from exc
-
     if any(under(cwd, root) or under(root, cwd) for root in protected):
         return True
 
@@ -1129,15 +1291,16 @@ def git_process_references_checkout(proc, argv):
     if env is None:
         return False
 
+    def inspect_value(value):
+        return bool(value) and points_into_protected(value, cwd)
+
     i = 1
     while i < len(argv):
         arg = argv[i]
         value = None
-        if arg.startswith("--git-dir="):
+        if arg.startswith("--git-dir=") or arg.startswith("--work-tree=") or arg.startswith("--separate-git-dir="):
             value = arg.split("=", 1)[1]
-        elif arg.startswith("--work-tree="):
-            value = arg.split("=", 1)[1]
-        elif arg in ("--git-dir", "--work-tree", "-C"):
+        elif arg in ("--git-dir", "--work-tree", "--separate-git-dir", "-C"):
             if i + 1 >= len(argv):
                 raise RuntimeError(f"malformed git selector in process {proc.name}")
             value = argv[i + 1]
@@ -1151,45 +1314,52 @@ def git_process_references_checkout(proc, argv):
             i += 1
             if "=" in config:
                 key, config_value = config.split("=", 1)
-                if key.lower() == "core.worktree" and points_into_protected(config_value, cwd):
+                if key.lower() == "core.worktree" and inspect_value(config_value):
                     return True
         elif arg.startswith("-c") and arg != "-c":
             config = arg[2:]
             if "=" in config:
                 key, config_value = config.split("=", 1)
-                if key.lower() == "core.worktree" and points_into_protected(config_value, cwd):
+                if key.lower() == "core.worktree" and inspect_value(config_value):
                     return True
         elif arg.startswith("--config-env="):
             spec = arg.split("=", 1)[1]
-            if "=" in spec:
-                key, env_name = spec.split("=", 1)
-                config_value = env.get(env_name)
-                if key.lower() == "core.worktree" and config_value and points_into_protected(config_value, cwd):
-                    return True
-        elif not arg.startswith("-") and points_into_protected(arg, cwd):
+            if "=" not in spec:
+                raise RuntimeError(f"malformed --config-env in process {proc.name}")
+            key, env_name = spec.split("=", 1)
+            config_value = env.get(env_name)
+            if not env_name or config_value is None:
+                raise RuntimeError(f"unresolvable --config-env in process {proc.name}")
+            if key.lower() == "core.worktree" and inspect_value(config_value):
+                return True
+        elif arg.startswith("-") and "=" in arg:
+            option_value = arg.split("=", 1)[1]
+            if not option_value:
+                raise RuntimeError(f"malformed Git option in process {proc.name}")
+            if inspect_value(option_value):
+                return True
+        elif not arg.startswith("-") and inspect_value(arg):
             return True
-        if value is not None and points_into_protected(value, cwd):
+        if value is not None and inspect_value(value):
             return True
         i += 1
 
-    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
-        value = env.get(key)
-        if value and points_into_protected(value, cwd):
+    for key in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL",
+    ):
+        if inspect_value(env.get(key)):
             return True
-    alt = env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-    if alt:
-        for value in alt.split(os.pathsep):
-            if value and points_into_protected(value, cwd):
-                return True
+    for value in env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES", "").split(os.pathsep):
+        if inspect_value(value):
+            return True
 
-    # Git also accepts arbitrary config through GIT_CONFIG_COUNT plus
-    # GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n. Cover core.worktree explicitly.
     count = env.get("GIT_CONFIG_COUNT")
     if count is not None:
         try:
             count_i = int(count)
-        except ValueError:
-            raise RuntimeError(f"malformed GIT_CONFIG_COUNT in process {proc.name}")
+        except ValueError as exc:
+            raise RuntimeError(f"malformed GIT_CONFIG_COUNT in process {proc.name}") from exc
         if count_i < 0 or count_i > 10000:
             raise RuntimeError(f"unsafe GIT_CONFIG_COUNT in process {proc.name}")
         for n in range(count_i):
@@ -1197,13 +1367,9 @@ def git_process_references_checkout(proc, argv):
             value = env.get(f"GIT_CONFIG_VALUE_{n}")
             if key is None or value is None:
                 raise RuntimeError(f"incomplete Git config environment in process {proc.name}")
-            if key.lower() == "core.worktree" and points_into_protected(value, cwd):
+            if key.lower() == "core.worktree" and inspect_value(value):
                 return True
 
-    # Resolve Git's effective worktree using the same repository/config
-    # selectors as the live process. This covers ordinary repository config,
-    # include/includeIf, GIT_CONFIG_PARAMETERS and config supplied through
-    # global Git options without reimplementing Git's config grammar.
     probe_env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LANG": "C",
@@ -1235,10 +1401,12 @@ def git_process_references_checkout(proc, argv):
             probe_args.extend((arg, argv[i + 1]))
             i += 2
             continue
-        if ((arg.startswith("-C") and arg != "-C")
-                or (arg.startswith("-c") and arg != "-c")
-                or arg.startswith("--git-dir=")
-                or arg.startswith("--work-tree=")):
+        if (
+            (arg.startswith("-C") and arg != "-C")
+            or (arg.startswith("-c") and arg != "-c")
+            or arg.startswith("--git-dir=")
+            or arg.startswith("--work-tree=")
+        ):
             probe_args.append(arg)
             i += 1
             continue
@@ -1258,33 +1426,41 @@ def git_process_references_checkout(proc, argv):
             continue
         break
 
-    try:
-        probe = subprocess.run(
-            [
-                *probe_args,
-                "-c", "safe.directory=*",
-                "rev-parse", "--path-format=absolute", "--show-toplevel",
-            ],
-            cwd=str(cwd),
-            env=probe_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"timed out resolving Git worktree for process {proc.name}") from exc
-    if probe.returncode == 0:
-        effective_worktree = probe.stdout.strip()
-        if not effective_worktree:
-            raise RuntimeError(f"Git returned an empty worktree for process {proc.name}")
-        if points_into_protected(effective_worktree, cwd):
+    resolved_any = False
+    resolved_git_dir = False
+    resolved_common_dir = False
+    for selector in ("--show-toplevel", "--git-dir", "--git-common-dir"):
+        try:
+            probe = subprocess.run(
+                [
+                    *probe_args, "-c", "safe.directory=*",
+                    "rev-parse", "--path-format=absolute", selector,
+                ],
+                cwd=str(cwd),
+                env=probe_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"timed out resolving Git paths for process {proc.name}") from exc
+        if probe.returncode != 0:
+            continue
+        effective = probe.stdout.strip()
+        if not effective:
+            raise RuntimeError(f"Git returned empty {selector} for process {proc.name}")
+        resolved_any = True
+        resolved_git_dir = resolved_git_dir or selector == "--git-dir"
+        resolved_common_dir = resolved_common_dir or selector == "--git-common-dir"
+        if points_into_protected(effective, cwd):
             return True
-    elif "GIT_CONFIG_PARAMETERS" in env:
-        # This source is intentionally left to Git to parse. If Git cannot
-        # resolve it, fail closed instead of assuming it cannot select us.
-        raise RuntimeError(f"cannot resolve GIT_CONFIG_PARAMETERS for process {proc.name}")
+
+    if resolved_any and not (resolved_git_dir and resolved_common_dir):
+        raise RuntimeError(f"cannot resolve complete Git metadata paths for process {proc.name}")
+    if not resolved_any and ("GIT_CONFIG_PARAMETERS" in env or "GIT_CONFIG_COUNT" in env):
+        raise RuntimeError(f"cannot resolve live Git configuration for process {proc.name}")
 
     try:
         fds = list((proc / "fd").iterdir())
@@ -1316,7 +1492,7 @@ def assert_no_related_git():
 
 def lock_is_open(lock):
     try:
-        lst = lock.stat()
+        lst = os.lstat(lock)
     except FileNotFoundError:
         return False
     wanted = (lst.st_dev, lst.st_ino)
@@ -1335,32 +1511,49 @@ def lock_is_open(lock):
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except PermissionError as exc:
-                raise RuntimeError(f"cannot inspect fd for process {proc.name} before lock cleanup") from exc
+                raise RuntimeError(f"cannot inspect fd for process {proc.name}") from exc
             if (st.st_dev, st.st_ino) == wanted:
                 return True
     return False
 
+def lock_files(root):
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        base = pathlib.Path(dirpath)
+        kept = []
+        for name in dirnames:
+            child = base / name
+            try:
+                st = os.lstat(child)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+                kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            if name.endswith(".lock"):
+                yield base / name
+
 assert_no_related_git()
 for root in roots:
-    st = root.lstat()
-    if not stat.S_ISDIR(st.st_mode):
-        raise RuntimeError(f"git metadata root is not a directory: {root}")
-    for lock in sorted(root.rglob("*.lock")):
+    st = os.lstat(root)
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        raise RuntimeError(f"git metadata root is not a real directory: {root}")
+    for lock in sorted(lock_files(root), key=str):
         try:
-            st = lock.lstat()
+            st = os.lstat(lock)
         except FileNotFoundError:
             continue
-        if not stat.S_ISREG(st.st_mode):
+        if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
             raise RuntimeError(f"refusing to remove non-regular git lock: {lock}")
         assert_no_related_git()
         if lock_is_open(lock):
             raise RuntimeError(f"refusing to remove open git lock: {lock}")
-        lock.unlink()
-        fd = os.open(lock.parent, os.O_RDONLY | os.O_DIRECTORY)
+        parent_fd = os.open(lock.parent, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
         try:
-            os.fsync(fd)
+            os.unlink(lock.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
         finally:
-            os.close(fd)
+            os.close(parent_fd)
 assert_no_related_git()
 PY
 }
@@ -1433,7 +1626,7 @@ rollback_transaction() {
 
   warn "Recovering transaction to $commit"
   stop_service_quiescent || return 1
-  reconcile_stale_git_locks || return 1
+  reconcile_stale_git_locks "$commit" || return 1
   switch_source "$commit" 0 || return 1
 
   install -o root -g root -m 0755 "$backup" "${EC_APP_BIN}.rollback" || return 1
