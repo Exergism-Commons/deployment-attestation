@@ -441,7 +441,9 @@ internal sealed class GitRepository(AgentConfig config)
                 if (!File.Exists(gitMarker) && !Directory.Exists(gitMarker))
                     throw new AgentException($"Submodule gitfile missing during fsync: {entry.RelativePath}");
                 if (File.Exists(gitMarker))
-                    Durability.FsyncFile(gitMarker);
+                    Durability.FsyncRegularFileNoFollow(
+                        gitMarker,
+                        $"submodule gitfile {entry.RelativePath}");
                 else
                     Durability.FsyncRequiredDirectory(gitMarker, $"submodule git metadata {entry.RelativePath}");
                 continue;
@@ -540,9 +542,7 @@ internal sealed class GitRepository(AgentConfig config)
 
         foreach (var file in GitMetadataEnumeration.EnumerateFiles(root))
         {
-            var info = new FileInfo(file);
-            if (info.LinkTarget is null)
-                Durability.FsyncFile(file);
+            Durability.FsyncRegularFileNoFollow(file, file);
         }
         foreach (var dir in GitMetadataEnumeration.EnumerateDirectories(root)
                      .OrderByDescending(x => x.Count(c => c == Path.DirectorySeparatorChar)))
