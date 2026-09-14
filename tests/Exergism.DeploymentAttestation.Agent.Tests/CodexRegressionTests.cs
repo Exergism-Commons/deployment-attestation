@@ -123,6 +123,67 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public async Task LinkedWorktreeCommonMetadataIsDetectedAsProtected()
+    {
+        using var environment = TestEnvironment.Create();
+        var repository = Path.Combine(environment.Root, "repository");
+        var linkedWorktree = Path.Combine(environment.Root, "linked-worktree");
+        Directory.CreateDirectory(repository);
+
+        async Task<string> GitAsync(string workingDirectory, params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync(
+                "git",
+                args,
+                workingDirectory: workingDirectory);
+            Assert.IsTrue(result.Success, result.StdErr);
+            return result.StdOut.Trim();
+        }
+
+        await GitAsync(repository, "init");
+        await GitAsync(repository, "config", "user.name", "Regression Test");
+        await GitAsync(repository, "config", "user.email", "regression@example.test");
+        await GitAsync(repository, "commit", "--allow-empty", "-m", "initial");
+        await GitAsync(repository, "worktree", "add", "-b", "linked", linkedWorktree);
+
+        var protectedMetadata = Path.GetFullPath(Path.Combine(repository, GIT_METADATA_NAME));
+        var protectedRoots = new HashSet<string>(StringComparer.Ordinal)
+        {
+            protectedMetadata
+        };
+
+        var topLevel = await GitAsync(
+            linkedWorktree,
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel");
+        var gitDir = await GitAsync(
+            linkedWorktree,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir");
+        var commonDir = await GitAsync(
+            linkedWorktree,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir");
+
+        Assert.IsFalse(
+            GitEffectivePathProbe.ReferencesProtected(
+                new[] { topLevel },
+                protectedRoots));
+        Assert.IsTrue(
+            GitEffectivePathProbe.ReferencesProtected(
+                new[] { gitDir },
+                protectedRoots));
+        Assert.IsTrue(
+            GitEffectivePathProbe.ReferencesProtected(
+                new[] { commonDir },
+                protectedRoots));
+        Assert.AreEqual(protectedMetadata, Path.GetFullPath(commonDir));
+    }
+
+    [TestMethod]
     public void CoreWorktreeConfigIsDetected()
     {
         const string protectedRoot = "/srv/id.exergism.org";
