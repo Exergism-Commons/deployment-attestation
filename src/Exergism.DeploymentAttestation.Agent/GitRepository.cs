@@ -88,8 +88,14 @@ internal static class GitMetadataBoundary
         if (parentMetadataHierarchy is null || parentMetadataHierarchy.Count == 0)
             throw new AgentException("Verified submodule metadata hierarchy is missing");
 
+        var parentRoots = parentMetadataHierarchy
+            .Select(Path.GetFullPath)
+            .ToHashSet(StringComparer.Ordinal);
+        if (ownRoots.Any(parentRoots.Contains))
+            throw new AgentException("Submodule Git metadata aliases an ancestor metadata root");
+
         var allowed = new HashSet<string>(
-            parentMetadataHierarchy.Select(Path.GetFullPath),
+            parentRoots,
             StringComparer.Ordinal);
 
         var embeddedSubmoduleMetadata = Path.Combine(repository, GIT_METADATA_NAME);
@@ -365,7 +371,7 @@ internal sealed class GitRepository(AgentConfig config)
 
         foreach (var submodule in submodules)
         {
-            var subPath = Path.Combine(repository, submodule.Key.Replace('/', Path.DirectorySeparatorChar));
+            var subPath = GitTreePath.Resolve(repository, submodule.Key);
             await VerifyRepositoryExactAsync(subPath, submodule.Value, verified);
         }
 
