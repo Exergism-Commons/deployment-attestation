@@ -318,6 +318,17 @@ internal sealed class DeploymentAgent
 
         if (current.SourceCommit == release.SourceCommit && current.BinarySha256 == release.AssetSha256)
         {
+            if (!CommittedReleaseMetadataMatches(current, release, _config.ReleaseTag))
+            {
+                await ArtifactIntegrityAsync(current.SourceCommit, current.BinarySha256);
+                WriteCurrentState(new CurrentState(
+                    current.SourceCommit,
+                    current.BinarySha256,
+                    release.ManifestSha256,
+                    _config.ReleaseTag));
+                await ArtifactIntegrityAsync(current.SourceCommit, current.BinarySha256);
+            }
+
             Log($"Already running exact source/runtime pair {current.SourceCommit}");
             await TryAttestAsync();
             return;
@@ -558,7 +569,8 @@ internal sealed class DeploymentAgent
         checks[CHECK_STATE_INTEGRITY] =
             checks[CHECK_RUNTIME_PROCESS] &&
             actual == state.BinarySha256 &&
-            diskActual == state.BinarySha256;
+            diskActual == state.BinarySha256 &&
+            CommittedReleaseMetadataMatches(state, release, _config.ReleaseTag);
         checks[CHECK_RUNTIME_DIGEST] =
             checks[CHECK_RUNTIME_PROCESS] &&
             actual == release.AssetSha256 &&
@@ -580,6 +592,13 @@ internal sealed class DeploymentAgent
 
         return new CheckSnapshot(actual, checks);
     }
+
+    internal static bool CommittedReleaseMetadataMatches(
+        CurrentState state,
+        ReleaseSnapshot release,
+        string configuredReleaseTag)
+        => state.ReleaseManifestSha256 == release.ManifestSha256 &&
+           state.ReleaseTag == configuredReleaseTag;
 
     private static void InvalidateRuntimeBoundChecks(
         Dictionary<string, bool> checks,
