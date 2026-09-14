@@ -260,7 +260,10 @@ internal static class Durability
 
             try
             {
-                return new System.Text.UTF8Encoding(false, true).GetString(buffer.ToArray());
+                var text = new UTF8Encoding(false, true).GetString(buffer.ToArray());
+                return text.Length > 0 && text[0] == '\uFEFF'
+                    ? text[1..]
+                    : text;
             }
             catch (DecoderFallbackException ex)
             {
