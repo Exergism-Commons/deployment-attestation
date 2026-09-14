@@ -242,7 +242,7 @@ internal sealed class GitRepository(AgentConfig config)
                 if (File.Exists(gitMarker))
                     Durability.FsyncFile(gitMarker);
                 else
-                    Durability.FsyncDirectory(gitMarker);
+                    Durability.FsyncRequiredDirectory(gitMarker, $"submodule git metadata {entry.RelativePath}");
                 continue;
             }
 
@@ -270,7 +270,7 @@ internal sealed class GitRepository(AgentConfig config)
         }
 
         foreach (var directory in directories.OrderByDescending(x => x.Count(c => c == Path.DirectorySeparatorChar)))
-            Durability.FsyncDirectory(directory);
+            Durability.FsyncRequiredDirectory(directory, directory);
 
         foreach (var root in await GitMetadataRootsAsync(repository))
             FsyncDirectoryTree(root);
@@ -292,9 +292,11 @@ internal sealed class GitRepository(AgentConfig config)
         }
         foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories)
                      .OrderByDescending(x => x.Count(c => c == Path.DirectorySeparatorChar)))
-            Durability.FsyncDirectory(dir);
-        Durability.FsyncDirectory(root);
-        Durability.FsyncDirectory(Path.GetDirectoryName(root)!);
+            Durability.FsyncRequiredDirectory(dir, dir);
+        Durability.FsyncRequiredDirectory(root, root);
+        var parent = Path.GetDirectoryName(root)
+            ?? throw new AgentException($"Git metadata root has no parent: {root}");
+        Durability.FsyncRequiredDirectory(parent, parent);
     }
 
     private async Task<List<string>> GitMetadataRootsAsync(string repository)
