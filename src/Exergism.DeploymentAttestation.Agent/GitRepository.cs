@@ -23,7 +23,8 @@ internal sealed record RepositoryDurabilitySnapshot(
 internal enum GitMetadataTraversalMode
 {
     StrictTargetCommit,
-    RecoveryCurrentCheckout
+    RecoveryCurrentCheckout,
+    RecoveryRollbackTarget
 }
 
 internal static class GitMetadataEnumeration
@@ -219,10 +220,10 @@ internal sealed class GitRepository(AgentConfig config)
         EnsureSnapshotsUnchanged(verified, final);
     }
 
-    public async Task ReconcileStaleGitLocksAsync()
+    public async Task ReconcileStaleGitLocksAsync(string rollbackCommit)
     {
         var head = await HeadAsync();
-        var roots = await RecoveryGitMetadataRootsAsync(head);
+        var roots = await RecoveryGitMetadataRootsAsync(head, rollbackCommit);
         var protectedRoots = new HashSet<string>(roots, StringComparer.Ordinal) { Path.GetFullPath(_config.AppDirectory) };
 
         await AssertNoRelatedGitAsync(protectedRoots);
@@ -527,12 +528,30 @@ internal sealed class GitRepository(AgentConfig config)
         return roots.Order(StringComparer.Ordinal).ToList();
     }
 
-    internal async Task<List<string>> RecoveryGitMetadataRootsAsync(string commit)
-        => await VerifiedGitMetadataRootsAsync(
-            _config.AppDirectory,
-            commit,
-            parentMetadataHierarchy: null,
-            GitMetadataTraversalMode.RecoveryCurrentCheckout);
+    internal async Task<List<string>> RecoveryGitMetadataRootsAsync(
+        string currentCommit,
+        string? rollbackCommit = null)
+    {
+        var roots = new HashSet<string>(
+            await VerifiedGitMetadataRootsAsync(
+                _config.AppDirectory,
+                currentCommit,
+                parentMetadataHierarchy: null,
+                GitMetadataTraversalMode.RecoveryCurrentCheckout),
+            StringComparer.Ordinal);
+
+        if (!string.IsNullOrWhiteSpace(rollbackCommit) &&
+            !string.Equals(currentCommit, rollbackCommit, StringComparison.Ordinal))
+        {
+            roots.UnionWith(await VerifiedGitMetadataRootsAsync(
+                _config.AppDirectory,
+                rollbackCommit,
+                parentMetadataHierarchy: null,
+                GitMetadataTraversalMode.RecoveryRollbackTarget));
+        }
+
+        return roots.Order(StringComparer.Ordinal).ToList();
+    }
 
     private async Task<List<string>> VerifiedGitMetadataRootsAsync(
         string repository,
@@ -591,6 +610,14 @@ internal sealed class GitRepository(AgentConfig config)
                 continue;
             }
 
+            var childOwnRoots = await GitMetadataRootsAsync(submodulePath);
+            GitMetadataBoundary.EnsureRepositoryRoots(
+                submodulePath,
+                childOwnRoots,
+                hierarchy,
+                isTopLevel: false);
+            hierarchy.UnionWith(childOwnRoots);
+
             var childCommit = entry.ObjectId;
             if (traversalMode == GitMetadataTraversalMode.RecoveryCurrentCheckout)
             {
@@ -599,9 +626,25 @@ internal sealed class GitRepository(AgentConfig config)
                     [GIT_SUBCOMMAND_REV_PARSE, "HEAD"],
                     required: false);
                 if (!currentHead.Success || string.IsNullOrWhiteSpace(currentHead.StdOut))
-                    throw new AgentException(
-                        $"Cannot resolve current HEAD for populated gitlink during recovery: {entry.RelativePath}");
+                    continue;
                 childCommit = currentHead.StdOut.Trim();
+            }
+            else if (traversalMode == GitMetadataTraversalMode.RecoveryRollbackTarget)
+            {
+                var targetAvailable = await GitAtAsync(
+                    submodulePath,
+                    ["cat-file", "-e", $"{entry.ObjectId}^{{commit}}"],
+                    required: false);
+                if (!targetAvailable.Success)
+                {
+                    var currentHead = await GitAtAsync(
+                        submodulePath,
+                        [GIT_SUBCOMMAND_REV_PARSE, "HEAD"],
+                        required: false);
+                    if (!currentHead.Success || string.IsNullOrWhiteSpace(currentHead.StdOut))
+                        continue;
+                    childCommit = currentHead.StdOut.Trim();
+                }
             }
 
             var childRoots = await VerifiedGitMetadataRootsAsync(
