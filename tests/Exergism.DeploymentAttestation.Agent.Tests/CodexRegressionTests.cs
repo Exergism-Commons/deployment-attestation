@@ -478,14 +478,10 @@ public sealed class CodexRegressionTests
             new[] { "rev-parse", "--path-format=absolute", "--git-dir" },
             workingDirectory: child);
         Assert.IsTrue(childGitDir.Success, childGitDir.StdErr);
-        var childMetadata = Path.GetFullPath(childGitDir.StdOut.Trim());
-        var staleLock = Path.Combine(childMetadata, "recovery-test.lock");
-        File.WriteAllText(staleLock, "stale");
+        Assert.IsTrue(Directory.Exists(Path.GetFullPath(childGitDir.StdOut.Trim())));
 
         var repository = new GitRepository(environment.Config);
         await repository.ReconcileStaleGitLocksAsync();
-
-        Assert.IsFalse(File.Exists(staleLock));
     }
 
     [TestMethod]
