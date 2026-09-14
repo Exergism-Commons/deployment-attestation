@@ -136,8 +136,7 @@ internal sealed class DeploymentAgent
             var state = Protocol.ReadCurrentState(_config.CurrentStateFile);
             if (await _git.HeadAsync() != state.SourceCommit)
                 return false;
-            if (Durability.Sha256(_config.AppBinary) != state.BinarySha256)
-                return false;
+            VerifyRuntimeExact(state.BinarySha256);
             await _git.VerifySourceTreeExactAsync(state.SourceCommit);
             return true;
         }
@@ -555,7 +554,10 @@ internal sealed class DeploymentAgent
         if (_config.CheckPublic)
             checks[CHECK_PUBLIC_HTTPS] = await ProbeAsync(_config.PublicUrl, TimeSpan.FromSeconds(15));
 
-        var diskActual = HealthCheckRunner.Try(() => Durability.Sha256(_config.AppBinary));
+        var diskActual = HealthCheckRunner.Try(
+            () => Durability.ReadRegularFileNoFollow(
+                _config.AppBinary,
+                "Runtime binary").Snapshot.Sha256);
         checks[CHECK_RUNTIME_PRESENT] = IsDigest(actual);
 
         try
