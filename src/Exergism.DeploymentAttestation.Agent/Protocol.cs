@@ -175,6 +175,8 @@ internal static partial class Protocol
             RequireString(root, JSON_NEW_BINARY_SHA256),
             OptionalNullableString(root, JSON_NEW_RELEASE_MANIFEST_SHA256));
 
+        if (tx.Phase is not (PHASE_ACTIVATING or PHASE_COMMITTED))
+            throw new AgentException("Invalid transaction phase");
         if (!CommitPattern.IsMatch(tx.OldSourceCommit) ||
             !CommitPattern.IsMatch(tx.NewSourceCommit) ||
             !DigestPattern.IsMatch(tx.OldBinarySha256) ||
