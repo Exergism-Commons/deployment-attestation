@@ -153,12 +153,12 @@ internal sealed class GitRepository(AgentConfig config)
             }
             else if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
-                var verified = TrackedFileDurability.ReadVerifiedRegularFile(fullPath, entry.RelativePath);
-                var executable = (verified.Mode & UnixFileMode.UserExecute) != 0;
+                var verifiedFile = TrackedFileDurability.ReadVerifiedRegularFile(fullPath, entry.RelativePath);
+                var executable = (verifiedFile.Mode & UnixFileMode.UserExecute) != 0;
                 if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
                     throw new AgentException($"Executable bit mismatch: {entry.RelativePath}");
-                data = verified.Data;
-                verified.Files[Path.GetFullPath(fullPath)] = verified.Snapshot;
+                data = verifiedFile.Data;
+                verified.Files[Path.GetFullPath(fullPath)] = verifiedFile.Snapshot;
             }
             else
             {
