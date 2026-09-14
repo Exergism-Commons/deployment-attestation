@@ -20,6 +20,32 @@ internal static class ServiceQuiescence
            && (!cgroupExists || !cgroupHasProcesses);
 }
 
+internal static class SmokeScriptValidation
+{
+    internal static bool IsUsable(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return true;
+
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.LinkTarget is not null)
+                return false;
+
+            var mode = File.GetUnixFileMode(path);
+            return (mode & (
+                UnixFileMode.UserExecute |
+                UnixFileMode.GroupExecute |
+                UnixFileMode.OtherExecute)) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
 internal sealed class SystemdController(AgentConfig config)
 {
     private readonly AgentConfig _config = config;
@@ -151,10 +177,10 @@ internal sealed class SystemdController(AgentConfig config)
     public Task<bool> RunSmokeAsync()
         => HealthCheckRunner.RunAsync(async () =>
         {
+            if (!SmokeScriptValidation.IsUsable(_config.SmokeScript))
+                return false;
             if (string.IsNullOrEmpty(_config.SmokeScript))
                 return true;
-            if (!File.Exists(_config.SmokeScript))
-                return false;
 
             var unit = $"ec-smoke-{Sanitize(_config.Service)}-{Environment.ProcessId}-{Guid.NewGuid():N}.service";
             var arguments = new[]
