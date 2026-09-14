@@ -243,7 +243,7 @@ internal sealed class AgentConfig
         return value;
     }
 
-    private static Uri RequireHttpUri(string key, string value)
+    internal static Uri RequireHttpUri(string key, string value)
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
             (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
