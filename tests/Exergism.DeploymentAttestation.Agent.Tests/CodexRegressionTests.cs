@@ -422,6 +422,72 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public async Task RecoveryToleratesUnfetchedVerifiedSubmoduleCommit()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = environment.Config.AppDirectory;
+        var childSource = Path.Combine(environment.Root, "child-source");
+        Directory.CreateDirectory(childSource);
+
+        async Task GitAsync(string workingDirectory, params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync(
+                "git",
+                args,
+                workingDirectory: workingDirectory);
+            Assert.IsTrue(result.Success, result.StdErr);
+        }
+
+        await GitAsync(childSource, "init");
+        await GitAsync(childSource, "config", "user.name", "Regression Test");
+        await GitAsync(childSource, "config", "user.email", "regression@example.test");
+        File.WriteAllText(Path.Combine(childSource, "tracked.txt"), "old");
+        await GitAsync(childSource, "add", "tracked.txt");
+        await GitAsync(childSource, "commit", "-m", "child-old");
+
+        await GitAsync(checkout, "init");
+        await GitAsync(checkout, "config", "user.name", "Regression Test");
+        await GitAsync(checkout, "config", "user.email", "regression@example.test");
+        await GitAsync(
+            checkout,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            childSource,
+            "child");
+        await GitAsync(checkout, "commit", "-am", "super-old");
+
+        var missingCommit = new string('a', 40);
+        await GitAsync(
+            checkout,
+            "update-index",
+            $"--cacheinfo=160000,{missingCommit},child");
+        await GitAsync(checkout, "commit", "-m", "super-new-unfetched-child");
+
+        var child = Path.Combine(checkout, "child");
+        var missingProbe = await ProcessRunner.RunAsync(
+            "git",
+            new[] { "cat-file", "-e", $"{missingCommit}^{{commit}}" },
+            workingDirectory: child);
+        Assert.IsFalse(missingProbe.Success);
+
+        var childGitDir = await ProcessRunner.RunAsync(
+            "git",
+            new[] { "rev-parse", "--path-format=absolute", "--git-dir" },
+            workingDirectory: child);
+        Assert.IsTrue(childGitDir.Success, childGitDir.StdErr);
+        var childMetadata = Path.GetFullPath(childGitDir.StdOut.Trim());
+        var staleLock = Path.Combine(childMetadata, "recovery-test.lock");
+        File.WriteAllText(staleLock, "stale");
+
+        var repository = new GitRepository(environment.Config);
+        await repository.ReconcileStaleGitLocksAsync();
+
+        Assert.IsFalse(File.Exists(staleLock));
+    }
+
+    [TestMethod]
     public async Task UntrackedGitfileCannotRedirectStaleLockCleanup()
     {
         using var environment = TestEnvironment.Create();
