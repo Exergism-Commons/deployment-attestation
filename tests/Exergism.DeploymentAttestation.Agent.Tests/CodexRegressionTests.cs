@@ -317,6 +317,62 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void EnsureDirectoryRejectsSymlinkAncestor()
+    {
+        using var environment = TestEnvironment.Create();
+        var real = Path.Combine(environment.Root, "real");
+        var link = Path.Combine(environment.Root, "link");
+        Directory.CreateDirectory(real);
+        Directory.CreateSymbolicLink(link, real);
+
+        TestAssert.Throws<AgentException>(() =>
+            Durability.EnsureDirectory(
+                Path.Combine(link, "state"),
+                UnixFileMode.UserRead |
+                UnixFileMode.UserWrite |
+                UnixFileMode.UserExecute));
+    }
+
+    [TestMethod]
+    public void EnsureDirectoryDoesNotChmodExistingSharedDirectory()
+    {
+        using var environment = TestEnvironment.Create();
+        var shared = Path.Combine(environment.Root, "shared");
+        Directory.CreateDirectory(shared);
+        var original =
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite |
+            UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead |
+            UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead |
+            UnixFileMode.OtherExecute;
+        File.SetUnixFileMode(shared, original);
+
+        TestAssert.Throws<AgentException>(() =>
+            Durability.EnsureDirectory(
+                shared,
+                UnixFileMode.UserRead |
+                UnixFileMode.UserWrite |
+                UnixFileMode.UserExecute));
+
+        Assert.AreEqual(original, File.GetUnixFileMode(shared));
+    }
+
+    [TestMethod]
+    public void RequiredDirectoryFsyncRejectsSymlink()
+    {
+        using var environment = TestEnvironment.Create();
+        var real = Path.Combine(environment.Root, "real-dir");
+        var link = Path.Combine(environment.Root, "dir-link");
+        Directory.CreateDirectory(real);
+        Directory.CreateSymbolicLink(link, real);
+
+        TestAssert.Throws<AgentException>(() =>
+            Durability.FsyncRequiredDirectory(link, "symlinked directory"));
+    }
+
+    [TestMethod]
     public void MissingTrackedRegularFileFailsVerification()
     {
         using var environment = TestEnvironment.Create();
