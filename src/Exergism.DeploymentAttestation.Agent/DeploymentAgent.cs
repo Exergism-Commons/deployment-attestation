@@ -270,11 +270,10 @@ internal sealed class DeploymentAgent
             try
             {
                 var state = Protocol.ReadCurrentState(_config.CurrentStateFile);
-                if (state.SourceCommit == tx.NewSourceCommit &&
-                    state.BinarySha256 == tx.NewBinarySha256 &&
-                    tx.NewReleaseManifestSha256 is not null &&
-                    state.ReleaseManifestSha256 == tx.NewReleaseManifestSha256 &&
-                    state.ReleaseTag == _config.ReleaseTag &&
+                if (CommittedTransactionMatchesState(
+                        state,
+                        tx,
+                        _config.ReleaseTag) &&
                     await VerifyBaselineAsync())
                 {
                     await ResumeCommittedServiceAsync(tx.NewSourceCommit, tx.NewBinarySha256);
@@ -595,6 +594,17 @@ internal sealed class DeploymentAgent
 
         return new CheckSnapshot(actual, checks);
     }
+
+    internal static bool CommittedTransactionMatchesState(
+        CurrentState state,
+        DeploymentTransaction transaction,
+        string configuredReleaseTag)
+        => transaction.Phase == PHASE_COMMITTED &&
+           state.SourceCommit == transaction.NewSourceCommit &&
+           state.BinarySha256 == transaction.NewBinarySha256 &&
+           transaction.NewReleaseManifestSha256 is not null &&
+           state.ReleaseManifestSha256 == transaction.NewReleaseManifestSha256 &&
+           state.ReleaseTag == configuredReleaseTag;
 
     internal static bool CommittedReleaseMetadataMatches(
         CurrentState state,
