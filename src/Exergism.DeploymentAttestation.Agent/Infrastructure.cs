@@ -276,6 +276,9 @@ internal static class Durability
     public static void EnsureDirectory(string target, UnixFileMode mode)
     {
         target = Path.GetFullPath(target);
+        ValidateExistingDirectoryChainNoSymlinks(target);
+
+        var existed = Directory.Exists(target);
         var missing = new Stack<string>();
         var current = target;
 
@@ -286,24 +289,55 @@ internal static class Durability
             missing.Push(current);
             var parent = Path.GetDirectoryName(current);
             if (string.IsNullOrEmpty(parent) || parent == current)
-                break;
+                throw new AgentException($"cannot resolve existing ancestor for directory: {target}");
             current = parent;
         }
-
-        if (Directory.Exists(current) && new DirectoryInfo(current).LinkTarget is not null)
-            throw new AgentException($"unsafe symlink ancestor: {current}");
 
         while (missing.Count > 0)
         {
             var dir = missing.Pop();
             Directory.CreateDirectory(dir, mode);
             File.SetUnixFileMode(dir, mode);
-            FsyncDirectory(Path.GetDirectoryName(dir)!);
+            FsyncRequiredDirectory(dir, dir);
+            FsyncRequiredDirectory(
+                Path.GetDirectoryName(dir)
+                    ?? throw new AgentException($"directory has no parent: {dir}"),
+                $"parent of {dir}");
         }
 
-        File.SetUnixFileMode(target, mode);
-        FsyncDirectory(target);
-        FsyncDirectory(Path.GetDirectoryName(target)!);
+        if (existed)
+        {
+            var actual = File.GetUnixFileMode(target);
+            if (actual != mode)
+                throw new AgentException(
+                    $"existing directory permissions differ for {target}: expected={mode} actual={actual}");
+        }
+
+        ValidateExistingDirectoryChainNoSymlinks(target);
+        FsyncRequiredDirectory(target, target);
+        FsyncRequiredDirectory(
+            Path.GetDirectoryName(target)
+                ?? throw new AgentException($"directory has no parent: {target}"),
+            $"parent of {target}");
+    }
+
+    internal static void ValidateExistingDirectoryChainNoSymlinks(string target)
+    {
+        var current = Path.GetFullPath(target);
+        while (true)
+        {
+            if (File.Exists(current) && !Directory.Exists(current))
+                throw new AgentException($"unsafe non-directory ancestor: {current}");
+
+            if (Directory.Exists(current) &&
+                new DirectoryInfo(current).LinkTarget is not null)
+                throw new AgentException($"unsafe symlink ancestor: {current}");
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent) || parent == current)
+                return;
+            current = parent;
+        }
     }
 
     public static void AtomicWrite(string target, ReadOnlySpan<byte> bytes, UnixFileMode mode)
@@ -605,7 +639,7 @@ internal static class Durability
         if (string.IsNullOrEmpty(path))
             throw new AgentException($"Required directory path is empty during fsync: {displayPath}");
 
-        var fd = Native.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        var fd = Native.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0)
             throw new AgentException($"open required directory failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
         try
