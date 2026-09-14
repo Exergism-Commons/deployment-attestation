@@ -663,16 +663,19 @@ internal sealed class DeploymentAgent
             throw new AgentException("Invalid attestation endpoint");
 
         var receiverIdentity = AttestationReceiverIdentity.FromUri(endpoint);
-        if (string.IsNullOrEmpty(_config.HmacSecretFile) || !File.Exists(_config.HmacSecretFile))
+        if (string.IsNullOrEmpty(_config.HmacSecretFile))
         {
             _health.RecordRemoteAttestation(delivered: false, receiverIdentity);
-            throw new AgentException("HMAC secret not readable");
+            throw new AgentException("HMAC secret not configured");
         }
 
         byte[] key;
         try
         {
-            key = TrimAsciiWhitespace(await File.ReadAllBytesAsync(_config.HmacSecretFile));
+            key = TrimAsciiWhitespace(
+                Durability.ReadTrustedRegularFileBytes(
+                    _config.HmacSecretFile,
+                    ENV_HMAC_SECRET_FILE));
         }
         catch (Exception ex)
         {
