@@ -784,7 +784,9 @@ internal sealed class GitRepository(AgentConfig config)
             var effective = probe.StdOut.Trim();
             if (string.IsNullOrEmpty(effective))
                 throw new AgentException($"Git returned an empty effective path for {selector}");
-            if (protectedRoots.Any(root => PathsIntersect(effective, root)))
+            if (GitEffectivePathProbe.ReferencesProtected(
+                    new[] { effective },
+                    protectedRoots))
                 return true;
         }
 
