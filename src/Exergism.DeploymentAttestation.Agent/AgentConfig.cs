@@ -114,11 +114,9 @@ internal sealed class AgentConfig
 
     public static AgentConfig Load(string path)
     {
-        if (!File.Exists(path))
-            throw new AgentException($"Configuration not readable: {path}");
-
+        var text = Durability.ReadTrustedConfigText(path);
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var raw in File.ReadLines(path, Encoding.UTF8))
+        foreach (var raw in text.Split('\n'))
         {
             var line = raw.Trim();
             if (line.Length == 0 || line.StartsWith('#'))
