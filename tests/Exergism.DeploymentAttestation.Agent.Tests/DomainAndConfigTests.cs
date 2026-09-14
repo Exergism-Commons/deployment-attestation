@@ -35,6 +35,19 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void SingleQuotedConfigRejectsBashConcatenation()
+    {
+        Assert.AreEqual(
+            "/srv/id resolver",
+            AgentConfig.ParseValue("'/srv/id resolver'"));
+
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.ParseValue("'/srv/id'/'resolver'"));
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.ParseValue("'prefix'\''suffix'"));
+    }
+
+    [TestMethod]
     public void DoubleQuotedConfigMatchesBashBackslashSemantics()
     {
         Assert.AreEqual(
