@@ -347,6 +347,31 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void StaleLockEnumerationDoesNotFollowMetadataSymlinks()
+    {
+        using var environment = TestEnvironment.Create();
+        var metadata = Path.Combine(environment.Root, "metadata");
+        var external = Path.Combine(environment.Root, "external");
+        Directory.CreateDirectory(metadata);
+        Directory.CreateDirectory(external);
+
+        var internalLock = Path.Combine(metadata, "index.lock");
+        var externalLock = Path.Combine(external, "unrelated.lock");
+        File.WriteAllText(internalLock, "inside");
+        File.WriteAllText(externalLock, "outside");
+        Directory.CreateSymbolicLink(Path.Combine(metadata, "escape"), external);
+
+        var locks = GitMetadataEnumeration.EnumerateLockFiles(metadata)
+            .Select(Path.GetFullPath)
+            .ToArray();
+
+        CollectionAssert.AreEqual(
+            new[] { Path.GetFullPath(internalLock) },
+            locks);
+        Assert.IsFalse(locks.Contains(Path.GetFullPath(externalLock), StringComparer.Ordinal));
+    }
+
+    [TestMethod]
     public void GitMetadataTreeEnumerationDoesNotFollowSymlinkDirectories()
     {
         using var environment = TestEnvironment.Create();
