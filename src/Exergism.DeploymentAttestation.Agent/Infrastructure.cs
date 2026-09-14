@@ -273,6 +273,58 @@ internal static class Durability
         }
     }
 
+    public static byte[] ReadTrustedRegularFileBytes(string path, string displayPath)
+    {
+        if (!Path.IsPathFullyQualified(path))
+            throw new AgentException($"{displayPath} path must be absolute");
+
+        path = Path.GetFullPath(path);
+        var fd = Native.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException($"{displayPath} is not readable as a real file: errno={Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_TRUSTED_CONFIG_REQUIRED, out var before) != 0)
+                throw new AgentException($"Could not inspect {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+            if ((before.Mask & STATX_TRUSTED_CONFIG_REQUIRED) != STATX_TRUSTED_CONFIG_REQUIRED ||
+                (before.Mode & S_IFMT) != S_IFREG)
+                throw new AgentException($"{displayPath} must be a regular file");
+
+            var effectiveUid = Native.geteuid();
+            if (before.Uid != effectiveUid)
+                throw new AgentException($"{displayPath} must be owned by effective uid {effectiveUid}");
+
+            var mode = (UnixFileMode)(before.Mode & ~S_IFMT);
+            if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+                throw new AgentException($"{displayPath} must not be writable by group or others");
+
+            using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
+            fd = -1;
+            using var stream = new FileStream(handle, FileAccess.Read);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            var data = buffer.ToArray();
+
+            var openFd = checked((int)handle.DangerousGetHandle());
+            if (Native.statx(openFd, "", AT_EMPTY_PATH, STATX_TRUSTED_CONFIG_REQUIRED, out var after) != 0)
+                throw new AgentException($"Could not re-check {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+            if (!FileSnapshot.From(before, data).MatchesMetadata(after) ||
+                before.Uid != after.Uid ||
+                before.Gid != after.Gid ||
+                before.Mode != after.Mode)
+                throw new AgentException($"{displayPath} changed while being read");
+
+            return data;
+        }
+        finally
+        {
+            if (fd >= 0)
+                _ = Native.close(fd);
+        }
+    }
+
     public static void EnsureDirectory(string target, UnixFileMode mode)
     {
         target = Path.GetFullPath(target);
