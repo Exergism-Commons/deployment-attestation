@@ -130,7 +130,12 @@ internal sealed class AgentConfig
     internal static string ParseValue(string value)
     {
         if (value.Length >= 2 && value[0] == '\'' && value[^1] == '\'')
-            return value[1..^1];
+        {
+            var inner = value[1..^1];
+            if (inner.Contains('\''))
+                throw new AgentException("Concatenated single-quoted shell values are not supported in agent configuration");
+            return inner;
+        }
 
         if (value.Length >= 2 && value[0] == '"' && value[^1] == '"')
         {
