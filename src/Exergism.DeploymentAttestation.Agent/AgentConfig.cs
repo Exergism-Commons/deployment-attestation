@@ -18,7 +18,7 @@ internal sealed class AgentConfig
             => values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : fallback;
 
         Service = Required(ENV_SERVICE);
-        Repository = Required(ENV_REPOSITORY);
+        Repository = RequireRepositoryIdentifier(ENV_REPOSITORY, Required(ENV_REPOSITORY));
         EnvironmentName = Required(ENV_ENVIRONMENT);
         ReleaseTag = Required(ENV_RELEASE_TAG);
         AppDirectory = RequireAbsolutePath(ENV_APP_DIR, Required(ENV_APP_DIR));
@@ -30,9 +30,12 @@ internal sealed class AgentConfig
 
         values.TryGetValue(ENV_HOST_ID, out var configuredHostId);
         HostId = HostIdentity.SelectConfiguredOrDefault(configuredHostId, HostIdentity.ResolveDefault);
-        GitHubDownloadBase = new Uri(Optional(
+        GitHubDownloadBase = RequireHttpUri(
             ENV_GITHUB_DOWNLOAD_BASE,
-            $"https://github.com/{Repository}/releases/download/{ReleaseTag}").TrimEnd('/') + "/", UriKind.Absolute);
+            Optional(
+                ENV_GITHUB_DOWNLOAD_BASE,
+                $"https://github.com/{Repository}/releases/download/{ReleaseTag}")
+                .TrimEnd('/') + "/");
         ReleaseManifestName = RequireSafeAssetName(
             ENV_RELEASE_MANIFEST,
             Optional(ENV_RELEASE_MANIFEST, RELEASE_MANIFEST_DEFAULT));
@@ -223,6 +226,13 @@ internal sealed class AgentConfig
         => Path.IsPathFullyQualified(value)
             ? Path.GetFullPath(value)
             : throw new AgentException($"{key} must be an absolute path");
+
+    internal static string RequireRepositoryIdentifier(string key, string value)
+    {
+        if (!Protocol.IsValidRepositoryIdentifier(value))
+            throw new AgentException($"{key} must match owner/repository using only letters, digits, '.', '_', and '-'");
+        return value;
+    }
 
     internal static string RequireOptionalHttpUri(string key, string value)
     {
