@@ -290,6 +290,26 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void RequiredDirectoryFsyncRejectsMissingDirectory()
+    {
+        using var environment = TestEnvironment.Create();
+        var missing = Path.Combine(environment.Root, "missing-directory");
+
+        TestAssert.Throws<AgentException>(
+            () => Durability.FsyncRequiredDirectory(missing, "missing-directory"));
+    }
+
+    [TestMethod]
+    public void RequiredDirectoryFsyncAcceptsExistingDirectory()
+    {
+        using var environment = TestEnvironment.Create();
+        var directory = Path.Combine(environment.Root, "required-directory");
+        Directory.CreateDirectory(directory);
+
+        Durability.FsyncRequiredDirectory(directory, "required-directory");
+    }
+
+    [TestMethod]
     public void BinaryHashIoFailureBecomesMissingProbeValue()
     {
         var digest = HealthCheckRunner.Try<string>(
