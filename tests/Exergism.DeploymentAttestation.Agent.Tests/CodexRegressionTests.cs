@@ -432,6 +432,25 @@ public sealed class CodexRegressionTests
             workingDirectory: checkout);
         Assert.IsTrue(init.Success, init.StdErr);
 
+        foreach (var config in new[]
+                 {
+                     new[] { "config", "user.name", "Regression Test" },
+                     new[] { "config", "user.email", "regression@example.test" }
+                 })
+        {
+            var configured = await ProcessRunner.RunAsync(
+                "git",
+                config,
+                workingDirectory: checkout);
+            Assert.IsTrue(configured.Success, configured.StdErr);
+        }
+
+        var commit = await ProcessRunner.RunAsync(
+            "git",
+            new[] { "commit", "--allow-empty", "-m", "fixture" },
+            workingDirectory: checkout);
+        Assert.IsTrue(commit.Success, commit.StdErr);
+
         var externalRepository = Path.Combine(environment.Root, "external-repository");
         var externalMetadata = Path.Combine(externalRepository, GIT_METADATA_NAME);
         Directory.CreateDirectory(externalMetadata);
