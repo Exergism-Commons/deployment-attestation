@@ -41,8 +41,10 @@ internal sealed class TestEnvironment : IDisposable
 
         if (withAttestationEndpoint)
         {
+            var secretPath = Path.Combine(root, "secret");
+            File.WriteAllText(secretPath, "test-secret\n", Encoding.UTF8);
             lines.Add("EC_ATTESTATION_ENDPOINT=https://health.example.test/v1/attest");
-            lines.Add($"EC_HMAC_SECRET_FILE={Path.Combine(root, "secret")}");
+            lines.Add($"EC_HMAC_SECRET_FILE={secretPath}");
         }
 
         File.WriteAllText(configPath, string.Join('\n', lines) + "\n", Encoding.UTF8);
