@@ -155,6 +155,39 @@ internal static class GitMetadataBoundary
     }
 }
 
+internal static class GitTreePath
+{
+    internal static string Resolve(string repository, string relativePath)
+    {
+        if (string.IsNullOrEmpty(relativePath) ||
+            Path.IsPathFullyQualified(relativePath))
+            throw new AgentException($"Unsafe Git tree path: {relativePath}");
+
+        var components = relativePath.Split('/');
+        if (components.Any(component =>
+                string.IsNullOrEmpty(component) ||
+                component is "." or ".." ||
+                component == GIT_METADATA_NAME))
+            throw new AgentException($"Unsafe Git tree path: {relativePath}");
+
+        var repositoryRoot = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(repository));
+        var combined = Path.GetFullPath(Path.Combine(
+            repositoryRoot,
+            string.Join(Path.DirectorySeparatorChar, components)));
+        var relative = Path.GetRelativePath(repositoryRoot, combined);
+
+        if (relative is "." or ".." ||
+            relative.StartsWith(
+                ".." + Path.DirectorySeparatorChar,
+                StringComparison.Ordinal) ||
+            Path.IsPathFullyQualified(relative))
+            throw new AgentException($"Git tree path escapes repository: {relativePath}");
+
+        return combined;
+    }
+}
+
 internal static class GitProcessIdentity
 {
     private const string GIT_EXECUTABLE_NAME = "git";
@@ -273,7 +306,7 @@ internal sealed class GitRepository(AgentConfig config)
 
         foreach (var entry in entries)
         {
-            var fullPath = Path.Combine(repository, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            var fullPath = GitTreePath.Resolve(repository, entry.RelativePath);
             AddParentChain(expectedDirectories, fullPath, repository);
             if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
             {
@@ -358,7 +391,7 @@ internal sealed class GitRepository(AgentConfig config)
         var entries = await ReadTreeAsync(_config.AppDirectory, commit);
         foreach (var entry in entries.Where(entry => entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT))
         {
-            var path = Path.Combine(_config.AppDirectory, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            var path = GitTreePath.Resolve(_config.AppDirectory, entry.RelativePath);
             if (!File.Exists(path) && !Directory.Exists(path))
                 continue;
 
@@ -392,7 +425,7 @@ internal sealed class GitRepository(AgentConfig config)
 
         foreach (var entry in entries)
         {
-            var path = Path.Combine(repository, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            var path = GitTreePath.Resolve(repository, entry.RelativePath);
             AddParentChain(directories, path, repository);
 
             if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
@@ -577,9 +610,9 @@ internal sealed class GitRepository(AgentConfig config)
                      entry.Mode == GIT_MODE_GITLINK &&
                      entry.Kind == GIT_OBJECT_COMMIT))
         {
-            var submodulePath = Path.GetFullPath(Path.Combine(
+            var submodulePath = GitTreePath.Resolve(
                 repository,
-                entry.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+                entry.RelativePath);
             if (!File.Exists(submodulePath) && !Directory.Exists(submodulePath))
             {
                 if (traversalMode == GitMetadataTraversalMode.StrictTargetCommit)
