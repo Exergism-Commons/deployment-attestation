@@ -17,35 +17,35 @@ internal sealed class AgentConfig
         string Optional(string key, string fallback = "")
             => values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : fallback;
 
-        Service = Required(ENV_SERVICE);
+        Service = RequireSafeServiceIdentifier(ENV_SERVICE, Required(ENV_SERVICE));
         Repository = RequireRepositoryIdentifier(ENV_REPOSITORY, Required(ENV_REPOSITORY));
         EnvironmentName = Required(ENV_ENVIRONMENT);
         ReleaseTag = Required(ENV_RELEASE_TAG);
         AppDirectory = RequireAbsolutePath(ENV_APP_DIR, Required(ENV_APP_DIR));
         AppBinary = RequireAbsolutePath(ENV_APP_BIN, Required(ENV_APP_BIN));
-        ServiceUnit = Required(ENV_SERVICE_UNIT);
+        ServiceUnit = RequireSafeSystemdUnit(ENV_SERVICE_UNIT, Required(ENV_SERVICE_UNIT));
         SourceRevisionFile = RequireAbsolutePath(ENV_SOURCE_REVISION_FILE, Required(ENV_SOURCE_REVISION_FILE));
-        LocalUrl = RequireHttpUri(ENV_LOCAL_URL, Required(ENV_LOCAL_URL));
-        PublicUrl = RequireHttpUri(ENV_PUBLIC_URL, Required(ENV_PUBLIC_URL));
+        LocalUrl = RequireLoopbackHttpUri(ENV_LOCAL_URL, Required(ENV_LOCAL_URL));
+        PublicUrl = RequireHttpsUri(ENV_PUBLIC_URL, Required(ENV_PUBLIC_URL));
 
         values.TryGetValue(ENV_HOST_ID, out var configuredHostId);
         HostId = HostIdentity.SelectConfiguredOrDefault(configuredHostId, HostIdentity.ResolveDefault);
-        GitHubDownloadBase = RequireHttpUri(
+        GitHubDownloadBase = RequireHttpsUri(
             ENV_GITHUB_DOWNLOAD_BASE,
             Optional(
                 ENV_GITHUB_DOWNLOAD_BASE,
-                $"https://github.com/{Repository}/releases/download/{ReleaseTag}")
+                $"https://github.com/{Repository}/releases/download/{Uri.EscapeDataString(ReleaseTag)}")
                 .TrimEnd('/') + "/");
         ReleaseManifestName = RequireSafeAssetName(
             ENV_RELEASE_MANIFEST,
             Optional(ENV_RELEASE_MANIFEST, RELEASE_MANIFEST_DEFAULT));
-        AttestationEndpoint = RequireOptionalHttpUri(
+        AttestationEndpoint = RequireOptionalAttestationUri(
             ENV_ATTESTATION_ENDPOINT,
             Optional(ENV_ATTESTATION_ENDPOINT));
         HmacSecretFile = RequireAttestationSecret(
             AttestationEndpoint,
             Optional(ENV_HMAC_SECRET_FILE));
-        SmokeScript = RequireOptionalExecutableFile(
+        SmokeScript = RequireOptionalAbsolutePath(
             ENV_SMOKE_SCRIPT,
             Optional(ENV_SMOKE_SCRIPT));
         SmokeTimeout = PositiveSeconds(Optional(ENV_SMOKE_TIMEOUT, "60"), ENV_SMOKE_TIMEOUT);
@@ -57,6 +57,14 @@ internal sealed class AgentConfig
         StateDirectory = RequireAbsolutePath(
             ENV_STATE_DIR,
             Optional(ENV_STATE_DIR, $"/var/lib/ec-deployment-attestation/{Service}"));
+
+        ValidateDeploymentPathTopology(
+            AppDirectory,
+            AppBinary,
+            SourceRevisionFile,
+            StateDirectory,
+            HmacSecretFile,
+            SmokeScript);
 
         CurrentStateFile = Path.Combine(StateDirectory, FILE_CURRENT_STATE);
         TransactionFile = Path.Combine(StateDirectory, FILE_TRANSACTION);
@@ -249,11 +257,38 @@ internal sealed class AgentConfig
         return value;
     }
 
+    internal static string RequireOptionalAttestationUri(string key, string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        var uri = RequireHttpUri(key, value);
+        if (uri.Scheme != Uri.UriSchemeHttps && !uri.IsLoopback)
+            throw new AgentException($"{key} must use HTTPS unless the receiver is loopback");
+        return value;
+    }
+
     internal static Uri RequireHttpUri(string key, string value)
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
             (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             throw new AgentException($"{key} must be an absolute HTTP(S) URL");
+        return uri;
+    }
+
+    internal static Uri RequireHttpsUri(string key, string value)
+    {
+        var uri = RequireHttpUri(key, value);
+        if (uri.Scheme != Uri.UriSchemeHttps)
+            throw new AgentException($"{key} must use HTTPS");
+        return uri;
+    }
+
+    internal static Uri RequireLoopbackHttpUri(string key, string value)
+    {
+        var uri = RequireHttpUri(key, value);
+        if (!uri.IsLoopback)
+            throw new AgentException($"{key} must target loopback");
         return uri;
     }
 
@@ -298,30 +333,84 @@ internal sealed class AgentConfig
             _ => throw new AgentException($"{key} must be exactly 0 or 1")
         };
 
-    internal static string RequireOptionalExecutableFile(string key, string value)
+    internal static string RequireOptionalAbsolutePath(string key, string value)
+        => string.IsNullOrEmpty(value)
+            ? string.Empty
+            : RequireAbsolutePath(key, value);
+
+    internal static string RequireSafeServiceIdentifier(string key, string value)
     {
-        if (string.IsNullOrEmpty(value))
-            return string.Empty;
+        if (value.Length == 0 ||
+            !char.IsAsciiLetterOrDigit(value[0]) ||
+            value.Any(character =>
+                !(char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-')))
+            throw new AgentException($"{key} contains unsafe service identifier characters");
+        return value;
+    }
 
-        var path = RequireAbsolutePath(key, value);
-        var info = new FileInfo(path);
-        if (!info.Exists || info.LinkTarget is not null)
-            throw new AgentException($"{key} must be a real executable file, not a symlink");
+    internal static string RequireSafeSystemdUnit(string key, string value)
+    {
+        if (value.Length == 0 ||
+            !char.IsAsciiLetterOrDigit(value[0]) ||
+            value.Any(character =>
+                !(char.IsAsciiLetterOrDigit(character) ||
+                  character is '.' or '_' or '-' or '@' or ':')))
+            throw new AgentException($"{key} contains unsafe systemd unit characters");
+        return value;
+    }
 
-        UnixFileMode mode;
-        try
+    internal static void ValidateDeploymentPathTopology(
+        string appDirectory,
+        string appBinary,
+        string sourceRevisionFile,
+        string stateDirectory,
+        string hmacSecretFile,
+        string smokeScript)
+    {
+        appDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(appDirectory));
+        appBinary = Path.GetFullPath(appBinary);
+        sourceRevisionFile = Path.GetFullPath(sourceRevisionFile);
+        stateDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(stateDirectory));
+
+        if (appDirectory == Path.TrimEndingDirectorySeparator(Path.GetPathRoot(appDirectory)!))
+            throw new AgentException($"{ENV_APP_DIR} must not be a filesystem root");
+        if (stateDirectory == Path.TrimEndingDirectorySeparator(Path.GetPathRoot(stateDirectory)!))
+            throw new AgentException($"{ENV_STATE_DIR} must not be a filesystem root");
+
+        if (PathsIntersect(appDirectory, stateDirectory))
+            throw new AgentException($"{ENV_STATE_DIR} must not overlap {ENV_APP_DIR}");
+        RejectUnderCheckout(ENV_APP_BIN, appBinary, appDirectory);
+        RejectUnderCheckout(ENV_SOURCE_REVISION_FILE, sourceRevisionFile, appDirectory);
+
+        if (IsSameOrDescendant(appBinary, stateDirectory))
+            throw new AgentException($"{ENV_APP_BIN} must not be inside {ENV_STATE_DIR}");
+
+        if (!string.IsNullOrEmpty(hmacSecretFile))
+            RejectUnderCheckout(ENV_HMAC_SECRET_FILE, hmacSecretFile, appDirectory);
+
+        if (!string.IsNullOrEmpty(smokeScript))
         {
-            mode = File.GetUnixFileMode(path);
+            RejectUnderCheckout(ENV_SMOKE_SCRIPT, smokeScript, appDirectory);
+            if (IsSameOrDescendant(smokeScript, stateDirectory))
+                throw new AgentException($"{ENV_SMOKE_SCRIPT} must not be inside {ENV_STATE_DIR}");
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            throw new AgentException($"{key} is not inspectable", ex);
-        }
+    }
 
-        if ((mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
-            throw new AgentException($"{key} must be executable");
+    private static void RejectUnderCheckout(string key, string path, string appDirectory)
+    {
+        if (IsSameOrDescendant(path, appDirectory))
+            throw new AgentException($"{key} must not be inside {ENV_APP_DIR}");
+    }
 
-        return path;
+    private static bool PathsIntersect(string left, string right)
+        => IsSameOrDescendant(left, right) || IsSameOrDescendant(right, left);
+
+    private static bool IsSameOrDescendant(string path, string root)
+    {
+        path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        return path == root ||
+               path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     private static TimeSpan PositiveSeconds(string value, string key)
