@@ -323,6 +323,54 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void DirectoryChurnChangesSnapshotEvenWhenEntryIsRemoved()
+    {
+        using var environment = TestEnvironment.Create();
+        var directory = Path.Combine(environment.Root, "checkout");
+        Directory.CreateDirectory(directory);
+
+        var before = Durability.ReadDirectorySnapshotNoFollow(directory, "checkout");
+        var transient = Path.Combine(directory, "transient");
+        File.WriteAllText(transient, "temporary");
+        File.Delete(transient);
+        var after = Durability.ReadDirectorySnapshotNoFollow(directory, "checkout");
+
+        Assert.AreNotEqual(before, after);
+        TestAssert.Throws<AgentException>(
+            () => Durability.FsyncDirectorySnapshotNoFollow(
+                directory,
+                "checkout",
+                before));
+    }
+
+    [TestMethod]
+    public void VerifiedRuntimeDescriptorFsyncChecksDigestAndMode()
+    {
+        using var environment = TestEnvironment.Create();
+        var runtime = Path.Combine(environment.Root, "runtime");
+        File.WriteAllText(runtime, "runtime-content");
+        File.SetUnixFileMode(
+            runtime,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        var expected = Durability.Sha256(runtime);
+        var snapshot = Durability.VerifyAndFsyncRegularFileNoFollow(
+            runtime,
+            "runtime",
+            expected,
+            requireExecutable: true);
+
+        Assert.AreEqual(expected, snapshot.Sha256);
+
+        TestAssert.Throws<AgentException>(
+            () => Durability.VerifyAndFsyncRegularFileNoFollow(
+                runtime,
+                "runtime",
+                new string('0', 64),
+                requireExecutable: true));
+    }
+
+    [TestMethod]
     public void RequiredDirectoryFsyncRejectsMissingDirectory()
     {
         using var environment = TestEnvironment.Create();
