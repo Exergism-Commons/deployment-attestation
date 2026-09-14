@@ -51,6 +51,28 @@ INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
+path_exists_any() {
+  [[ -e "$1" || -L "$1" ]]
+}
+
+require_real_phase_or_absent() {
+  local path="$1"
+  if path_exists_any "$path"; then
+    [[ -d "$path" && ! -L "$path" ]] || {
+      echo "CRITICAL: installer transaction path is not a real directory: $path" >&2
+      return 1
+    }
+  fi
+}
+
+validate_phase_paths() {
+  require_real_phase_or_absent "$INSTALL_PENDING_DIR"
+  require_real_phase_or_absent "$INSTALL_VALIDATED_DIR"
+  require_real_phase_or_absent "$INSTALL_RECOVERING_DIR"
+  require_real_phase_or_absent "$INSTALL_RECOVERED_DIR"
+  require_real_phase_or_absent "$INSTALL_COMMITTED_DIR"
+}
+
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
 
 for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat sleep stat; do
@@ -143,7 +165,7 @@ atomic_install_root_file() {
   # Content reaches stable storage before the rename. Until rename, the old
   # destination remains intact; after rename, fsync the directory entry.
   durable_sync_paths "$tmp"
-  mv -f "$tmp" "$dest"
+  mv -fT -- "$tmp" "$dest"
   durable_sync_paths "$dest" "$dir"
 
   trap - RETURN
@@ -158,6 +180,8 @@ install -d -o root -g root -m 0755 "$AGENT_RECOVERY_DROPIN_DIR"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_PARENT"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_ROOT"
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/ec-deployment-attestation/secrets   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   "$INSTALL_STATE_ROOT"
+
+validate_phase_paths
 
 manager_version="$(systemctl show --property=Version --value 2>/dev/null || true)"
 systemd_version="$(printf '%s\n' "$manager_version" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
@@ -507,7 +531,9 @@ artifact_path() {
 
 create_install_transaction() {
   local stage key path present
-  [[ ! -e "$INSTALL_PENDING_DIR" && ! -e "$INSTALL_VALIDATED_DIR" && ! -e "$INSTALL_RECOVERING_DIR" && ! -e "$INSTALL_RECOVERED_DIR" ]] || return 1
+  for phase_path in "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR" "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"; do
+    path_exists_any "$phase_path" && return 1
+  done
 
   stage="$(mktemp -d "${INSTALL_STATE_ROOT}/.${SERVICE}.pending.XXXXXX")"
   install -d -o root -g root -m 0700 "$stage/backups"
@@ -521,9 +547,14 @@ create_install_transaction() {
   for key in agent smoke service_unit timer_unit env fence; do
     path="$(artifact_path "$key")"
     present=0
-    if [[ -e "$path" || -L "$path" ]]; then
+    if path_exists_any "$path"; then
+      [[ -f "$path" || -L "$path" ]] || {
+        echo "Refusing to journal non-file artifact for $key: $path" >&2
+        rm -rf -- "$stage"
+        return 1
+      }
       present=1
-      cp -a -- "$path" "$stage/backups/$key"
+      cp -aT -- "$path" "$stage/backups/$key"
     fi
     printf '%s\n' "$present" > "$stage/${key}_present"
   done
@@ -556,7 +587,7 @@ finally:
     os.close(fd)
 PY
 
-  mv "$stage" "$INSTALL_PENDING_DIR"
+  mv -T -- "$stage" "$INSTALL_PENDING_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 }
 
@@ -567,13 +598,13 @@ persist_installed_generation() {
 }
 
 mark_generation_validated() {
-  mv "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"
+  mv -T -- "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 }
 
 finalize_install_transaction() {
   rm -rf "$INSTALL_COMMITTED_DIR"
-  mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"
+  mv -T -- "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
   rm -rf "$INSTALL_COMMITTED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
