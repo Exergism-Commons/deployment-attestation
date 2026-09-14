@@ -355,6 +355,73 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void VerifiedSubmoduleMetadataAllowsModernAndOldLayoutsOnly()
+    {
+        using var environment = TestEnvironment.Create();
+        var top = Path.Combine(environment.Root, "top");
+        var topMetadata = Path.Combine(top, GIT_METADATA_NAME);
+        Directory.CreateDirectory(topMetadata);
+
+        GitMetadataBoundary.EnsureRepositoryRoots(
+            top,
+            new[] { topMetadata },
+            parentMetadataHierarchy: null,
+            isTopLevel: true);
+
+        var submodule = Path.Combine(top, "submodule");
+        Directory.CreateDirectory(submodule);
+
+        var modernMetadata = Path.Combine(topMetadata, "modules", "submodule");
+        Directory.CreateDirectory(modernMetadata);
+        GitMetadataBoundary.EnsureRepositoryRoots(
+            submodule,
+            new[] { modernMetadata },
+            new[] { topMetadata },
+            isTopLevel: false);
+
+        var oldMetadata = Path.Combine(submodule, GIT_METADATA_NAME);
+        Directory.CreateDirectory(oldMetadata);
+        GitMetadataBoundary.EnsureRepositoryRoots(
+            submodule,
+            new[] { oldMetadata },
+            new[] { topMetadata },
+            isTopLevel: false);
+
+        var externalMetadata = Path.Combine(environment.Root, "external", GIT_METADATA_NAME);
+        Directory.CreateDirectory(externalMetadata);
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataBoundary.EnsureRepositoryRoots(
+                submodule,
+                new[] { externalMetadata },
+                new[] { topMetadata },
+                isTopLevel: false));
+    }
+
+    [TestMethod]
+    public void TopLevelRepositoryRejectsExternalGitMetadata()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = Path.Combine(environment.Root, "checkout");
+        var embedded = Path.Combine(checkout, GIT_METADATA_NAME);
+        var external = Path.Combine(environment.Root, "external-metadata");
+        Directory.CreateDirectory(embedded);
+        Directory.CreateDirectory(external);
+
+        GitMetadataBoundary.EnsureRepositoryRoots(
+            checkout,
+            new[] { embedded },
+            parentMetadataHierarchy: null,
+            isTopLevel: true);
+
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataBoundary.EnsureRepositoryRoots(
+                checkout,
+                new[] { external },
+                parentMetadataHierarchy: null,
+                isTopLevel: true));
+    }
+
+    [TestMethod]
     public async Task UntrackedGitfileCannotRedirectStaleLockCleanup()
     {
         using var environment = TestEnvironment.Create();
