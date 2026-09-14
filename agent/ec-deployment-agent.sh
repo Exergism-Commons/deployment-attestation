@@ -9,7 +9,18 @@ log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-[[ -r "$CONFIG_FILE" ]] || die "Configuration not readable: $CONFIG_FILE"
+command -v stat >/dev/null 2>&1 || die "Required command not found: stat"
+[[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] ||
+  die "Configuration must be a readable real file: $CONFIG_FILE"
+config_owner="$(stat -Lc '%u' -- "$CONFIG_FILE")" ||
+  die "Could not inspect configuration owner"
+config_mode="$(stat -Lc '%a' -- "$CONFIG_FILE")" ||
+  die "Could not inspect configuration mode"
+[[ "$config_owner" == "$EUID" ]] ||
+  die "Configuration must be owned by the effective user"
+(( (8#$config_mode & 022) == 0 )) ||
+  die "Configuration must not be writable by group or others"
+
 set -a
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
@@ -39,6 +50,150 @@ EC_STATE_DIR="${EC_STATE_DIR:-/var/lib/ec-deployment-attestation/${EC_SERVICE}}"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${EC_SERVICE//[^A-Za-z0-9_.-]/-}.agent.lock"
 INSTALL_TRANSACTION_ROOT="/var/lib/ec-deployment-attestation/install"
 EC_CHECK_PUBLIC="${EC_CHECK_PUBLIC:-1}"
+[[ "$EC_CHECK_PUBLIC" =~ ^[01]$ ]] ||
+  die "EC_CHECK_PUBLIC must be exactly 0 or 1"
+
+python3 - \
+  "$EC_SERVICE" "$EC_REPOSITORY" "$EC_RELEASE_TAG" \
+  "$EC_APP_DIR" "$EC_APP_BIN" "$EC_SERVICE_UNIT" "$EC_SOURCE_REVISION_FILE" \
+  "$EC_LOCAL_URL" "$EC_PUBLIC_URL" "$EC_GITHUB_DOWNLOAD_BASE" \
+  "$EC_ATTESTATION_ENDPOINT" "$EC_HMAC_SECRET_FILE" "$EC_SMOKE_SCRIPT" \
+  "$EC_STATE_DIR" "$EC_RELEASE_MANIFEST" \
+  "$EC_RELEASE_MANIFEST_VALIDATOR" "$EC_RELEASE_MANIFEST_SCHEMA" <<'PY'
+import ipaddress
+import os
+import pathlib
+import re
+import stat
+import sys
+import urllib.parse
+
+(
+    service, repository, release_tag,
+    app_dir_raw, app_bin_raw, service_unit, revision_raw,
+    local_url, public_url, download_base,
+    attestation_endpoint, hmac_raw, smoke_raw,
+    state_raw, manifest_name,
+    manifest_validator_raw, manifest_schema_raw,
+) = sys.argv[1:]
+
+SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SAFE_UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@:-]*$")
+SAFE_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SAFE_RELEASE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SAFE_ASSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+def fail(message):
+    raise RuntimeError(message)
+
+def absolute(name, raw):
+    p = pathlib.Path(raw)
+    if not p.is_absolute():
+        fail(f"{name} must be an absolute path")
+    return pathlib.Path(os.path.normpath(str(p)))
+
+def under(path, root):
+    path = os.path.normpath(str(path))
+    root = os.path.normpath(str(root))
+    try:
+        return os.path.commonpath((path, root)) == root
+    except ValueError:
+        return False
+
+def overlap(left, right):
+    return under(left, right) or under(right, left)
+
+def parse_http(name, raw):
+    try:
+        uri = urllib.parse.urlsplit(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an absolute HTTP(S) URL") from exc
+    if uri.scheme not in {"http", "https"} or not uri.hostname or uri.username or uri.password:
+        fail(f"{name} must be an absolute HTTP(S) URL without userinfo")
+    return uri
+
+def is_loopback(uri):
+    host = (uri.hostname or "").casefold()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+if not SAFE_SERVICE.fullmatch(service):
+    fail("EC_SERVICE contains unsafe characters")
+if not SAFE_REPOSITORY.fullmatch(repository):
+    fail("EC_REPOSITORY must match owner/repository")
+if not SAFE_RELEASE_TAG.fullmatch(release_tag):
+    fail("EC_RELEASE_TAG contains unsafe characters")
+if not SAFE_UNIT.fullmatch(service_unit):
+    fail("EC_SERVICE_UNIT contains unsafe characters")
+if not SAFE_ASSET.fullmatch(manifest_name):
+    fail("EC_RELEASE_MANIFEST must be a safe single asset name")
+
+app_dir = absolute("EC_APP_DIR", app_dir_raw)
+app_bin = absolute("EC_APP_BIN", app_bin_raw)
+revision = absolute("EC_SOURCE_REVISION_FILE", revision_raw)
+state_dir = absolute("EC_STATE_DIR", state_raw)
+manifest_validator = absolute("EC_RELEASE_MANIFEST_VALIDATOR", manifest_validator_raw)
+manifest_schema = absolute("EC_RELEASE_MANIFEST_SCHEMA", manifest_schema_raw)
+hmac = absolute("EC_HMAC_SECRET_FILE", hmac_raw) if hmac_raw else None
+smoke = absolute("EC_SMOKE_SCRIPT", smoke_raw) if smoke_raw else None
+
+if app_dir == pathlib.Path(app_dir.anchor):
+    fail("EC_APP_DIR must not be a filesystem root")
+if state_dir == pathlib.Path(state_dir.anchor):
+    fail("EC_STATE_DIR must not be a filesystem root")
+if overlap(app_dir, state_dir):
+    fail("EC_STATE_DIR must not overlap EC_APP_DIR")
+for name, path in (
+    ("EC_APP_BIN", app_bin),
+    ("EC_SOURCE_REVISION_FILE", revision),
+    ("EC_RELEASE_MANIFEST_VALIDATOR", manifest_validator),
+    ("EC_RELEASE_MANIFEST_SCHEMA", manifest_schema),
+):
+    if under(path, app_dir):
+        fail(f"{name} must not be inside EC_APP_DIR")
+if under(app_bin, state_dir):
+    fail("EC_APP_BIN must not be inside EC_STATE_DIR")
+if hmac is not None and under(hmac, app_dir):
+    fail("EC_HMAC_SECRET_FILE must not be inside EC_APP_DIR")
+if smoke is not None:
+    if under(smoke, app_dir):
+        fail("EC_SMOKE_SCRIPT must not be inside EC_APP_DIR")
+    if under(smoke, state_dir):
+        fail("EC_SMOKE_SCRIPT must not be inside EC_STATE_DIR")
+
+local = parse_http("EC_LOCAL_URL", local_url)
+if not is_loopback(local):
+    fail("EC_LOCAL_URL must target loopback")
+public = parse_http("EC_PUBLIC_URL", public_url)
+if public.scheme != "https":
+    fail("EC_PUBLIC_URL must use HTTPS")
+download = parse_http("EC_GITHUB_DOWNLOAD_BASE", download_base)
+if download.scheme != "https":
+    fail("EC_GITHUB_DOWNLOAD_BASE must use HTTPS")
+
+if attestation_endpoint:
+    receiver = parse_http("EC_ATTESTATION_ENDPOINT", attestation_endpoint)
+    if receiver.scheme != "https" and not is_loopback(receiver):
+        fail("EC_ATTESTATION_ENDPOINT must use HTTPS unless loopback")
+    if hmac is None:
+        fail("EC_HMAC_SECRET_FILE is required when EC_ATTESTATION_ENDPOINT is configured")
+    try:
+        st = os.lstat(hmac)
+    except OSError as exc:
+        raise RuntimeError("EC_HMAC_SECRET_FILE is not readable") from exc
+    if not stat.S_ISREG(st.st_mode):
+        fail("EC_HMAC_SECRET_FILE must be a real regular file")
+    try:
+        secret = hmac.read_bytes()
+    except OSError as exc:
+        raise RuntimeError("EC_HMAC_SECRET_FILE is not readable") from exc
+    if not secret.strip():
+        fail("EC_HMAC_SECRET_FILE must not be empty")
+PY
 
 CURRENT_STATE_FILE="$EC_STATE_DIR/current-state.json"
 TRANSACTION_FILE="$EC_STATE_DIR/transaction.json"
