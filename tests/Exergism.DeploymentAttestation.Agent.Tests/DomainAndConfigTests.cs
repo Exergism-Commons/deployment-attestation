@@ -193,6 +193,46 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void SystemdShowUsesSupportedPropertyArgumentForm()
+    {
+        CollectionAssert.AreEqual(
+            new[] { "show", "id-exergism.service", "--property", SYSTEMD_ACTIVE_STATE, "--value" },
+            SystemdController.BuildShowArguments("id-exergism.service", SYSTEMD_ACTIVE_STATE));
+    }
+
+    [TestMethod]
+    public void ReceiverConfigurationRequiresUsableHmacSecret()
+    {
+        using var environment = TestEnvironment.Create();
+        var endpoint = "https://health.example.test/v1/attest";
+        var secret = Path.Combine(environment.Root, "receiver-secret");
+        File.WriteAllText(secret, "secret-value\n");
+
+        Assert.AreEqual(
+            Path.GetFullPath(secret),
+            AgentConfig.RequireAttestationSecret(endpoint, secret));
+
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireAttestationSecret(endpoint, string.Empty));
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireAttestationSecret(endpoint, "relative-secret"));
+
+        File.WriteAllText(secret, " \t\r\n");
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireAttestationSecret(endpoint, secret));
+
+        File.WriteAllText(secret, "secret-value");
+        var symlink = Path.Combine(environment.Root, "secret-link");
+        File.CreateSymbolicLink(symlink, secret);
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireAttestationSecret(endpoint, symlink));
+
+        Assert.AreEqual(
+            string.Empty,
+            AgentConfig.RequireAttestationSecret(string.Empty, string.Empty));
+    }
+
+    [TestMethod]
     public void AttestationEndpointMustBeHttpOrHttpsWhenConfigured()
     {
         Assert.AreEqual(
