@@ -398,6 +398,19 @@ root_commit = sys.argv[2]
 def git(repo, *args, binary=False):
     return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL, text=not binary)
 
+def tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    if (not relative or pure.is_absolute()
+            or any(part in {"", ".", "..", ".git"} for part in pure.parts)):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    p = pathlib.Path(os.path.normpath(str(repo.joinpath(*pure.parts))))
+    try:
+        if os.path.commonpath((str(p), str(repo))) != str(repo) or p == repo:
+            raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    except ValueError as exc:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}") from exc
+    return p
+
 def blob_oid(data, algorithm):
     h = hashlib.new(algorithm)
     h.update(f"blob {len(data)}\0".encode("ascii")); h.update(data)
@@ -443,7 +456,7 @@ def verify(repo, commit):
         raise RuntimeError(f"unsupported object format: {algorithm}")
     expected = set(); submods = {}
     for mode, kind, oid, rel in entries(repo, commit):
-        p = repo / rel
+        p = tree_path(repo, rel)
         if mode == "160000" and kind == "commit":
             st = p.lstat()
             if not stat.S_ISDIR(st.st_mode):
@@ -473,7 +486,7 @@ def verify(repo, commit):
     if actual != expected:
         raise RuntimeError(f"worktree file set differs; extra={sorted(actual-expected)!r} missing={sorted(expected-actual)!r}")
     for rel, oid in submods.items():
-        verify(repo / rel, oid)
+        verify(tree_path(repo, rel), oid)
 
 verify(root, root_commit)
 PY
@@ -484,13 +497,25 @@ prepare_gitlinks() {
   python3 - "$EC_APP_DIR" "$commit" <<'PY'
 import os, pathlib, shutil, stat, subprocess, sys
 root = pathlib.Path(sys.argv[1]).absolute(); commit = sys.argv[2]
+
+def tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    if (not relative or pure.is_absolute()
+            or any(part in {"", ".", "..", ".git"} for part in pure.parts)):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    p = pathlib.Path(os.path.normpath(str(repo.joinpath(*pure.parts))))
+    if os.path.commonpath((str(p), str(repo))) != str(repo) or p == repo:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    return p
+
 raw = subprocess.check_output(["git","-C",str(root),"ls-tree","-rz","--full-tree",commit])
 for rec in raw.split(b"\0"):
     if not rec: continue
     meta, raw_path = rec.split(b"\t", 1)
     mode, kind, _ = meta.decode("ascii").split()
     if mode != "160000" or kind != "commit": continue
-    p = root / os.fsdecode(raw_path)
+    relative = os.fsdecode(raw_path)
+    p = tree_path(root, relative)
     try: st = p.lstat()
     except FileNotFoundError: continue
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
@@ -526,6 +551,16 @@ NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 def git(repo, *args, binary=False):
     return subprocess.check_output(["git","-C",str(repo),*args], stderr=subprocess.DEVNULL, text=not binary)
+
+def tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    if (not relative or pure.is_absolute()
+            or any(part in {"", ".", "..", ".git"} for part in pure.parts)):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    p = pathlib.Path(os.path.normpath(str(repo.joinpath(*pure.parts))))
+    if os.path.commonpath((str(p), str(repo))) != str(repo) or p == repo:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    return p
 
 def fsync_regular(p):
     st = p.lstat()
@@ -577,7 +612,7 @@ def sync_repo(repo, commit):
         raise RuntimeError(f"HEAD changed during fsync: {repo}")
     dirs = {repo}; submods = []
     for mode, kind, oid, rel in entries(repo, commit):
-        p = repo / rel
+        p = tree_path(repo, rel)
         if mode == "160000" and kind == "commit":
             pst = p.lstat()
             if not stat.S_ISDIR(pst.st_mode):
