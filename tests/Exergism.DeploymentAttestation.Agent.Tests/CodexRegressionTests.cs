@@ -48,6 +48,36 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void GitTreePathsAreConfinedToRepository()
+    {
+        using var environment = TestEnvironment.Create();
+        var repository = Path.Combine(environment.Root, "tree-root");
+        Directory.CreateDirectory(repository);
+
+        Assert.AreEqual(
+            Path.Combine(repository, "nested", "file.txt"),
+            GitTreePath.Resolve(repository, "nested/file.txt"));
+
+        foreach (var invalid in new[]
+                 {
+                     "",
+                     ".",
+                     "..",
+                     "../escape",
+                     "nested/../escape",
+                     "nested/./file",
+                     "/absolute",
+                     ".git/config",
+                     "nested/.git/config",
+                     "nested//file"
+                 })
+        {
+            TestAssert.Throws<AgentException>(
+                () => GitTreePath.Resolve(repository, invalid));
+        }
+    }
+
+    [TestMethod]
     public void DeletedProcExeStillIdentifiesGit()
     {
         Assert.IsTrue(GitProcessIdentity.IsGitExecutable("git (deleted)"));
