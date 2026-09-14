@@ -66,6 +66,90 @@ public sealed class ProtocolTests
     }
 
     [TestMethod]
+    public void DurableStateRejectsEmptyTagAndInvalidTransactionContract()
+    {
+        using var environment = TestEnvironment.Create();
+
+        var emptyTagState = new CurrentState(
+            new string('a', 40),
+            new string('b', 64),
+            new string('c', 64),
+            string.Empty);
+        File.WriteAllBytes(
+            environment.Config.CurrentStateFile,
+            Protocol.WriteCurrentState(emptyTagState));
+        TestAssert.Throws<AgentException>(
+            () => Protocol.ReadCurrentState(environment.Config.CurrentStateFile));
+
+        var invalidPhase = new DeploymentTransaction(
+            "future-phase",
+            new string('a', 40),
+            new string('b', 64),
+            null,
+            Path.Combine(environment.Root, "backup"),
+            new string('d', 40),
+            new string('e', 64),
+            new string('f', 64));
+        File.WriteAllBytes(
+            environment.Config.TransactionFile,
+            Protocol.WriteTransaction(invalidPhase));
+        TestAssert.Throws<AgentException>(
+            () => Protocol.ReadTransaction(environment.Config.TransactionFile));
+
+        var missingNewManifest = invalidPhase with
+        {
+            Phase = PHASE_ACTIVATING,
+            NewReleaseManifestSha256 = null
+        };
+        File.WriteAllBytes(
+            environment.Config.TransactionFile,
+            Protocol.WriteTransaction(missingNewManifest));
+        TestAssert.Throws<AgentException>(
+            () => Protocol.ReadTransaction(environment.Config.TransactionFile));
+    }
+
+    [TestMethod]
+    public void CommittedRecoveryRequiresExactDurableManifestBinding()
+    {
+        var manifest = new string('c', 64);
+        var state = new CurrentState(
+            new string('a', 40),
+            new string('b', 64),
+            manifest,
+            "runtime-main");
+        var transaction = new DeploymentTransaction(
+            PHASE_COMMITTED,
+            new string('d', 40),
+            new string('e', 64),
+            null,
+            "/tmp/backup",
+            state.SourceCommit,
+            state.BinarySha256,
+            manifest);
+
+        Assert.IsTrue(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction,
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state with { ReleaseManifestSha256 = new string('f', 64) },
+                transaction,
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction with { NewReleaseManifestSha256 = null },
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction,
+                "runtime-canary"));
+    }
+
+    [TestMethod]
     public void MountInfoParserPreservesReadOnlyOptions()
     {
         var mounts = RuntimeInspector.ParseMountInfo(
