@@ -130,6 +130,69 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void RepositoryIdentifierMatchesReleaseManifestContract()
+    {
+        foreach (var valid in new[]
+                 {
+                     "Exergism-Commons/deployment-attestation",
+                     "owner/repo",
+                     "owner.name/repo_name-1"
+                 })
+        {
+            Assert.AreEqual(
+                valid,
+                AgentConfig.RequireRepositoryIdentifier(ENV_REPOSITORY, valid));
+            Assert.IsTrue(Protocol.IsValidRepositoryIdentifier(valid));
+        }
+
+        foreach (var invalid in new[]
+                 {
+                     "owner/repo/extra",
+                     "owner",
+                     "/repo",
+                     "owner/",
+                     "owner repo/name",
+                     "owner/repo@tag"
+                 })
+        {
+            TestAssert.Throws<AgentException>(
+                () => AgentConfig.RequireRepositoryIdentifier(
+                    ENV_REPOSITORY,
+                    invalid));
+            Assert.IsFalse(Protocol.IsValidRepositoryIdentifier(invalid));
+        }
+    }
+
+    [TestMethod]
+    public void DownloadBaseMustBeHttpOrHttps()
+    {
+        Assert.AreEqual(
+            Uri.UriSchemeHttps,
+            AgentConfig.RequireHttpUri(
+                ENV_GITHUB_DOWNLOAD_BASE,
+                "https://github.com/owner/repo/releases/download/tag/").Scheme);
+        Assert.AreEqual(
+            Uri.UriSchemeHttp,
+            AgentConfig.RequireHttpUri(
+                ENV_GITHUB_DOWNLOAD_BASE,
+                "http://mirror.example.test/releases/").Scheme);
+
+        foreach (var invalid in new[]
+                 {
+                     "file:///tmp/releases/",
+                     "ftp://mirror.example.test/releases/",
+                     "mailto:ops@example.test",
+                     "/relative/releases/"
+                 })
+        {
+            TestAssert.Throws<AgentException>(
+                () => AgentConfig.RequireHttpUri(
+                    ENV_GITHUB_DOWNLOAD_BASE,
+                    invalid));
+        }
+    }
+
+    [TestMethod]
     public void AttestationEndpointMustBeHttpOrHttpsWhenConfigured()
     {
         Assert.AreEqual(
