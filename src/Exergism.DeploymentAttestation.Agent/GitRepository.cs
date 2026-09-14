@@ -856,6 +856,8 @@ internal sealed class GitRepository(AgentConfig config)
         }
 
         var resolvedAnyGitPath = false;
+        var resolvedGitDir = false;
+        var resolvedCommonDir = false;
         foreach (var selector in new[] { "--show-toplevel", GIT_FLAG_DIR, "--git-common-dir" })
         {
             var pathProbeArgs = new List<string>(probeArgs);
@@ -878,6 +880,9 @@ internal sealed class GitRepository(AgentConfig config)
                 continue;
 
             resolvedAnyGitPath = true;
+            resolvedGitDir |= selector == GIT_FLAG_DIR;
+            resolvedCommonDir |= selector == "--git-common-dir";
+
             var effective = probe.StdOut.Trim();
             if (string.IsNullOrEmpty(effective))
                 throw new AgentException($"Git returned an empty effective path for {selector}");
@@ -886,6 +891,9 @@ internal sealed class GitRepository(AgentConfig config)
                     protectedRoots))
                 return true;
         }
+
+        if (resolvedAnyGitPath && (!resolvedGitDir || !resolvedCommonDir))
+            throw new AgentException("Cannot resolve complete live Git metadata paths");
 
         if (!resolvedAnyGitPath &&
             (environment.ContainsKey(GIT_ENV_CONFIG_PARAMETERS) ||
