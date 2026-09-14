@@ -387,6 +387,24 @@ internal static class Durability
             throw new AgentException($"fsync failed for {path}: errno={Marshal.GetLastPInvokeError()}");
     }
 
+    public static void FsyncRegularFileNoFollow(string path, string displayPath)
+    {
+        var fd = OpenRegularFileNoFollow(path, displayPath, out var beforeStat);
+        try
+        {
+            if (Native.fsync(fd) != 0)
+                throw new AgentException($"fsync regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+            var afterStat = StatRegularFileDescriptor(fd, displayPath);
+            if (FileIdentity.From(beforeStat) != FileIdentity.From(afterStat))
+                throw new AgentException($"Regular file identity changed during fsync: {displayPath}");
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
     public static VerifiedRegularFile ReadRegularFileNoFollow(string path, string displayPath)
     {
         var fd = OpenRegularFileNoFollow(path, displayPath, out var beforeStat);
