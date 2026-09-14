@@ -230,6 +230,48 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void TrustedConfigReaderRejectsSymlinksAndWritableFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"ec-config-trust-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var config = Path.Combine(root, "service.env");
+            File.WriteAllText(config, "EC_SERVICE=id.exergism.org\n");
+            File.SetUnixFileMode(
+                config,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+            Assert.AreEqual(
+                "EC_SERVICE=id.exergism.org\n",
+                Durability.ReadTrustedConfigText(config));
+
+            File.SetUnixFileMode(
+                config,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                UnixFileMode.GroupRead | UnixFileMode.GroupWrite);
+            TestAssert.Throws<AgentException>(
+                () => Durability.ReadTrustedConfigText(config));
+
+            File.SetUnixFileMode(
+                config,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            var link = Path.Combine(root, "service-link.env");
+            File.CreateSymbolicLink(link, config);
+            TestAssert.Throws<AgentException>(
+                () => Durability.ReadTrustedConfigText(link));
+
+            TestAssert.Throws<AgentException>(
+                () => Durability.ReadTrustedConfigText("relative.env"));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [TestMethod]
     public void SystemdShowUsesSupportedPropertyArgumentForm()
     {
         CollectionAssert.AreEqual(
