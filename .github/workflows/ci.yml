@@ -184,11 +184,11 @@ jobs:
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'reconcile_stale_git_locks()' agent/ec-deployment-agent.sh
           grep -Fq 'live git process' agent/ec-deployment-agent.sh
-          grep -Fq 'root.rglob("*.lock")' agent/ec-deployment-agent.sh
-          grep -Fq 'reconcile_stale_git_locks || return 1' agent/ec-deployment-agent.sh
+          grep -Fq 'os.walk(root, topdown=True, followlinks=False)' agent/ec-deployment-agent.sh
+          grep -Fq 'reconcile_stale_git_locks "$commit" || return 1' agent/ec-deployment-agent.sh
           grep -Fq 'arg.startswith("--git-dir=")' agent/ec-deployment-agent.sh
           grep -Fq 'arg.startswith("--work-tree=")' agent/ec-deployment-agent.sh
-          grep -Fq 'arg in ("--git-dir", "--work-tree", "-C")' agent/ec-deployment-agent.sh
+          grep -Fq 'arg in ("--git-dir", "--work-tree", "--separate-git-dir", "-C")' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_COMMON_DIR' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_INDEX_FILE' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_COUNT' agent/ec-deployment-agent.sh
@@ -196,7 +196,10 @@ jobs:
           grep -Fq 'rev-parse", "--path-format=absolute", "--show-toplevel' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_KEY_' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_VALUE_' agent/ec-deployment-agent.sh
-          grep -Fq 'for marker in app.rglob(".git")' agent/ec-deployment-agent.sh
+          grep -Fq 'def validate_roots(repo, own_roots, parent_roots):' agent/ec-deployment-agent.sh
+          grep -Fq 'for relative, target_oid in gitlinks(repo, commit):' agent/ec-deployment-agent.sh
+          grep -Fq 'for selector in ("--show-toplevel", "--git-dir", "--git-common-dir"):' agent/ec-deployment-agent.sh
+          grep -Fq 'os.unlink(lock.name, dir_fd=parent_fd)' agent/ec-deployment-agent.sh
           grep -Fq 'refusing to remove open git lock' agent/ec-deployment-agent.sh
           grep -Fq 'core.worktree' agent/ec-deployment-agent.sh
           grep -Fq -- '--config-env=' agent/ec-deployment-agent.sh
@@ -446,7 +449,7 @@ jobs:
           assert global_lock < state_lock < installer_phase_guard < dispatch
           stop_helper = agent.index('stop_service_quiescent()')
           rollback_call = agent.index('stop_service_quiescent || return 1', stop_helper)
-          stale_lock_reconcile = agent.index('reconcile_stale_git_locks || return 1')
+          stale_lock_reconcile = agent.index('reconcile_stale_git_locks "$commit" || return 1')
           rollback_switch = agent.index('switch_source "$commit" 0 || return 1')
           update_call = agent.index('if ! stop_service_quiescent; then')
           update_switch = agent.index('if ! switch_source "$RELEASE_SOURCE_COMMIT" 1; then')
