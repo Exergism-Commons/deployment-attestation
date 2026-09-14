@@ -233,6 +233,51 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void PublicCheckBooleanFailsClosedOnTypos()
+    {
+        Assert.IsTrue(AgentConfig.RequireBoolean(ENV_CHECK_PUBLIC, "1"));
+        Assert.IsFalse(AgentConfig.RequireBoolean(ENV_CHECK_PUBLIC, "0"));
+
+        foreach (var invalid in new[] { "", "true", "false", "yes", "2", "01" })
+            TestAssert.Throws<AgentException>(
+                () => AgentConfig.RequireBoolean(ENV_CHECK_PUBLIC, invalid));
+    }
+
+    [TestMethod]
+    public void SmokeScriptMustBeAbsoluteRealAndExecutable()
+    {
+        using var environment = TestEnvironment.Create();
+        var script = Path.Combine(environment.Root, "smoke.sh");
+        File.WriteAllText(script, "#!/bin/sh\nexit 0\n");
+        File.SetUnixFileMode(
+            script,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        Assert.AreEqual(
+            Path.GetFullPath(script),
+            AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, script));
+        Assert.AreEqual(
+            string.Empty,
+            AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, string.Empty));
+
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, "smoke.sh"));
+
+        var nonExecutable = Path.Combine(environment.Root, "not-executable.sh");
+        File.WriteAllText(nonExecutable, "#!/bin/sh\nexit 0\n");
+        File.SetUnixFileMode(
+            nonExecutable,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, nonExecutable));
+
+        var symlink = Path.Combine(environment.Root, "smoke-link");
+        File.CreateSymbolicLink(symlink, script);
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, symlink));
+    }
+
+    [TestMethod]
     public void AttestationEndpointMustBeHttpOrHttpsWhenConfigured()
     {
         Assert.AreEqual(
