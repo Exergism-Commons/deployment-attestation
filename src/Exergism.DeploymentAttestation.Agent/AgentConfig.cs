@@ -138,22 +138,32 @@ internal sealed class AgentConfig
             var builder = new StringBuilder(inner.Length);
             for (var i = 0; i < inner.Length; i++)
             {
-                if (inner[i] != '\\' || i + 1 >= inner.Length)
+                if (inner[i] == '"')
+                    throw new AgentException("Embedded unescaped double quote is not supported in agent configuration");
+
+                if (inner[i] != '\\')
                 {
                     builder.Append(inner[i]);
                     continue;
                 }
 
-                var next = inner[++i];
-                builder.Append(next switch
+                if (++i >= inner.Length)
+                    throw new AgentException("Trailing escape is not supported in agent configuration");
+
+                var next = inner[i];
+                if (next is '$' or '`' or '"' or '\\')
                 {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '"' => '"',
-                    '\\' => '\\',
-                    _ => throw new AgentException("Unsupported escape in configuration value")
-                });
+                    builder.Append(next);
+                    continue;
+                }
+
+                if (next == '\n')
+                    continue;
+
+                // Bash preserves the backslash before non-special characters
+                // inside double quotes (for example, "\\n" remains backslash+n).
+                builder.Append('\\');
+                builder.Append(next);
             }
 
             var parsed = builder.ToString();
