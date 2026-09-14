@@ -220,7 +220,7 @@ internal sealed class GitRepository(AgentConfig config)
         EnsureSnapshotsUnchanged(verified, final);
     }
 
-    public async Task ReconcileStaleGitLocksAsync(string rollbackCommit)
+    public async Task ReconcileStaleGitLocksAsync(string? rollbackCommit = null)
     {
         var head = await HeadAsync();
         var roots = await RecoveryGitMetadataRootsAsync(head, rollbackCommit);
