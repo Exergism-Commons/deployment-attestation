@@ -204,31 +204,67 @@ durable_mkdir_tree() {
   local target="$1" mode="${2:-0700}"
   python3 - "$target" "$mode" <<'PY'
 import os, pathlib, stat, sys
+
 p = pathlib.Path(sys.argv[1])
 mode = int(sys.argv[2], 8)
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
 if not p.is_absolute():
     raise RuntimeError("state path must be absolute")
+p = pathlib.Path(os.path.normpath(str(p)))
+
+def validate_existing_chain(path):
+    current = path
+    while True:
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(st.st_mode):
+                raise RuntimeError(f"unsafe symlink ancestor: {current}")
+            if current != path and not stat.S_ISDIR(st.st_mode):
+                raise RuntimeError(f"unsafe non-directory ancestor: {current}")
+        if current == current.parent:
+            return
+        current = current.parent
+
+validate_existing_chain(p)
+existed = p.exists()
 missing = []
 cur = p
 while not cur.exists():
     missing.append(cur)
+    if cur == cur.parent:
+        raise RuntimeError(f"cannot resolve existing ancestor: {p}")
     cur = cur.parent
-if not cur.is_dir() or cur.is_symlink():
+
+st = os.lstat(cur)
+if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
     raise RuntimeError(f"unsafe existing ancestor: {cur}")
+
 for d in reversed(missing):
     os.mkdir(d, mode)
     os.chmod(d, mode)
-    fd = os.open(d.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-st = p.lstat()
-if not stat.S_ISDIR(st.st_mode):
-    raise RuntimeError(f"state path is not a directory: {p}")
-os.chmod(p, mode)
+    for sync in (d, d.parent):
+        fd = os.open(sync, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+st = os.lstat(p)
+if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+    raise RuntimeError(f"state path is not a real directory: {p}")
+if existed and stat.S_IMODE(st.st_mode) != mode:
+    raise RuntimeError(
+        f"existing state directory permissions differ: {p} "
+        f"expected={oct(mode)} actual={oct(stat.S_IMODE(st.st_mode))}"
+    )
+
+validate_existing_chain(p)
 for d in (p, p.parent):
-    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
     try:
         os.fsync(fd)
     finally:
