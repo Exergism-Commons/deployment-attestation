@@ -373,6 +373,21 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void MetadataFsyncRejectsSymlink()
+    {
+        using var environment = TestEnvironment.Create();
+        var real = Path.Combine(environment.Root, "real-metadata");
+        var link = Path.Combine(environment.Root, "metadata-link");
+        File.WriteAllText(real, "metadata");
+        File.CreateSymbolicLink(link, real);
+
+        TestAssert.Throws<AgentException>(
+            () => Durability.FsyncRegularFileNoFollow(
+                link,
+                "symlinked metadata"));
+    }
+
+    [TestMethod]
     public void MissingTrackedRegularFileFailsVerification()
     {
         using var environment = TestEnvironment.Create();
