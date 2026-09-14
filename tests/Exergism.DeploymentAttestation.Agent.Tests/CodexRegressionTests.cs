@@ -544,6 +544,103 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public async Task RecoveryIncludesNestedOldFormMetadataRequiredByRollbackTarget()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = environment.Config.AppDirectory;
+        var grandSource = Path.Combine(environment.Root, "grand-source-rollback");
+        var childSource = Path.Combine(environment.Root, "child-source-rollback");
+        Directory.CreateDirectory(grandSource);
+        Directory.CreateDirectory(childSource);
+
+        async Task<string> GitAsync(string workingDirectory, params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync(
+                "git",
+                args,
+                workingDirectory: workingDirectory);
+            Assert.IsTrue(result.Success, result.StdErr);
+            return result.StdOut.Trim();
+        }
+
+        foreach (var repositoryPath in new[] { grandSource, childSource, checkout })
+        {
+            await GitAsync(repositoryPath, "init");
+            await GitAsync(repositoryPath, "config", "user.name", "Regression Test");
+            await GitAsync(repositoryPath, "config", "user.email", "regression@example.test");
+        }
+
+        await GitAsync(grandSource, "commit", "--allow-empty", "-m", "grand");
+        await GitAsync(
+            childSource,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            grandSource,
+            "grand");
+        await GitAsync(childSource, "commit", "-am", "child-old");
+
+        await GitAsync(
+            checkout,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            childSource,
+            "child");
+        await GitAsync(checkout, "commit", "-am", "top-old");
+        await GitAsync(
+            checkout,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive");
+
+        var topOld = await GitAsync(checkout, "rev-parse", "HEAD");
+        var child = Path.Combine(checkout, "child");
+        var grand = Path.Combine(child, "grand");
+        var modernGrandGitDir = Path.GetFullPath(await GitAsync(
+            grand,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir"));
+        var oldGrandGitDir = Path.Combine(grand, GIT_METADATA_NAME);
+        File.Delete(oldGrandGitDir);
+        Directory.Move(modernGrandGitDir, oldGrandGitDir);
+        var unsetWorktree = await ProcessRunner.RunAsync(
+            "git",
+            new[] { "config", "--file", Path.Combine(oldGrandGitDir, "config"), "--unset", "core.worktree" },
+            workingDirectory: grand);
+        Assert.IsTrue(
+            unsetWorktree.Success || unsetWorktree.ExitCode == 5,
+            unsetWorktree.StdErr);
+
+        await GitAsync(child, "rm", "--cached", "-f", "grand");
+        await GitAsync(child, "commit", "-m", "child-current-without-grand");
+        await GitAsync(checkout, "add", "child");
+        await GitAsync(checkout, "commit", "-m", "top-current");
+        var topCurrent = await GitAsync(checkout, "rev-parse", "HEAD");
+
+        var deploymentRepository = new GitRepository(environment.Config);
+        var currentOnly = await deploymentRepository.RecoveryGitMetadataRootsAsync(topCurrent);
+        Assert.IsFalse(
+            currentOnly.Contains(
+                Path.GetFullPath(oldGrandGitDir),
+                StringComparer.Ordinal));
+
+        var withRollback = await deploymentRepository.RecoveryGitMetadataRootsAsync(
+            topCurrent,
+            topOld);
+        Assert.IsTrue(
+            withRollback.Contains(
+                Path.GetFullPath(oldGrandGitDir),
+                StringComparer.Ordinal));
+    }
+
+    [TestMethod]
     public async Task RecoveryTraversesNestedOldFormSubmoduleFromCurrentCheckout()
     {
         using var environment = TestEnvironment.Create();
