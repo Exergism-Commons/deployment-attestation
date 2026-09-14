@@ -582,9 +582,9 @@ public sealed class CodexRegressionTests
             workingDirectory: Path.Combine(checkout, "child"));
         Assert.IsFalse(missingProbe.Success);
 
-        var repository = new GitRepository(environment.Config);
-        var roots = await repository.RecoveryGitMetadataRootsAsync(
-            await repository.HeadAsync());
+        var deploymentRepository = new GitRepository(environment.Config);
+        var roots = await deploymentRepository.RecoveryGitMetadataRootsAsync(
+            await deploymentRepository.HeadAsync());
 
         Assert.IsTrue(
             roots.Contains(
