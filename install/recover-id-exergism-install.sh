@@ -188,12 +188,13 @@ if [[ "$TXN_PHASE" != "recovering" ]]; then
 fi
 
 read_value() {
-  local name="$1"
-  [[ -f "${TXN_DIR}/${name}" ]] || {
-    echo "Recovery journal is missing ${name}" >&2
+  local name="$1" path
+  path="${TXN_DIR}/${name}"
+  [[ -f "$path" && ! -L "$path" ]] || {
+    echo "Recovery journal scalar is missing or unsafe: ${name}" >&2
     return 1
   }
-  cat "${TXN_DIR}/${name}"
+  cat "$path"
 }
 
 schema_version="$(read_value schema_version)"
