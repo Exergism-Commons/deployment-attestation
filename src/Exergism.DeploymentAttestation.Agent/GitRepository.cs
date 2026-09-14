@@ -758,22 +758,40 @@ internal sealed class GitRepository(AgentConfig config)
             break;
         }
 
-        probeArgs.AddRange([GIT_FLAG_CONFIG, "safe.directory=*", GIT_SUBCOMMAND_REV_PARSE, "--path-format=absolute", "--show-toplevel"]);
-        var probe = await ProcessRunner.RunAsync(
-            COMMAND_GIT, probeArgs, TimeSpan.FromSeconds(2), cwd, probeEnv, clearEnvironment: true);
-        if (probe.Success)
+        var resolvedAnyGitPath = false;
+        foreach (var selector in new[] { "--show-toplevel", GIT_FLAG_DIR, "--git-common-dir" })
         {
+            var pathProbeArgs = new List<string>(probeArgs);
+            pathProbeArgs.AddRange([
+                GIT_FLAG_CONFIG,
+                "safe.directory=*",
+                GIT_SUBCOMMAND_REV_PARSE,
+                "--path-format=absolute",
+                selector
+            ]);
+
+            var probe = await ProcessRunner.RunAsync(
+                COMMAND_GIT,
+                pathProbeArgs,
+                TimeSpan.FromSeconds(2),
+                cwd,
+                probeEnv,
+                clearEnvironment: true);
+            if (!probe.Success)
+                continue;
+
+            resolvedAnyGitPath = true;
             var effective = probe.StdOut.Trim();
             if (string.IsNullOrEmpty(effective))
-                throw new AgentException("Git returned an empty effective worktree");
+                throw new AgentException($"Git returned an empty effective path for {selector}");
             if (protectedRoots.Any(root => PathsIntersect(effective, root)))
                 return true;
         }
-        else if (environment.ContainsKey(GIT_ENV_CONFIG_PARAMETERS) ||
-                 environment.ContainsKey(GIT_ENV_CONFIG_COUNT))
-        {
+
+        if (!resolvedAnyGitPath &&
+            (environment.ContainsKey(GIT_ENV_CONFIG_PARAMETERS) ||
+             environment.ContainsKey(GIT_ENV_CONFIG_COUNT)))
             throw new AgentException("Cannot resolve live Git configuration");
-        }
 
         return false;
     }
@@ -970,6 +988,36 @@ internal sealed class GitRepository(AgentConfig config)
     }
 
     private sealed record TreeEntry(string Mode, string Kind, string ObjectId, string RelativePath);
+}
+
+internal static class GitEffectivePathProbe
+{
+    internal static bool ReferencesProtected(
+        IEnumerable<string> effectivePaths,
+        IReadOnlySet<string> protectedRoots)
+    {
+        foreach (var path in effectivePaths)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                throw new AgentException("Git returned an empty effective path");
+
+            var fullPath = Path.GetFullPath(path.Trim());
+            if (protectedRoots.Any(root =>
+                    IsSameOrDescendant(fullPath, root) ||
+                    IsSameOrDescendant(root, fullPath)))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsSameOrDescendant(string path, string root)
+    {
+        path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        return path == root ||
+               path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    }
 }
 
 internal static class GitProcessEnvironment
