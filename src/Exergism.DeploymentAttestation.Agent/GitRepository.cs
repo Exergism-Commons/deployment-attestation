@@ -571,11 +571,23 @@ internal sealed class GitRepository(AgentConfig config)
                 continue;
             }
 
+            if (!requirePopulatedGitlinks)
+            {
+                var childOwnRoots = await GitMetadataRootsAsync(submodulePath);
+                GitMetadataBoundary.EnsureRepositoryRoots(
+                    submodulePath,
+                    childOwnRoots,
+                    hierarchy,
+                    isTopLevel: false);
+                hierarchy.UnionWith(childOwnRoots);
+                continue;
+            }
+
             var childRoots = await VerifiedGitMetadataRootsAsync(
                 submodulePath,
                 entry.ObjectId,
                 hierarchy,
-                requirePopulatedGitlinks);
+                requirePopulatedGitlinks: true);
             hierarchy.UnionWith(childRoots);
         }
 
