@@ -57,6 +57,42 @@ public sealed class HealthAndStatusTests
     }
 
     [TestMethod]
+    public void DurableReleaseMetadataMustMatchManifestAndConfiguredTag()
+    {
+        var state = new CurrentState(
+            new string('a', 40),
+            new string('b', 64),
+            new string('c', 64),
+            "runtime-main");
+        var release = new ReleaseSnapshot(
+            new string('a', 40),
+            "runtime",
+            new string('b', 64),
+            new string('c', 64));
+
+        Assert.IsTrue(
+            DeploymentAgent.CommittedReleaseMetadataMatches(
+                state,
+                release,
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedReleaseMetadataMatches(
+                state with { ReleaseManifestSha256 = null },
+                release,
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedReleaseMetadataMatches(
+                state with { ReleaseManifestSha256 = new string('d', 64) },
+                release,
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedReleaseMetadataMatches(
+                state,
+                release,
+                "runtime-canary"));
+    }
+
+    [TestMethod]
     public void DeploymentStatusDistinguishesHealthyDegradedAndUnhealthy()
     {
         var checks = new Dictionary<string, bool>(StringComparer.Ordinal)
