@@ -22,12 +22,6 @@ internal sealed record RepositoryDurabilitySnapshot(
 
 internal static class GitMetadataEnumeration
 {
-    internal static IEnumerable<string> EnumerateMarkers(string repository)
-        => Directory.EnumerateFileSystemEntries(
-            repository,
-            GIT_METADATA_NAME,
-            RecursiveNoFollowOptions());
-
     internal static IEnumerable<string> EnumerateFiles(string root)
         => Directory.EnumerateFiles(
             root,
@@ -54,6 +48,63 @@ internal static class GitMetadataEnumeration
             IgnoreInaccessible = false,
             ReturnSpecialDirectories = false
         };
+}
+
+internal static class GitMetadataBoundary
+{
+    internal static void EnsureRootsWithin(
+        IEnumerable<string> roots,
+        IEnumerable<string> allowedRoots)
+    {
+        var allowed = allowedRoots
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (allowed.Length == 0)
+            throw new AgentException("Git metadata hierarchy is empty");
+
+        foreach (var root in roots.Select(Path.GetFullPath).Distinct(StringComparer.Ordinal))
+        {
+            var boundary = allowed.FirstOrDefault(candidate => IsSameOrDescendant(root, candidate));
+            if (boundary is null)
+                throw new AgentException($"Git metadata escapes the repository hierarchy: {root}");
+
+            EnsureRealDirectoryChain(root, boundary);
+        }
+    }
+
+    internal static bool IsSameOrDescendant(string path, string root)
+    {
+        path = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+        root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+
+        return string.Equals(path, root, StringComparison.Ordinal) ||
+               path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    }
+
+    private static void EnsureRealDirectoryChain(string path, string boundary)
+    {
+        var current = Path.GetFullPath(path);
+        boundary = Path.GetFullPath(boundary);
+
+        while (true)
+        {
+            if (!Directory.Exists(current))
+                throw new AgentException($"Git metadata root is not a directory: {current}");
+            if (new DirectoryInfo(current).LinkTarget is not null)
+                throw new AgentException($"Git metadata hierarchy contains a symlink: {current}");
+
+            if (string.Equals(current, boundary, StringComparison.Ordinal))
+                return;
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent) ||
+                string.Equals(parent, current, StringComparison.Ordinal))
+                throw new AgentException($"Git metadata root escaped its hierarchy: {path}");
+            current = parent;
+        }
+    }
 }
 
 internal static class GitProcessIdentity
@@ -107,7 +158,13 @@ internal sealed class GitRepository(AgentConfig config)
     public async Task FsyncCheckoutAsync(string commit)
     {
         var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
-        await FsyncRepositoryAsync(_config.AppDirectory, commit, verified);
+        var metadataHierarchy = await GitMetadataRootsAsync(_config.AppDirectory);
+        GitMetadataBoundary.EnsureRootsWithin(metadataHierarchy, metadataHierarchy);
+        await FsyncRepositoryAsync(
+            _config.AppDirectory,
+            commit,
+            verified,
+            metadataHierarchy);
         var final = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
         EnsureSnapshotsUnchanged(verified, final);
     }
@@ -115,6 +172,7 @@ internal sealed class GitRepository(AgentConfig config)
     public async Task ReconcileStaleGitLocksAsync()
     {
         var roots = await GitMetadataRootsAsync(_config.AppDirectory);
+        GitMetadataBoundary.EnsureRootsWithin(roots, roots);
         var protectedRoots = new HashSet<string>(roots, StringComparer.Ordinal) { Path.GetFullPath(_config.AppDirectory) };
 
         await AssertNoRelatedGitAsync(protectedRoots);
@@ -274,7 +332,8 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task FsyncRepositoryAsync(
         string repository,
         string commit,
-        RepositoryDurabilitySnapshot verified)
+        RepositoryDurabilitySnapshot verified,
+        IReadOnlyCollection<string> metadataHierarchy)
     {
         var entries = await ReadTreeAsync(repository, commit);
         var directories = new HashSet<string>(StringComparer.Ordinal) { repository };
@@ -333,11 +392,17 @@ internal sealed class GitRepository(AgentConfig config)
                 expectedDirectory);
         }
 
-        foreach (var root in await GitMetadataRootsAsync(repository))
+        var repositoryMetadataRoots = await GitMetadataRootsAsync(repository);
+        GitMetadataBoundary.EnsureRootsWithin(repositoryMetadataRoots, metadataHierarchy);
+        foreach (var root in repositoryMetadataRoots)
             FsyncDirectoryTree(root);
 
         foreach (var submodule in submodules)
-            await FsyncRepositoryAsync(submodule.Path, submodule.Commit, verified);
+            await FsyncRepositoryAsync(
+                submodule.Path,
+                submodule.Commit,
+                verified,
+                metadataHierarchy);
     }
 
     private static void EnsureSnapshotsUnchanged(
@@ -396,30 +461,13 @@ internal sealed class GitRepository(AgentConfig config)
         var roots = new HashSet<string>(StringComparer.Ordinal);
         foreach (var flag in new[] { GIT_FLAG_DIR, "--git-common-dir" })
         {
-            var result = await GitAtAsync(repository, ["rev-parse", "--path-format=absolute", flag]);
+            var result = await GitAtAsync(
+                repository,
+                ["rev-parse", "--path-format=absolute", flag]);
             roots.Add(Path.GetFullPath(result.StdOut.Trim()));
         }
 
-        foreach (var marker in GitMetadataEnumeration.EnumerateMarkers(repository))
-        {
-            if (Directory.Exists(marker) && new DirectoryInfo(marker).LinkTarget is null)
-            {
-                roots.Add(Path.GetFullPath(marker));
-                continue;
-            }
-            if (!File.Exists(marker) || new FileInfo(marker).LinkTarget is not null)
-                continue;
-
-            var text = (await File.ReadAllTextAsync(marker)).Trim();
-            if (!text.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase))
-                throw new AgentException($"Malformed gitfile: {marker}");
-            var raw = text[7..].Trim();
-            var target = Path.IsPathFullyQualified(raw)
-                ? raw
-                : Path.Combine(Path.GetDirectoryName(marker)!, raw);
-            roots.Add(Path.GetFullPath(target));
-        }
-        return roots.ToList();
+        return roots.Order(StringComparer.Ordinal).ToList();
     }
 
     private async Task AssertNoRelatedGitAsync(IReadOnlySet<string> protectedRoots)
