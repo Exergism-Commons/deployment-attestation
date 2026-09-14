@@ -655,7 +655,6 @@ internal sealed class GitRepository(AgentConfig config)
                 childOwnRoots,
                 hierarchy,
                 isTopLevel: false);
-            hierarchy.UnionWith(childOwnRoots);
 
             var childCommit = entry.ObjectId;
             if (traversalMode == GitMetadataTraversalMode.RecoveryCurrentCheckout)
@@ -665,7 +664,10 @@ internal sealed class GitRepository(AgentConfig config)
                     [GIT_SUBCOMMAND_REV_PARSE, "HEAD"],
                     required: false);
                 if (!currentHead.Success || string.IsNullOrWhiteSpace(currentHead.StdOut))
+                {
+                    hierarchy.UnionWith(childOwnRoots);
                     continue;
+                }
                 childCommit = currentHead.StdOut.Trim();
             }
             else if (traversalMode == GitMetadataTraversalMode.RecoveryRollbackTarget)
@@ -681,7 +683,10 @@ internal sealed class GitRepository(AgentConfig config)
                         [GIT_SUBCOMMAND_REV_PARSE, "HEAD"],
                         required: false);
                     if (!currentHead.Success || string.IsNullOrWhiteSpace(currentHead.StdOut))
+                    {
+                        hierarchy.UnionWith(childOwnRoots);
                         continue;
+                    }
                     childCommit = currentHead.StdOut.Trim();
                 }
             }
