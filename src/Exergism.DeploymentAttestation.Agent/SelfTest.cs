@@ -53,7 +53,8 @@ internal static class SelfTest
         Assert(config.Service == "id.exergism.org", "config service");
         Assert(config.DownloadTimeout == TimeSpan.FromSeconds(37), "config timeout");
         Assert(!config.CheckPublic, "config public check");
-        Assert(AgentConfig.ParseValue("\"hello\\nworld\"") == "hello\nworld", "quoted config parse");
+        Assert(AgentConfig.ParseValue("\"hello\\nworld\"") == @"hello\nworld", "quoted config preserves non-special backslash");
+        Assert(AgentConfig.ParseValue("\"hello\\\\world\"") == @"hello\world", "quoted config decodes Bash-special backslash");
         AssertThrows(() => AgentConfig.ParseValue("$HOME/runtime"), "shell variable expansion");
         AssertThrows(() => AgentConfig.ParseValue("\"$HOME/runtime\""), "double-quoted shell variable expansion");
         AssertThrows(() => AgentConfig.ParseValue("`id`"), "shell command expansion");
