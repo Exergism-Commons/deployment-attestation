@@ -269,10 +269,10 @@ jobs:
           grep -Fq 'INSTALL_RECOVERING_DIR=' install/install-id-exergism.sh
           grep -Fq 'create_install_transaction()' install/install-id-exergism.sh
           grep -Fq 'mark_generation_validated()' install/install-id-exergism.sh
-          grep -Fq 'mv "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"' install/install-id-exergism.sh
+          grep -Fq 'mv -T -- "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"' install/install-id-exergism.sh
           grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
           grep -Fq 'INSTALL_COMMITTED_DIR=' install/install-id-exergism.sh
-          grep -Fq 'mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
+          grep -Fq 'mv -T -- "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
           grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
           grep -Fq 'verify_production_artifact_fence()' install/install-id-exergism.sh
           grep -Fq 'open("/proc/self/mountinfo"' install/verify-id-exergism-artifact-fence.sh
@@ -292,7 +292,7 @@ jobs:
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
           grep -Fq 'target_was_active' install/install-id-exergism.sh
           grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/install-id-exergism.sh
-          grep -Fq 'cp -a -- "$path" "$stage/backups/$key"' install/install-id-exergism.sh
+          grep -Fq 'cp -aT -- "$path" "$stage/backups/$key"' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA" 0644' install/install-id-exergism.sh
           grep -Fq 'TARGET_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
@@ -314,7 +314,7 @@ jobs:
           grep -Fq 'systemctl --no-block start "$RECOVERY_FINALIZE_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq '"$RECOVERY_FINALIZER"' install/recover-id-exergism-install.sh
           grep -Fq '"$TXN_PHASE" == "validated" || "$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
-          grep -Fq 'mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
+          grep -Fq 'mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
           grep -Fq '[[ "$schema_version" == 2 ]]' install/recover-id-exergism-install.sh
           grep -Fq 'origin_boot_id=' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="normal"' install/recover-id-exergism-install.sh
@@ -346,7 +346,7 @@ jobs:
           grep -Fq 'Timer did not remain provably quiescent after synchronous recovery.' install/recover-id-exergism-install.sh
           grep -Fq '"$VALIDATOR" || restore_rc=1' install/recover-id-exergism-install.sh
           grep -Fq 'services remain quiesced and recovery journal is retained' install/recover-id-exergism-install.sh
-          grep -Fq 'mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
+          grep -Fq 'mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
           grep -Fq 'if [[ "$MODE" == "normal" ]]; then' install/recover-id-exergism-install.sh
           grep -Fq 'Keep the actionable marker, then queue an independent finalizer' install/recover-id-exergism-install.sh
           grep -Fq 'ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.recovered' packaging/id-exergism-install-recovery-finalize.service
@@ -410,7 +410,7 @@ jobs:
           hard_quiesce = recovery.index('if (( quiesce_failed != 0 )); then')
           first_restore = recovery.index('restore_artifact "$key"')
           validate = recovery.index('"$VALIDATOR" || restore_rc=1')
-          retire = recovery.index('mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
+          retire = recovery.index('mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
           direct_start = recovery.index('if ! systemctl start "$TARGET_UNIT"')
           direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR"', direct_start)
           direct_quiesce = recovery.index('quiesce_unit "$TARGET_UNIT"', direct_fence)
@@ -462,7 +462,7 @@ jobs:
 
           select_recovered = recovery.index('TXN_PHASE="recovered"')
           recovered_completion = recovery.index('if [[ "$TXN_PHASE" == "recovered" ]]; then')
-          phase_to_recovering = recovery.index('mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
+          phase_to_recovering = recovery.index('mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
           assert select_recovered < recovered_completion < phase_to_recovering
 
           live_fence = text.index('verify_production_artifact_fence', text.index('systemctl start "$TARGET_UNIT"'))
