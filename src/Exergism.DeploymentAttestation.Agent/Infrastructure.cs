@@ -356,13 +356,22 @@ internal static class Durability
     {
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
             return;
+
+        FsyncRequiredDirectory(path, path);
+    }
+
+    public static void FsyncRequiredDirectory(string path, string displayPath)
+    {
+        if (string.IsNullOrEmpty(path))
+            throw new AgentException($"Required directory path is empty during fsync: {displayPath}");
+
         var fd = Native.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (fd < 0)
-            throw new AgentException($"open directory failed for {path}: errno={Marshal.GetLastPInvokeError()}");
+            throw new AgentException($"open required directory failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
         try
         {
             if (Native.fsync(fd) != 0)
-                throw new AgentException($"fsync directory failed for {path}: errno={Marshal.GetLastPInvokeError()}");
+                throw new AgentException($"fsync required directory failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
         }
         finally
         {
