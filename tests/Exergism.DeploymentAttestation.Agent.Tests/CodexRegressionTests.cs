@@ -478,6 +478,13 @@ public sealed class CodexRegressionTests
             new[] { topMetadata },
             isTopLevel: false);
 
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataBoundary.EnsureRepositoryRoots(
+                submodule,
+                new[] { topMetadata },
+                new[] { topMetadata },
+                isTopLevel: false));
+
         var externalMetadata = Path.Combine(environment.Root, "external", GIT_METADATA_NAME);
         Directory.CreateDirectory(externalMetadata);
         TestAssert.Throws<AgentException>(
