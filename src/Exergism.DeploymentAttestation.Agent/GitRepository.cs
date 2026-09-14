@@ -40,6 +40,12 @@ internal static class GitMetadataEnumeration
             "*",
             RecursiveNoFollowOptions());
 
+    internal static IEnumerable<string> EnumerateLockFiles(string root)
+        => Directory.EnumerateFiles(
+            root,
+            "*.lock",
+            RecursiveNoFollowOptions());
+
     private static EnumerationOptions RecursiveNoFollowOptions()
         => new()
         {
@@ -118,7 +124,7 @@ internal sealed class GitRepository(AgentConfig config)
             if (!Directory.Exists(root))
                 throw new AgentException($"Git metadata root is not a directory: {root}");
 
-            foreach (var lockFile in Directory.EnumerateFiles(root, "*.lock", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+            foreach (var lockFile in GitMetadataEnumeration.EnumerateLockFiles(root).Order(StringComparer.Ordinal))
             {
                 await AssertNoRelatedGitAsync(protectedRoots);
                 if (await AnyProcessHasOpenPathAsync(lockFile))
