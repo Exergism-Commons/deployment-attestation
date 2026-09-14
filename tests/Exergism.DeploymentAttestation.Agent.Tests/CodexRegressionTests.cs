@@ -483,6 +483,116 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public async Task RecoveryTraversesNestedOldFormSubmoduleFromCurrentCheckout()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = environment.Config.AppDirectory;
+        var grandSource = Path.Combine(environment.Root, "grand-source");
+        var childSource = Path.Combine(environment.Root, "child-source");
+        Directory.CreateDirectory(grandSource);
+        Directory.CreateDirectory(childSource);
+
+        async Task<string> GitAsync(string workingDirectory, params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync(
+                "git",
+                args,
+                workingDirectory: workingDirectory);
+            Assert.IsTrue(result.Success, result.StdErr);
+            return result.StdOut.Trim();
+        }
+
+        foreach (var repository in new[] { grandSource, childSource, checkout })
+        {
+            await GitAsync(repository, "init");
+            await GitAsync(repository, "config", "user.name", "Regression Test");
+            await GitAsync(repository, "config", "user.email", "regression@example.test");
+        }
+
+        File.WriteAllText(Path.Combine(grandSource, "grand.txt"), "grand");
+        await GitAsync(grandSource, "add", "grand.txt");
+        await GitAsync(grandSource, "commit", "-m", "grand");
+
+        await GitAsync(
+            childSource,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            grandSource,
+            "grand");
+        await GitAsync(childSource, "commit", "-am", "child-with-grand");
+
+        await GitAsync(
+            checkout,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            childSource,
+            "child");
+        await GitAsync(checkout, "commit", "-am", "top-with-child");
+        await GitAsync(
+            checkout,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive");
+
+        var grand = Path.Combine(checkout, "child", "grand");
+        var modernGrandGitDir = Path.GetFullPath(await GitAsync(
+            grand,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir"));
+        var oldGrandGitDir = Path.Combine(grand, GIT_METADATA_NAME);
+        Assert.IsTrue(File.Exists(oldGrandGitDir));
+        File.Delete(oldGrandGitDir);
+        Directory.Move(modernGrandGitDir, oldGrandGitDir);
+
+        var unsetWorktree = await ProcessRunner.RunAsync(
+            "git",
+            new[] { $"--git-dir={oldGrandGitDir}", "config", "--unset", "core.worktree" },
+            workingDirectory: grand);
+        Assert.IsTrue(
+            unsetWorktree.Success || unsetWorktree.ExitCode == 5,
+            unsetWorktree.StdErr);
+
+        Assert.AreEqual(
+            Path.GetFullPath(oldGrandGitDir),
+            Path.GetFullPath(await GitAsync(
+                grand,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir")));
+
+        var missingChildCommit = new string('b', 40);
+        await GitAsync(
+            checkout,
+            "update-index",
+            "--cacheinfo",
+            $"160000,{missingChildCommit},child");
+        await GitAsync(checkout, "commit", "-m", "top-points-to-unfetched-child");
+
+        var missingProbe = await ProcessRunner.RunAsync(
+            "git",
+            new[] { "cat-file", "-e", $"{missingChildCommit}^{{commit}}" },
+            workingDirectory: Path.Combine(checkout, "child"));
+        Assert.IsFalse(missingProbe.Success);
+
+        var repository = new GitRepository(environment.Config);
+        var roots = await repository.RecoveryGitMetadataRootsAsync(
+            await repository.HeadAsync());
+
+        Assert.IsTrue(
+            roots.Contains(
+                Path.GetFullPath(oldGrandGitDir),
+                StringComparer.Ordinal));
+    }
+
+    [TestMethod]
     public async Task RecoveryToleratesUnfetchedVerifiedSubmoduleCommit()
     {
         using var environment = TestEnvironment.Create();
