@@ -303,19 +303,9 @@ internal sealed class AgentConfig
             throw new AgentException($"{ENV_HMAC_SECRET_FILE} is required when {ENV_ATTESTATION_ENDPOINT} is configured");
 
         var fullPath = RequireAbsolutePath(ENV_HMAC_SECRET_FILE, secretPath);
-        var info = new FileInfo(fullPath);
-        if (!info.Exists || info.LinkTarget is not null)
-            throw new AgentException($"{ENV_HMAC_SECRET_FILE} must be a readable regular file, not a symlink");
-
-        byte[] bytes;
-        try
-        {
-            bytes = File.ReadAllBytes(fullPath);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            throw new AgentException($"{ENV_HMAC_SECRET_FILE} is not readable", ex);
-        }
+        var bytes = Durability.ReadTrustedRegularFileBytes(
+            fullPath,
+            ENV_HMAC_SECRET_FILE);
 
         if (!bytes.Any(value => value is not (9 or 10 or 13 or 32)))
             throw new AgentException($"{ENV_HMAC_SECRET_FILE} must not be empty");
