@@ -9,10 +9,16 @@ namespace Exergism.DeploymentAttestation.Agent;
 internal static class HttpClientFactory
 {
     public static HttpClient CreateGet()
-        => new(CreateGetHandler(), disposeHandler: true);
+        => CreateClient(CreateGetHandler());
 
     public static HttpClient CreateAttestation()
-        => new(CreateAttestationHandler(), disposeHandler: true);
+        => CreateClient(CreateAttestationHandler());
+
+    private static HttpClient CreateClient(HttpMessageHandler handler)
+        => new(handler, disposeHandler: true)
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
 
     internal static SocketsHttpHandler CreateGetHandler()
         => CreateHandler(allowAutoRedirect: true);
