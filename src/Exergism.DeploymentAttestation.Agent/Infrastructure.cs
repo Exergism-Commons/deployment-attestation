@@ -201,15 +201,77 @@ internal static class Durability
     private const int O_CLOEXEC = 0x80000;
     private const int AT_EMPTY_PATH = 0x1000;
     private const uint STATX_TYPE = 0x00000001;
+    private const uint STATX_MODE = 0x00000002;
+    private const uint STATX_UID = 0x00000008;
+    private const uint STATX_GID = 0x00000010;
     private const uint STATX_MTIME = 0x00000040;
     private const uint STATX_CTIME = 0x00000080;
     private const uint STATX_INO = 0x00000100;
     private const uint STATX_SIZE = 0x00000200;
-    private const uint STATX_REGULAR_REQUIRED = STATX_TYPE | STATX_CTIME | STATX_INO | STATX_SIZE;
+    private const uint STATX_REGULAR_REQUIRED = STATX_TYPE | STATX_MODE | STATX_CTIME | STATX_INO | STATX_SIZE;
+    private const uint STATX_TRUSTED_CONFIG_REQUIRED = STATX_REGULAR_REQUIRED | STATX_UID | STATX_GID;
     private const uint STATX_DIRECTORY_REQUIRED = STATX_TYPE | STATX_MTIME | STATX_CTIME | STATX_INO;
     private const ushort S_IFMT = 0xF000;
     private const ushort S_IFDIR = 0x4000;
     private const ushort S_IFREG = 0x8000;
+
+    public static string ReadTrustedConfigText(string path)
+    {
+        if (!Path.IsPathFullyQualified(path))
+            throw new AgentException("Configuration path must be absolute");
+
+        path = Path.GetFullPath(path);
+        var fd = Native.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException($"Configuration not readable as a real file: {path}; errno={Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_TRUSTED_CONFIG_REQUIRED, out var before) != 0)
+                throw new AgentException($"Could not inspect configuration file: {path}; errno={Marshal.GetLastPInvokeError()}");
+            if ((before.Mask & STATX_TRUSTED_CONFIG_REQUIRED) != STATX_TRUSTED_CONFIG_REQUIRED ||
+                (before.Mode & S_IFMT) != S_IFREG)
+                throw new AgentException($"Configuration must be a regular file: {path}");
+
+            var effectiveUid = Native.geteuid();
+            if (before.Uid != effectiveUid)
+                throw new AgentException($"Configuration must be owned by effective uid {effectiveUid}: {path}");
+
+            var mode = (UnixFileMode)(before.Mode & ~S_IFMT);
+            if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+                throw new AgentException($"Configuration must not be writable by group or others: {path}");
+
+            using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
+            fd = -1;
+            using var stream = new FileStream(handle, FileAccess.Read);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+
+            var openFd = checked((int)handle.DangerousGetHandle());
+            if (Native.statx(openFd, "", AT_EMPTY_PATH, STATX_TRUSTED_CONFIG_REQUIRED, out var after) != 0)
+                throw new AgentException($"Could not re-check configuration file: {path}; errno={Marshal.GetLastPInvokeError()}");
+
+            if (FileSnapshot.From(before, buffer.ToArray()).MatchesMetadata(after) is false ||
+                before.Uid != after.Uid ||
+                before.Gid != after.Gid ||
+                before.Mode != after.Mode)
+                throw new AgentException($"Configuration changed while being read: {path}");
+
+            try
+            {
+                return new System.Text.UTF8Encoding(false, true).GetString(buffer.ToArray());
+            }
+            catch (DecoderFallbackException ex)
+            {
+                throw new AgentException($"Configuration is not valid UTF-8: {path}", ex);
+            }
+        }
+        finally
+        {
+            if (fd >= 0)
+                _ = Native.close(fd);
+        }
+    }
 
     public static void EnsureDirectory(string target, UnixFileMode mode)
     {
@@ -629,6 +691,12 @@ internal struct LinuxStatx
     [FieldOffset(0)]
     internal uint Mask;
 
+    [FieldOffset(20)]
+    internal uint Uid;
+
+    [FieldOffset(24)]
+    internal uint Gid;
+
     [FieldOffset(28)]
     internal ushort Mode;
 
@@ -659,6 +727,9 @@ internal struct LinuxStatx
 
 internal static class Native
 {
+    [DllImport("libc")]
+    internal static extern uint geteuid();
+
     [DllImport("libc", SetLastError = true)]
     internal static extern int flock(int fd, int operation);
 
