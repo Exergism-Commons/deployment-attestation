@@ -52,6 +52,47 @@ internal static class GitMetadataEnumeration
 
 internal static class GitMetadataBoundary
 {
+    internal static void EnsureRepositoryRoots(
+        string repository,
+        IEnumerable<string> roots,
+        IReadOnlyCollection<string>? parentMetadataHierarchy,
+        bool isTopLevel)
+    {
+        repository = Path.GetFullPath(repository);
+        var ownRoots = roots
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (ownRoots.Length == 0)
+            throw new AgentException("Git metadata hierarchy is empty");
+
+        if (isTopLevel)
+        {
+            var embedded = Path.Combine(repository, GIT_METADATA_NAME);
+            if (!Directory.Exists(embedded) ||
+                new DirectoryInfo(embedded).LinkTarget is not null)
+                throw new AgentException("Top-level deployment repository must use a real in-tree .git directory");
+
+            EnsureRootsWithin(ownRoots, new[] { embedded });
+            return;
+        }
+
+        if (parentMetadataHierarchy is null || parentMetadataHierarchy.Count == 0)
+            throw new AgentException("Verified submodule metadata hierarchy is missing");
+
+        var allowed = new HashSet<string>(
+            parentMetadataHierarchy.Select(Path.GetFullPath),
+            StringComparer.Ordinal);
+
+        var embeddedSubmoduleMetadata = Path.Combine(repository, GIT_METADATA_NAME);
+        if (Directory.Exists(embeddedSubmoduleMetadata) &&
+            new DirectoryInfo(embeddedSubmoduleMetadata).LinkTarget is null)
+            allowed.Add(Path.GetFullPath(embeddedSubmoduleMetadata));
+
+        EnsureRootsWithin(ownRoots, allowed);
+    }
+
     internal static void EnsureRootsWithin(
         IEnumerable<string> roots,
         IEnumerable<string> allowedRoots)
@@ -158,8 +199,10 @@ internal sealed class GitRepository(AgentConfig config)
     public async Task FsyncCheckoutAsync(string commit)
     {
         var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
-        var metadataHierarchy = await GitMetadataRootsAsync(_config.AppDirectory);
-        GitMetadataBoundary.EnsureRootsWithin(metadataHierarchy, metadataHierarchy);
+        var metadataHierarchy = await VerifiedGitMetadataRootsAsync(
+            _config.AppDirectory,
+            commit,
+            parentMetadataHierarchy: null);
         await FsyncRepositoryAsync(
             _config.AppDirectory,
             commit,
@@ -171,8 +214,11 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task ReconcileStaleGitLocksAsync()
     {
-        var roots = await GitMetadataRootsAsync(_config.AppDirectory);
-        GitMetadataBoundary.EnsureRootsWithin(roots, roots);
+        var head = await HeadAsync();
+        var roots = await VerifiedGitMetadataRootsAsync(
+            _config.AppDirectory,
+            head,
+            parentMetadataHierarchy: null);
         var protectedRoots = new HashSet<string>(roots, StringComparer.Ordinal) { Path.GetFullPath(_config.AppDirectory) };
 
         await AssertNoRelatedGitAsync(protectedRoots);
@@ -393,7 +439,14 @@ internal sealed class GitRepository(AgentConfig config)
         }
 
         var repositoryMetadataRoots = await GitMetadataRootsAsync(repository);
-        GitMetadataBoundary.EnsureRootsWithin(repositoryMetadataRoots, metadataHierarchy);
+        GitMetadataBoundary.EnsureRepositoryRoots(
+            repository,
+            repositoryMetadataRoots,
+            metadataHierarchy,
+            isTopLevel: string.Equals(
+                Path.GetFullPath(repository),
+                Path.GetFullPath(_config.AppDirectory),
+                StringComparison.Ordinal));
         foreach (var root in repositoryMetadataRoots)
             FsyncDirectoryTree(root);
 
@@ -468,6 +521,46 @@ internal sealed class GitRepository(AgentConfig config)
         }
 
         return roots.Order(StringComparer.Ordinal).ToList();
+    }
+
+    private async Task<List<string>> VerifiedGitMetadataRootsAsync(
+        string repository,
+        string commit,
+        IReadOnlyCollection<string>? parentMetadataHierarchy)
+    {
+        repository = Path.GetFullPath(repository);
+        var ownRoots = await GitMetadataRootsAsync(repository);
+        GitMetadataBoundary.EnsureRepositoryRoots(
+            repository,
+            ownRoots,
+            parentMetadataHierarchy,
+            isTopLevel: parentMetadataHierarchy is null);
+
+        var hierarchy = new HashSet<string>(
+            parentMetadataHierarchy ?? Array.Empty<string>(),
+            StringComparer.Ordinal);
+        hierarchy.UnionWith(ownRoots);
+
+        var entries = await ReadTreeAsync(repository, commit);
+        foreach (var entry in entries.Where(entry =>
+                     entry.Mode == GIT_MODE_GITLINK &&
+                     entry.Kind == GIT_OBJECT_COMMIT))
+        {
+            var submodulePath = Path.GetFullPath(Path.Combine(
+                repository,
+                entry.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!Directory.Exists(submodulePath) ||
+                new DirectoryInfo(submodulePath).LinkTarget is not null)
+                throw new AgentException($"gitlink is not a real directory: {entry.RelativePath}");
+
+            var childRoots = await VerifiedGitMetadataRootsAsync(
+                submodulePath,
+                entry.ObjectId,
+                hierarchy);
+            hierarchy.UnionWith(childRoots);
+        }
+
+        return hierarchy.Order(StringComparer.Ordinal).ToList();
     }
 
     private async Task AssertNoRelatedGitAsync(IReadOnlySet<string> protectedRoots)
