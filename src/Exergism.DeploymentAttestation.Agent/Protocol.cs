@@ -124,6 +124,8 @@ internal static partial class Protocol
         var manifest = OptionalNullableString(root, JSON_RELEASE_MANIFEST_SHA256);
         if (!CommitPattern.IsMatch(commit) || !DigestPattern.IsMatch(binary))
             throw new AgentException("Invalid current-state source/runtime digest");
+        if (string.IsNullOrWhiteSpace(tag))
+            throw new AgentException("Invalid current-state release tag");
         if (manifest is not null && !DigestPattern.IsMatch(manifest))
             throw new AgentException("Invalid current-state manifest digest");
         return new CurrentState(commit, binary, manifest, tag);
@@ -184,7 +186,8 @@ internal static partial class Protocol
             throw new AgentException("Invalid transaction source/runtime digest");
         if (tx.OldReleaseManifestSha256 is not null && !DigestPattern.IsMatch(tx.OldReleaseManifestSha256))
             throw new AgentException("Invalid transaction old manifest digest");
-        if (tx.NewReleaseManifestSha256 is not null && !DigestPattern.IsMatch(tx.NewReleaseManifestSha256))
+        if (tx.NewReleaseManifestSha256 is null ||
+            !DigestPattern.IsMatch(tx.NewReleaseManifestSha256))
             throw new AgentException("Invalid transaction new manifest digest");
         return tx;
     }
