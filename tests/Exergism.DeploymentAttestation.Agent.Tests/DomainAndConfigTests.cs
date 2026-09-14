@@ -130,6 +130,38 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void AttestationEndpointMustBeHttpOrHttpsWhenConfigured()
+    {
+        Assert.AreEqual(
+            string.Empty,
+            AgentConfig.RequireOptionalHttpUri(ENV_ATTESTATION_ENDPOINT, string.Empty));
+        Assert.AreEqual(
+            "https://health.example.test/v1/attest",
+            AgentConfig.RequireOptionalHttpUri(
+                ENV_ATTESTATION_ENDPOINT,
+                "https://health.example.test/v1/attest"));
+        Assert.AreEqual(
+            "http://127.0.0.1:8081/attest",
+            AgentConfig.RequireOptionalHttpUri(
+                ENV_ATTESTATION_ENDPOINT,
+                "http://127.0.0.1:8081/attest"));
+
+        foreach (var invalid in new[]
+                 {
+                     "file:///tmp/receiver",
+                     "ftp://example.test/attest",
+                     "mailto:ops@example.test",
+                     "/relative/attest"
+                 })
+        {
+            TestAssert.Throws<AgentException>(
+                () => AgentConfig.RequireOptionalHttpUri(
+                    ENV_ATTESTATION_ENDPOINT,
+                    invalid));
+        }
+    }
+
+    [TestMethod]
     public void ConfigComputesSelfHealthPathsAndAge()
     {
         using var environment = TestEnvironment.Create();
