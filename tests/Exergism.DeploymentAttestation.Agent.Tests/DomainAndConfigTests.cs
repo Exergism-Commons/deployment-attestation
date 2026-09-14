@@ -35,6 +35,26 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void DoubleQuotedConfigMatchesBashBackslashSemantics()
+    {
+        Assert.AreEqual(
+            @"/srv/id\nresolver",
+            AgentConfig.ParseValue("\"/srv/id\\nresolver\""));
+        Assert.AreEqual(
+            @"/srv/id\qresolver",
+            AgentConfig.ParseValue("\"/srv/id\\qresolver\""));
+        Assert.AreEqual(
+            @"/srv/id\resolver",
+            AgentConfig.ParseValue("\"/srv/id\\\\resolver\""));
+        Assert.AreEqual(
+            "/srv/id\"resolver",
+            AgentConfig.ParseValue("\"/srv/id\\\"resolver\""));
+
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.ParseValue("\"$HOME/runtime\""));
+    }
+
+    [TestMethod]
     public void StaticConfigParserRejectsUnquotedShellEscapesAndQuoting()
     {
         foreach (var value in new[]
