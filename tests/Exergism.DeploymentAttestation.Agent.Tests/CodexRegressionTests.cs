@@ -462,7 +462,8 @@ public sealed class CodexRegressionTests
         await GitAsync(
             checkout,
             "update-index",
-            $"--cacheinfo=160000,{missingCommit},child");
+            "--cacheinfo",
+            $"160000,{missingCommit},child");
         await GitAsync(checkout, "commit", "-m", "super-new-unfetched-child");
 
         var child = Path.Combine(checkout, "child");
