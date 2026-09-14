@@ -323,27 +323,65 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
-    public void GitMetadataEnumerationDoesNotFollowWorktreeSymlinks()
+    public void GitMetadataBoundaryRejectsExternalAndSymlinkedRoots()
     {
         using var environment = TestEnvironment.Create();
-        var checkout = Path.Combine(environment.Root, "checkout");
-        var external = Path.Combine(environment.Root, "external-repository");
-        Directory.CreateDirectory(checkout);
-        Directory.CreateDirectory(Path.Combine(checkout, GIT_METADATA_NAME));
-        Directory.CreateDirectory(Path.Combine(external, GIT_METADATA_NAME));
+        var metadata = Path.Combine(environment.Root, "metadata");
+        var nested = Path.Combine(metadata, "modules", "child");
+        var external = Path.Combine(environment.Root, "external");
+        Directory.CreateDirectory(nested);
+        Directory.CreateDirectory(external);
 
-        var escape = Path.Combine(checkout, "escape");
-        Directory.CreateSymbolicLink(escape, external);
+        GitMetadataBoundary.EnsureRootsWithin(
+            new[] { nested },
+            new[] { metadata });
 
-        var markers = GitMetadataEnumeration.EnumerateMarkers(checkout)
-            .Select(Path.GetFullPath)
-            .ToArray();
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataBoundary.EnsureRootsWithin(
+                new[] { external },
+                new[] { metadata }));
 
-        CollectionAssert.AreEqual(
-            new[] { Path.GetFullPath(Path.Combine(checkout, GIT_METADATA_NAME)) },
-            markers);
-        Assert.IsFalse(markers.Any(marker =>
-            marker.StartsWith(Path.GetFullPath(external), StringComparison.Ordinal)));
+        var realModules = Path.Combine(environment.Root, "real-modules");
+        Directory.CreateDirectory(realModules);
+        var symlinkModules = Path.Combine(metadata, "linked-modules");
+        Directory.CreateSymbolicLink(symlinkModules, realModules);
+        var escapedViaSymlink = Path.Combine(symlinkModules, "child");
+        Directory.CreateDirectory(Path.Combine(realModules, "child"));
+
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataBoundary.EnsureRootsWithin(
+                new[] { escapedViaSymlink },
+                new[] { metadata }));
+    }
+
+    [TestMethod]
+    public async Task UntrackedGitfileCannotRedirectStaleLockCleanup()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = environment.Config.AppDirectory;
+        var init = await ProcessRunner.RunAsync(
+            "git",
+            new[] { "init" },
+            workingDirectory: checkout);
+        Assert.IsTrue(init.Success, init.StdErr);
+
+        var externalRepository = Path.Combine(environment.Root, "external-repository");
+        var externalMetadata = Path.Combine(externalRepository, GIT_METADATA_NAME);
+        Directory.CreateDirectory(externalMetadata);
+        var externalLock = Path.Combine(externalMetadata, "unrelated.lock");
+        File.WriteAllText(externalLock, "must-survive");
+
+        var nested = Path.Combine(checkout, "untracked");
+        Directory.CreateDirectory(nested);
+        File.WriteAllText(
+            Path.Combine(nested, GIT_METADATA_NAME),
+            $"gitdir: {externalMetadata}\n");
+
+        var repository = new GitRepository(environment.Config);
+        await repository.ReconcileStaleGitLocksAsync();
+
+        Assert.IsTrue(File.Exists(externalLock));
+        Assert.AreEqual("must-survive", File.ReadAllText(externalLock));
     }
 
     [TestMethod]
