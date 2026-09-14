@@ -24,11 +24,14 @@ internal sealed class SystemdController(AgentConfig config)
 {
     private readonly AgentConfig _config = config;
 
+    internal static string[] BuildShowArguments(string serviceUnit, string property)
+        => ["show", serviceUnit, "--property", property, "--value"];
+
     public async Task<string> ShowAsync(string property)
     {
         var result = await ProcessRunner.RunAsync(
             COMMAND_SYSTEMCTL,
-            ["show", _config.ServiceUnit, $"-p={property}", "--value"],
+            BuildShowArguments(_config.ServiceUnit, property),
             TimeSpan.FromSeconds(10));
         if (!result.Success)
             throw new AgentException($"Could not read systemd {property}: {result.StdErr.Trim()}");
