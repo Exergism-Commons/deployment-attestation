@@ -195,8 +195,10 @@ internal static class Durability
     private const int O_CLOEXEC = 0x80000;
     private const int AT_EMPTY_PATH = 0x1000;
     private const uint STATX_TYPE = 0x00000001;
+    private const uint STATX_CTIME = 0x00000080;
     private const uint STATX_INO = 0x00000100;
-    private const uint STATX_REQUIRED = STATX_TYPE | STATX_INO;
+    private const uint STATX_SIZE = 0x00000200;
+    private const uint STATX_REQUIRED = STATX_TYPE | STATX_CTIME | STATX_INO | STATX_SIZE;
     private const ushort S_IFMT = 0xF000;
     private const ushort S_IFREG = 0x8000;
 
@@ -282,18 +284,26 @@ internal static class Durability
 
     public static VerifiedRegularFile ReadRegularFileNoFollow(string path, string displayPath)
     {
-        var fd = OpenRegularFileNoFollow(path, displayPath, out var stat);
+        var fd = OpenRegularFileNoFollow(path, displayPath, out var beforeStat);
         try
         {
-            var identity = FileIdentity.From(stat);
-            var mode = (UnixFileMode)(stat.Mode & ~S_IFMT);
+            var mode = (UnixFileMode)(beforeStat.Mode & ~S_IFMT);
 
             using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
             fd = -1;
             using var stream = new FileStream(handle, FileAccess.Read);
             using var buffer = new MemoryStream();
             stream.CopyTo(buffer);
-            return new VerifiedRegularFile(buffer.ToArray(), identity, mode);
+            var data = buffer.ToArray();
+
+            var openFd = checked((int)handle.DangerousGetHandle());
+            var afterStat = StatRegularFileDescriptor(openFd, displayPath);
+            var beforeSnapshot = FileSnapshot.From(beforeStat, data);
+            var afterSnapshot = FileSnapshot.From(afterStat, data);
+            if (beforeSnapshot != afterSnapshot)
+                throw new AgentException($"Tracked regular file changed while being verified: {displayPath}");
+
+            return new VerifiedRegularFile(data, afterSnapshot, mode);
         }
         finally
         {
@@ -305,22 +315,67 @@ internal static class Durability
     public static void FsyncRegularFileNoFollow(
         string path,
         string displayPath,
-        FileIdentity expectedIdentity)
+        FileSnapshot expectedSnapshot)
     {
-        var fd = OpenRegularFileNoFollow(path, displayPath, out var stat);
+        var fd = OpenRegularFileNoFollow(path, displayPath, out var beforeStat);
         try
         {
-            var actualIdentity = FileIdentity.From(stat);
-            if (actualIdentity != expectedIdentity)
-                throw new AgentException($"Tracked regular file changed identity during fsync: {displayPath}");
+            using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
+            fd = -1;
+            using var stream = new FileStream(handle, FileAccess.Read);
+            var openFd = checked((int)handle.DangerousGetHandle());
 
-            if (Native.fsync(fd) != 0)
+            EnsureSnapshotMetadata(expectedSnapshot, beforeStat, displayPath);
+            EnsureSnapshotDigest(expectedSnapshot, stream, displayPath, "before fsync");
+
+            if (Native.fsync(openFd) != 0)
                 throw new AgentException($"fsync tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+            var afterStat = StatRegularFileDescriptor(openFd, displayPath);
+            EnsureSnapshotMetadata(expectedSnapshot, afterStat, displayPath);
+            stream.Position = 0;
+            EnsureSnapshotDigest(expectedSnapshot, stream, displayPath, "after fsync");
         }
         finally
         {
-            _ = Native.close(fd);
+            if (fd >= 0)
+                _ = Native.close(fd);
         }
+    }
+
+    private static LinuxStatx StatRegularFileDescriptor(int fd, string displayPath)
+    {
+        if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_REQUIRED, out var stat) != 0)
+            throw new AgentException($"statx tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+        if ((stat.Mask & STATX_REQUIRED) != STATX_REQUIRED)
+            throw new AgentException($"statx omitted tracked file snapshot fields for {displayPath}");
+
+        if ((stat.Mode & S_IFMT) != S_IFREG)
+            throw new AgentException($"Tracked path is not a regular file: {displayPath}");
+
+        return stat;
+    }
+
+    private static void EnsureSnapshotMetadata(
+        FileSnapshot expectedSnapshot,
+        LinuxStatx stat,
+        string displayPath)
+    {
+        if (!expectedSnapshot.MatchesMetadata(stat))
+            throw new AgentException($"Tracked regular file changed during durability barrier: {displayPath}");
+    }
+
+    private static void EnsureSnapshotDigest(
+        FileSnapshot expectedSnapshot,
+        Stream stream,
+        string displayPath,
+        string phase)
+    {
+        stream.Position = 0;
+        var digest = Convert.ToHexStringLower(SHA256.HashData(stream));
+        if (!string.Equals(digest, expectedSnapshot.Sha256, StringComparison.Ordinal))
+            throw new AgentException($"Tracked regular file bytes changed {phase}: {displayPath}");
     }
 
     private static int OpenRegularFileNoFollow(
@@ -334,15 +389,7 @@ internal static class Durability
 
         try
         {
-            if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_REQUIRED, out stat) != 0)
-                throw new AgentException($"statx tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
-
-            if ((stat.Mask & STATX_REQUIRED) != STATX_REQUIRED)
-                throw new AgentException($"statx omitted tracked file identity for {displayPath}");
-
-            if ((stat.Mode & S_IFMT) != S_IFREG)
-                throw new AgentException($"Tracked path is not a regular file: {displayPath}");
-
+            stat = StatRegularFileDescriptor(fd, displayPath);
             return fd;
         }
         catch
@@ -392,9 +439,31 @@ internal readonly record struct FileIdentity(uint DeviceMajor, uint DeviceMinor,
         => new(stat.DeviceMajor, stat.DeviceMinor, stat.Inode);
 }
 
+internal readonly record struct FileSnapshot(
+    FileIdentity Identity,
+    long ChangeTimeSeconds,
+    uint ChangeTimeNanoseconds,
+    ulong Size,
+    string Sha256)
+{
+    internal static FileSnapshot From(LinuxStatx stat, ReadOnlySpan<byte> data)
+        => new(
+            FileIdentity.From(stat),
+            stat.ChangeTimeSeconds,
+            stat.ChangeTimeNanoseconds,
+            stat.Size,
+            Convert.ToHexStringLower(SHA256.HashData(data)));
+
+    internal bool MatchesMetadata(LinuxStatx stat)
+        => Identity == FileIdentity.From(stat) &&
+           ChangeTimeSeconds == stat.ChangeTimeSeconds &&
+           ChangeTimeNanoseconds == stat.ChangeTimeNanoseconds &&
+           Size == stat.Size;
+}
+
 internal readonly record struct VerifiedRegularFile(
     byte[] Data,
-    FileIdentity Identity,
+    FileSnapshot Snapshot,
     UnixFileMode Mode);
 
 [StructLayout(LayoutKind.Explicit, Size = 256)]
@@ -408,6 +477,15 @@ internal struct LinuxStatx
 
     [FieldOffset(32)]
     internal ulong Inode;
+
+    [FieldOffset(40)]
+    internal ulong Size;
+
+    [FieldOffset(96)]
+    internal long ChangeTimeSeconds;
+
+    [FieldOffset(104)]
+    internal uint ChangeTimeNanoseconds;
 
     [FieldOffset(136)]
     internal uint DeviceMajor;
