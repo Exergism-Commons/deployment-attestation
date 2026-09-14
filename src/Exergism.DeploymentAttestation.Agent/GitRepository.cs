@@ -570,13 +570,24 @@ internal sealed class GitRepository(AgentConfig config)
 
             if (!Directory.Exists(submodulePath) ||
                 new DirectoryInfo(submodulePath).LinkTarget is not null)
-                throw new AgentException($"gitlink is not a real directory: {entry.RelativePath}");
+            {
+                if (traversalMode == GitMetadataTraversalMode.StrictTargetCommit)
+                    throw new AgentException($"gitlink is not a real directory: {entry.RelativePath}");
+                continue;
+            }
 
             var gitMarker = Path.Combine(submodulePath, GIT_METADATA_NAME);
             if (!File.Exists(gitMarker) && !Directory.Exists(gitMarker))
             {
                 if (traversalMode == GitMetadataTraversalMode.StrictTargetCommit)
                     throw new AgentException($"gitlink metadata is missing: {entry.RelativePath}");
+                continue;
+            }
+
+            if (new FileInfo(gitMarker).LinkTarget is not null)
+            {
+                if (traversalMode == GitMetadataTraversalMode.StrictTargetCommit)
+                    throw new AgentException($"gitlink metadata marker is a symlink: {entry.RelativePath}");
                 continue;
             }
 
