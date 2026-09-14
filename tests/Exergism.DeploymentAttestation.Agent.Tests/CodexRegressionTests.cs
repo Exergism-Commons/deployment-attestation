@@ -323,6 +323,46 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public void GitMetadataEnumerationDoesNotFollowWorktreeSymlinks()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = Path.Combine(environment.Root, "checkout");
+        var external = Path.Combine(environment.Root, "external-repository");
+        Directory.CreateDirectory(checkout);
+        Directory.CreateDirectory(Path.Combine(checkout, GIT_METADATA_NAME));
+        Directory.CreateDirectory(Path.Combine(external, GIT_METADATA_NAME));
+
+        var escape = Path.Combine(checkout, "escape");
+        Directory.CreateSymbolicLink(escape, external);
+
+        var markers = GitMetadataEnumeration.EnumerateMarkers(checkout)
+            .Select(Path.GetFullPath)
+            .ToArray();
+
+        CollectionAssert.AreEqual(
+            new[] { Path.GetFullPath(Path.Combine(checkout, GIT_METADATA_NAME)) },
+            markers);
+        Assert.IsFalse(markers.Any(marker =>
+            marker.StartsWith(Path.GetFullPath(external), StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public void GitMetadataTreeEnumerationDoesNotFollowSymlinkDirectories()
+    {
+        using var environment = TestEnvironment.Create();
+        var metadata = Path.Combine(environment.Root, "metadata");
+        var external = Path.Combine(environment.Root, "external");
+        Directory.CreateDirectory(metadata);
+        Directory.CreateDirectory(external);
+        File.WriteAllText(Path.Combine(external, "external-file"), "outside");
+        Directory.CreateSymbolicLink(Path.Combine(metadata, "escape"), external);
+
+        Assert.IsFalse(
+            GitMetadataEnumeration.EnumerateFiles(metadata)
+                .Any(path => path.EndsWith("external-file", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
     public void DirectoryChurnChangesSnapshotEvenWhenEntryIsRemoved()
     {
         using var environment = TestEnvironment.Create();
