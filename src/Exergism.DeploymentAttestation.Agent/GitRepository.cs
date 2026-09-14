@@ -20,6 +20,12 @@ internal sealed record RepositoryDurabilitySnapshot(
     Dictionary<string, FileSnapshot> Files,
     Dictionary<string, DirectorySnapshot> Directories);
 
+internal enum GitMetadataTraversalMode
+{
+    StrictTargetCommit,
+    RecoveryCurrentCheckout
+}
+
 internal static class GitMetadataEnumeration
 {
     internal static IEnumerable<string> EnumerateFiles(string root)
@@ -203,7 +209,7 @@ internal sealed class GitRepository(AgentConfig config)
             _config.AppDirectory,
             commit,
             parentMetadataHierarchy: null,
-            requirePopulatedGitlinks: true);
+            GitMetadataTraversalMode.StrictTargetCommit);
         await FsyncRepositoryAsync(
             _config.AppDirectory,
             commit,
@@ -216,11 +222,7 @@ internal sealed class GitRepository(AgentConfig config)
     public async Task ReconcileStaleGitLocksAsync()
     {
         var head = await HeadAsync();
-        var roots = await VerifiedGitMetadataRootsAsync(
-            _config.AppDirectory,
-            head,
-            parentMetadataHierarchy: null,
-            requirePopulatedGitlinks: false);
+        var roots = await RecoveryGitMetadataRootsAsync(head);
         var protectedRoots = new HashSet<string>(roots, StringComparer.Ordinal) { Path.GetFullPath(_config.AppDirectory) };
 
         await AssertNoRelatedGitAsync(protectedRoots);
@@ -525,11 +527,18 @@ internal sealed class GitRepository(AgentConfig config)
         return roots.Order(StringComparer.Ordinal).ToList();
     }
 
+    internal async Task<List<string>> RecoveryGitMetadataRootsAsync(string commit)
+        => await VerifiedGitMetadataRootsAsync(
+            _config.AppDirectory,
+            commit,
+            parentMetadataHierarchy: null,
+            GitMetadataTraversalMode.RecoveryCurrentCheckout);
+
     private async Task<List<string>> VerifiedGitMetadataRootsAsync(
         string repository,
         string commit,
         IReadOnlyCollection<string>? parentMetadataHierarchy,
-        bool requirePopulatedGitlinks)
+        GitMetadataTraversalMode traversalMode)
     {
         repository = Path.GetFullPath(repository);
         var ownRoots = await GitMetadataRootsAsync(repository);
@@ -554,7 +563,7 @@ internal sealed class GitRepository(AgentConfig config)
                 entry.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
             if (!File.Exists(submodulePath) && !Directory.Exists(submodulePath))
             {
-                if (requirePopulatedGitlinks)
+                if (traversalMode == GitMetadataTraversalMode.StrictTargetCommit)
                     throw new AgentException($"gitlink is not populated: {entry.RelativePath}");
                 continue;
             }
@@ -566,28 +575,29 @@ internal sealed class GitRepository(AgentConfig config)
             var gitMarker = Path.Combine(submodulePath, GIT_METADATA_NAME);
             if (!File.Exists(gitMarker) && !Directory.Exists(gitMarker))
             {
-                if (requirePopulatedGitlinks)
+                if (traversalMode == GitMetadataTraversalMode.StrictTargetCommit)
                     throw new AgentException($"gitlink metadata is missing: {entry.RelativePath}");
                 continue;
             }
 
-            if (!requirePopulatedGitlinks)
+            var childCommit = entry.ObjectId;
+            if (traversalMode == GitMetadataTraversalMode.RecoveryCurrentCheckout)
             {
-                var childOwnRoots = await GitMetadataRootsAsync(submodulePath);
-                GitMetadataBoundary.EnsureRepositoryRoots(
+                var currentHead = await GitAtAsync(
                     submodulePath,
-                    childOwnRoots,
-                    hierarchy,
-                    isTopLevel: false);
-                hierarchy.UnionWith(childOwnRoots);
-                continue;
+                    [GIT_SUBCOMMAND_REV_PARSE, "HEAD"],
+                    required: false);
+                if (!currentHead.Success || string.IsNullOrWhiteSpace(currentHead.StdOut))
+                    throw new AgentException(
+                        $"Cannot resolve current HEAD for populated gitlink during recovery: {entry.RelativePath}");
+                childCommit = currentHead.StdOut.Trim();
             }
 
             var childRoots = await VerifiedGitMetadataRootsAsync(
                 submodulePath,
-                entry.ObjectId,
+                childCommit,
                 hierarchy,
-                requirePopulatedGitlinks: true);
+                traversalMode);
             hierarchy.UnionWith(childRoots);
         }
 
