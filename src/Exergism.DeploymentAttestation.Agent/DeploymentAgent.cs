@@ -202,7 +202,7 @@ internal sealed class DeploymentAgent
 
         Warn($"Recovering transaction to {tx.OldSourceCommit}");
         await _systemd.StopQuiescentAsync();
-        await _git.ReconcileStaleGitLocksAsync();
+        await _git.ReconcileStaleGitLocksAsync(tx.OldSourceCommit);
         await _git.SwitchSourceAsync(tx.OldSourceCommit, fetchFirst: false);
 
         var rollbackPath = _config.AppBinary + ".rollback";
