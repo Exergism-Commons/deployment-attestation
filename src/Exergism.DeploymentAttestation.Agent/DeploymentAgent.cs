@@ -272,6 +272,9 @@ internal sealed class DeploymentAgent
                 var state = Protocol.ReadCurrentState(_config.CurrentStateFile);
                 if (state.SourceCommit == tx.NewSourceCommit &&
                     state.BinarySha256 == tx.NewBinarySha256 &&
+                    tx.NewReleaseManifestSha256 is not null &&
+                    state.ReleaseManifestSha256 == tx.NewReleaseManifestSha256 &&
+                    state.ReleaseTag == _config.ReleaseTag &&
                     await VerifyBaselineAsync())
                 {
                     await ResumeCommittedServiceAsync(tx.NewSourceCommit, tx.NewBinarySha256);
