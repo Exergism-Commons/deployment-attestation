@@ -566,6 +566,7 @@ import stat
 import sys
 
 root = pathlib.Path(sys.argv[1])
+directories = []
 for p in root.rglob("*"):
     st = os.lstat(p)
     if stat.S_ISREG(st.st_mode):
@@ -574,8 +575,10 @@ for p in root.rglob("*"):
             os.fsync(fd)
         finally:
             os.close(fd)
-for p in sorted((q for q in root.rglob("*") if q.is_dir()), key=lambda q: len(q.parts), reverse=True):
-    fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY)
+    elif stat.S_ISDIR(st.st_mode):
+        directories.append(p)
+for p in sorted(directories, key=lambda q: len(q.parts), reverse=True):
+    fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
     finally:
