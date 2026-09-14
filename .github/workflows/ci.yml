@@ -221,7 +221,7 @@ jobs:
           grep -Fq 'systemd-analyze' install/install-id-exergism.sh
           grep -Fq 'Publish the complete recovery core durably *before* exposing any' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file()' install/install-id-exergism.sh
-          grep -Fq 'mv -f "$tmp" "$dest"' install/install-id-exergism.sh
+          grep -Fq 'mv -fT -- "$tmp" "$dest"' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755' install/install-id-exergism.sh
@@ -269,6 +269,11 @@ jobs:
           grep -Fq 'INSTALL_RECOVERING_DIR=' install/install-id-exergism.sh
           grep -Fq 'create_install_transaction()' install/install-id-exergism.sh
           grep -Fq 'mark_generation_validated()' install/install-id-exergism.sh
+          grep -Fq 'validate_phase_paths' install/install-id-exergism.sh
+          grep -Fq 'mv -T -- "$stage" "$INSTALL_PENDING_DIR"' install/install-id-exergism.sh
+          grep -Fq 'require_real_phase_if_present' install/recover-id-exergism-install.sh
+          grep -Fq 'cp -aT -- "$backup" "$path"' install/recover-id-exergism-install.sh
+          grep -Fq 'Recovered journal scalar is missing or unsafe' install/finalize-id-exergism-recovery.sh
           grep -Fq 'mv -T -- "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"' install/install-id-exergism.sh
           grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
           grep -Fq 'INSTALL_COMMITTED_DIR=' install/install-id-exergism.sh
@@ -365,7 +370,7 @@ jobs:
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Timer did not reach a provably quiescent terminal state.' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Could not re-check timer enablement after runtime restoration.' install/finalize-id-exergism-recovery.sh
-          grep -Fq 'mv "$RECOVERED_DIR" "$FINALIZED_DIR"' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'mv -T -- "$RECOVERED_DIR" "$FINALIZED_DIR"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'RuntimeMaxSec=90s' install/validate-id-exergism-generation.sh
           grep -Fq 'ReadOnlyPaths=$APP_DIR' install/validate-id-exergism-generation.sh
           grep -Fq 'governance/profile/0.1-DRAFT' install/validate-id-exergism-generation.sh
@@ -476,7 +481,7 @@ jobs:
           finalizer_quiesce = finalizer_text.index('quiesce_target_after_failed_validation || true', finalizer_fence)
           timer_terminal = finalizer_text.index('expected_active="$(expected_timer_active)"')
           enablement_recheck = finalizer_text.index('Could not re-check timer enablement after runtime restoration.')
-          marker_retire = finalizer_text.index('mv "$RECOVERED_DIR" "$FINALIZED_DIR"')
+          marker_retire = finalizer_text.index('mv -T -- "$RECOVERED_DIR" "$FINALIZED_DIR"')
           assert finalizer_health < finalizer_fence < finalizer_quiesce < timer_terminal < enablement_recheck < marker_retire
           PY
 
