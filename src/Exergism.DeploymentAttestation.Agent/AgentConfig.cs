@@ -36,7 +36,9 @@ internal sealed class AgentConfig
         ReleaseManifestName = RequireSafeAssetName(
             ENV_RELEASE_MANIFEST,
             Optional(ENV_RELEASE_MANIFEST, RELEASE_MANIFEST_DEFAULT));
-        AttestationEndpoint = Optional(ENV_ATTESTATION_ENDPOINT);
+        AttestationEndpoint = RequireOptionalHttpUri(
+            ENV_ATTESTATION_ENDPOINT,
+            Optional(ENV_ATTESTATION_ENDPOINT));
         HmacSecretFile = Optional(ENV_HMAC_SECRET_FILE);
         SmokeScript = Optional(ENV_SMOKE_SCRIPT);
         SmokeTimeout = PositiveSeconds(Optional(ENV_SMOKE_TIMEOUT, "60"), ENV_SMOKE_TIMEOUT);
@@ -221,6 +223,15 @@ internal sealed class AgentConfig
         => Path.IsPathFullyQualified(value)
             ? Path.GetFullPath(value)
             : throw new AgentException($"{key} must be an absolute path");
+
+    internal static string RequireOptionalHttpUri(string key, string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        _ = RequireHttpUri(key, value);
+        return value;
+    }
 
     private static Uri RequireHttpUri(string key, string value)
     {
