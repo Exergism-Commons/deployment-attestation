@@ -320,6 +320,7 @@ arch() {
 
 download() {
   curl --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+    --proto '=https' --proto-redir '=https' \
     --max-time "$EC_DOWNLOAD_TIMEOUT" -fsSL \
     "$EC_GITHUB_DOWNLOAD_BASE/$1" -o "$2"
 }
