@@ -23,6 +23,16 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
+    public void HttpClientsDoNotImposeFrameworkDefaultTimeout()
+    {
+        using var get = HttpClientFactory.CreateGet();
+        using var attestation = HttpClientFactory.CreateAttestation();
+
+        Assert.AreEqual(Timeout.InfiniteTimeSpan, get.Timeout);
+        Assert.AreEqual(Timeout.InfiniteTimeSpan, attestation.Timeout);
+    }
+
+    [TestMethod]
     public void InvalidActionFailsClosed()
         => TestAssert.Throws<AgentException>(() => AgentActionParser.Parse("deploy"));
 
