@@ -45,11 +45,15 @@ internal sealed class AgentConfig
         HmacSecretFile = RequireAttestationSecret(
             AttestationEndpoint,
             Optional(ENV_HMAC_SECRET_FILE));
-        SmokeScript = Optional(ENV_SMOKE_SCRIPT);
+        SmokeScript = RequireOptionalExecutableFile(
+            ENV_SMOKE_SCRIPT,
+            Optional(ENV_SMOKE_SCRIPT));
         SmokeTimeout = PositiveSeconds(Optional(ENV_SMOKE_TIMEOUT, "60"), ENV_SMOKE_TIMEOUT);
         DownloadTimeout = PositiveSeconds(Optional(ENV_DOWNLOAD_TIMEOUT, "120"), ENV_DOWNLOAD_TIMEOUT);
         AgentHealthMaxAge = PositiveSeconds(Optional(ENV_AGENT_HEALTH_MAX_AGE, "1500"), ENV_AGENT_HEALTH_MAX_AGE);
-        CheckPublic = Optional(ENV_CHECK_PUBLIC, CONFIG_BOOLEAN_TRUE) == CONFIG_BOOLEAN_TRUE;
+        CheckPublic = RequireBoolean(
+            ENV_CHECK_PUBLIC,
+            Optional(ENV_CHECK_PUBLIC, CONFIG_BOOLEAN_TRUE));
         StateDirectory = RequireAbsolutePath(
             ENV_STATE_DIR,
             Optional(ENV_STATE_DIR, $"/var/lib/ec-deployment-attestation/{Service}"));
@@ -284,6 +288,40 @@ internal sealed class AgentConfig
             throw new AgentException($"{ENV_HMAC_SECRET_FILE} must not be empty");
 
         return fullPath;
+    }
+
+    internal static bool RequireBoolean(string key, string value)
+        => value switch
+        {
+            "0" => false,
+            CONFIG_BOOLEAN_TRUE => true,
+            _ => throw new AgentException($"{key} must be exactly 0 or 1")
+        };
+
+    internal static string RequireOptionalExecutableFile(string key, string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        var path = RequireAbsolutePath(key, value);
+        var info = new FileInfo(path);
+        if (!info.Exists || info.LinkTarget is not null)
+            throw new AgentException($"{key} must be a real executable file, not a symlink");
+
+        UnixFileMode mode;
+        try
+        {
+            mode = File.GetUnixFileMode(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            throw new AgentException($"{key} is not inspectable", ex);
+        }
+
+        if ((mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
+            throw new AgentException($"{key} must be executable");
+
+        return path;
     }
 
     private static TimeSpan PositiveSeconds(string value, string key)
