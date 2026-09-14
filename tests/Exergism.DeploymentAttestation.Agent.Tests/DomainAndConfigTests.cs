@@ -164,32 +164,69 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
-    public void DownloadBaseMustBeHttpOrHttps()
+    public void DownloadBaseMustUseHttps()
     {
         Assert.AreEqual(
             Uri.UriSchemeHttps,
-            AgentConfig.RequireHttpUri(
+            AgentConfig.RequireHttpsUri(
                 ENV_GITHUB_DOWNLOAD_BASE,
                 "https://github.com/owner/repo/releases/download/tag/").Scheme);
-        Assert.AreEqual(
-            Uri.UriSchemeHttp,
-            AgentConfig.RequireHttpUri(
-                ENV_GITHUB_DOWNLOAD_BASE,
-                "http://mirror.example.test/releases/").Scheme);
 
         foreach (var invalid in new[]
                  {
+                     "http://mirror.example.test/releases/",
                      "file:///tmp/releases/",
                      "ftp://mirror.example.test/releases/",
-                     "mailto:ops@example.test",
                      "/relative/releases/"
                  })
         {
             TestAssert.Throws<AgentException>(
-                () => AgentConfig.RequireHttpUri(
+                () => AgentConfig.RequireHttpsUri(
                     ENV_GITHUB_DOWNLOAD_BASE,
                     invalid));
         }
+    }
+
+    [TestMethod]
+    public void HealthAndAttestationTransportBoundariesFailClosed()
+    {
+        Assert.IsTrue(
+            AgentConfig.RequireLoopbackHttpUri(
+                ENV_LOCAL_URL,
+                "http://127.0.0.1:8080/").IsLoopback);
+        Assert.IsTrue(
+            AgentConfig.RequireLoopbackHttpUri(
+                ENV_LOCAL_URL,
+                "http://[::1]:8080/").IsLoopback);
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireLoopbackHttpUri(
+                ENV_LOCAL_URL,
+                "https://example.test/health"));
+
+        Assert.AreEqual(
+            Uri.UriSchemeHttps,
+            AgentConfig.RequireHttpsUri(
+                ENV_PUBLIC_URL,
+                "https://id.exergism.org/").Scheme);
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireHttpsUri(
+                ENV_PUBLIC_URL,
+                "http://id.exergism.org/"));
+
+        Assert.AreEqual(
+            "https://health.example.test/v1/attest",
+            AgentConfig.RequireOptionalAttestationUri(
+                ENV_ATTESTATION_ENDPOINT,
+                "https://health.example.test/v1/attest"));
+        Assert.AreEqual(
+            "http://127.0.0.1:8081/attest",
+            AgentConfig.RequireOptionalAttestationUri(
+                ENV_ATTESTATION_ENDPOINT,
+                "http://127.0.0.1:8081/attest"));
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireOptionalAttestationUri(
+                ENV_ATTESTATION_ENDPOINT,
+                "http://health.example.test/v1/attest"));
     }
 
     [TestMethod]
@@ -244,37 +281,41 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
-    public void SmokeScriptMustBeAbsoluteRealAndExecutable()
+    public void SmokeScriptConfigRequiresOnlyAbsolutePathWhileRuntimeRequiresExecutable()
     {
         using var environment = TestEnvironment.Create();
+        var missing = Path.Combine(environment.Root, "not-installed-yet.sh");
+
+        Assert.AreEqual(
+            Path.GetFullPath(missing),
+            AgentConfig.RequireOptionalAbsolutePath(ENV_SMOKE_SCRIPT, missing));
+        Assert.AreEqual(
+            string.Empty,
+            AgentConfig.RequireOptionalAbsolutePath(ENV_SMOKE_SCRIPT, string.Empty));
+        TestAssert.Throws<AgentException>(
+            () => AgentConfig.RequireOptionalAbsolutePath(
+                ENV_SMOKE_SCRIPT,
+                "relative-smoke.sh"));
+
+        Assert.IsFalse(SmokeScriptValidation.IsUsable(missing));
+
         var script = Path.Combine(environment.Root, "smoke.sh");
         File.WriteAllText(script, "#!/bin/sh\nexit 0\n");
         File.SetUnixFileMode(
             script,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-
-        Assert.AreEqual(
-            Path.GetFullPath(script),
-            AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, script));
-        Assert.AreEqual(
-            string.Empty,
-            AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, string.Empty));
-
-        TestAssert.Throws<AgentException>(
-            () => AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, "smoke.sh"));
+        Assert.IsTrue(SmokeScriptValidation.IsUsable(script));
 
         var nonExecutable = Path.Combine(environment.Root, "not-executable.sh");
         File.WriteAllText(nonExecutable, "#!/bin/sh\nexit 0\n");
         File.SetUnixFileMode(
             nonExecutable,
             UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        TestAssert.Throws<AgentException>(
-            () => AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, nonExecutable));
+        Assert.IsFalse(SmokeScriptValidation.IsUsable(nonExecutable));
 
         var symlink = Path.Combine(environment.Root, "smoke-link");
         File.CreateSymbolicLink(symlink, script);
-        TestAssert.Throws<AgentException>(
-            () => AgentConfig.RequireOptionalExecutableFile(ENV_SMOKE_SCRIPT, symlink));
+        Assert.IsFalse(SmokeScriptValidation.IsUsable(symlink));
     }
 
     [TestMethod]
@@ -282,15 +323,15 @@ public sealed class DomainAndConfigTests
     {
         Assert.AreEqual(
             string.Empty,
-            AgentConfig.RequireOptionalHttpUri(ENV_ATTESTATION_ENDPOINT, string.Empty));
+            AgentConfig.RequireOptionalAttestationUri(ENV_ATTESTATION_ENDPOINT, string.Empty));
         Assert.AreEqual(
             "https://health.example.test/v1/attest",
-            AgentConfig.RequireOptionalHttpUri(
+            AgentConfig.RequireOptionalAttestationUri(
                 ENV_ATTESTATION_ENDPOINT,
                 "https://health.example.test/v1/attest"));
         Assert.AreEqual(
             "http://127.0.0.1:8081/attest",
-            AgentConfig.RequireOptionalHttpUri(
+            AgentConfig.RequireOptionalAttestationUri(
                 ENV_ATTESTATION_ENDPOINT,
                 "http://127.0.0.1:8081/attest"));
 
@@ -307,6 +348,109 @@ public sealed class DomainAndConfigTests
                     ENV_ATTESTATION_ENDPOINT,
                     invalid));
         }
+    }
+
+    [TestMethod]
+    public void DeploymentPathTopologyRejectsGitCleanAndStateOverlaps()
+    {
+        using var environment = TestEnvironment.Create();
+        var root = environment.Root;
+        var app = Path.Combine(root, "app");
+        var runtime = Path.Combine(root, "bin", "runtime");
+        var revision = Path.Combine(root, "doc", "revision");
+        var state = Path.Combine(root, "state");
+
+        AgentConfig.ValidateDeploymentPathTopology(
+            app,
+            runtime,
+            revision,
+            state,
+            string.Empty,
+            string.Empty);
+
+        TestAssert.Throws<AgentException>(() =>
+            AgentConfig.ValidateDeploymentPathTopology(
+                app,
+                runtime,
+                revision,
+                Path.Combine(app, ".state"),
+                string.Empty,
+                string.Empty));
+
+        TestAssert.Throws<AgentException>(() =>
+            AgentConfig.ValidateDeploymentPathTopology(
+                app,
+                Path.Combine(app, "runtime"),
+                revision,
+                state,
+                string.Empty,
+                string.Empty));
+
+        TestAssert.Throws<AgentException>(() =>
+            AgentConfig.ValidateDeploymentPathTopology(
+                app,
+                runtime,
+                Path.Combine(app, "revision"),
+                state,
+                string.Empty,
+                string.Empty));
+
+        TestAssert.Throws<AgentException>(() =>
+            AgentConfig.ValidateDeploymentPathTopology(
+                app,
+                runtime,
+                revision,
+                state,
+                Path.Combine(app, "secret"),
+                string.Empty));
+
+        TestAssert.Throws<AgentException>(() =>
+            AgentConfig.ValidateDeploymentPathTopology(
+                app,
+                runtime,
+                revision,
+                state,
+                string.Empty,
+                Path.Combine(app, "smoke.sh")));
+    }
+
+    [TestMethod]
+    public void ServiceAndUnitIdentifiersRejectOptionInjection()
+    {
+        Assert.AreEqual(
+            "id.exergism.org",
+            AgentConfig.RequireSafeServiceIdentifier(
+                ENV_SERVICE,
+                "id.exergism.org"));
+        Assert.AreEqual(
+            "id-exergism.service",
+            AgentConfig.RequireSafeSystemdUnit(
+                ENV_SERVICE_UNIT,
+                "id-exergism.service"));
+
+        foreach (var invalid in new[]
+                 {
+                     "-id",
+                     "../id",
+                     "id/name",
+                     "id name"
+                 })
+            TestAssert.Throws<AgentException>(() =>
+                AgentConfig.RequireSafeServiceIdentifier(
+                    ENV_SERVICE,
+                    invalid));
+
+        foreach (var invalid in new[]
+                 {
+                     "--now",
+                     "../id.service",
+                     "id/service",
+                     "id service"
+                 })
+            TestAssert.Throws<AgentException>(() =>
+                AgentConfig.RequireSafeSystemdUnit(
+                    ENV_SERVICE_UNIT,
+                    invalid));
     }
 
     [TestMethod]
