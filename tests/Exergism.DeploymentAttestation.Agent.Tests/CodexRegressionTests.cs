@@ -643,7 +643,7 @@ public sealed class CodexRegressionTests
         var unsetWorktree = await ProcessRunner.RunAsync(
             "git",
             new[] { "config", "--file", Path.Combine(oldGrandGitDir, "config"), "--unset", "core.worktree" },
-            workingDirectory: grand);
+            workingDirectory: environment.Root);
         Assert.IsTrue(
             unsetWorktree.Success || unsetWorktree.ExitCode == 5,
             unsetWorktree.StdErr);
@@ -743,7 +743,7 @@ public sealed class CodexRegressionTests
         var unsetWorktree = await ProcessRunner.RunAsync(
             "git",
             new[] { "config", "--file", Path.Combine(oldGrandGitDir, "config"), "--unset", "core.worktree" },
-            workingDirectory: grand);
+            workingDirectory: environment.Root);
         Assert.IsTrue(
             unsetWorktree.Success || unsetWorktree.ExitCode == 5,
             unsetWorktree.StdErr);
