@@ -16,6 +16,10 @@ internal static class TrackedFileDurability
         => Durability.FsyncRegularFileNoFollow(path, relativePath, expectedSnapshot);
 }
 
+internal sealed record RepositoryDurabilitySnapshot(
+    Dictionary<string, FileSnapshot> Files,
+    Dictionary<string, DirectorySnapshot> Directories);
+
 internal static class GitProcessIdentity
 {
     private const string GIT_EXECUTABLE_NAME = "git";
@@ -66,10 +70,10 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task FsyncCheckoutAsync(string commit)
     {
-        var verifiedFiles = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
-        await FsyncRepositoryAsync(_config.AppDirectory, commit, verifiedFiles);
-        var finalFiles = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
-        EnsureSnapshotsUnchanged(verifiedFiles, finalFiles);
+        var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        await FsyncRepositoryAsync(_config.AppDirectory, commit, verified);
+        var final = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        EnsureSnapshotsUnchanged(verified, final);
     }
 
     public async Task ReconcileStaleGitLocksAsync()
@@ -97,12 +101,14 @@ internal sealed class GitRepository(AgentConfig config)
         await AssertNoRelatedGitAsync(protectedRoots);
     }
 
-    private async Task<Dictionary<string, FileSnapshot>> VerifyRepositoryExactAsync(
+    private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
         string repository,
         string commit,
-        Dictionary<string, FileSnapshot>? verifiedFiles = null)
+        RepositoryDurabilitySnapshot? verified = null)
     {
-        verifiedFiles ??= new Dictionary<string, FileSnapshot>(StringComparer.Ordinal);
+        verified ??= new RepositoryDurabilitySnapshot(
+            new Dictionary<string, FileSnapshot>(StringComparer.Ordinal),
+            new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal));
         repository = Path.GetFullPath(repository);
         if (!Directory.Exists(repository) || new DirectoryInfo(repository).LinkTarget is not null)
             throw new AgentException($"Repository path is not a real directory: {repository}");
@@ -117,11 +123,13 @@ internal sealed class GitRepository(AgentConfig config)
 
         var entries = await ReadTreeAsync(repository, commit);
         var expectedFiles = new HashSet<string>(StringComparer.Ordinal);
+        var expectedDirectories = new HashSet<string>(StringComparer.Ordinal) { repository };
         var submodules = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var entry in entries)
         {
             var fullPath = Path.Combine(repository, entry.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            AddParentChain(expectedDirectories, fullPath, repository);
             if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
             {
                 if (!Directory.Exists(fullPath) || new DirectoryInfo(fullPath).LinkTarget is not null)
@@ -150,7 +158,7 @@ internal sealed class GitRepository(AgentConfig config)
                 if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
                     throw new AgentException($"Executable bit mismatch: {entry.RelativePath}");
                 data = verified.Data;
-                verifiedFiles[Path.GetFullPath(fullPath)] = verified.Snapshot;
+                verified.Files[Path.GetFullPath(fullPath)] = verified.Snapshot;
             }
             else
             {
@@ -170,13 +178,20 @@ internal sealed class GitRepository(AgentConfig config)
             throw new AgentException($"Worktree file set differs; extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
         }
 
+        foreach (var directory in expectedDirectories)
+        {
+            var fullDirectory = Path.GetFullPath(directory);
+            verified.Directories[fullDirectory] =
+                Durability.ReadDirectorySnapshotNoFollow(fullDirectory, fullDirectory);
+        }
+
         foreach (var submodule in submodules)
         {
             var subPath = Path.Combine(repository, submodule.Key.Replace('/', Path.DirectorySeparatorChar));
-            await VerifyRepositoryExactAsync(subPath, submodule.Value, verifiedFiles);
+            await VerifyRepositoryExactAsync(subPath, submodule.Value, verified);
         }
 
-        return verifiedFiles;
+        return verified;
     }
 
     private async Task SyncSubmodulesAsync(string commit)
@@ -223,7 +238,7 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task FsyncRepositoryAsync(
         string repository,
         string commit,
-        IReadOnlyDictionary<string, FileSnapshot> verifiedFiles)
+        RepositoryDurabilitySnapshot verified)
     {
         var entries = await ReadTreeAsync(repository, commit);
         var directories = new HashSet<string>(StringComparer.Ordinal) { repository };
@@ -253,7 +268,7 @@ internal sealed class GitRepository(AgentConfig config)
             if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
                 var fullPath = Path.GetFullPath(path);
-                if (!verifiedFiles.TryGetValue(fullPath, out var expectedSnapshot))
+                if (!verified.Files.TryGetValue(fullPath, out var expectedSnapshot))
                     throw new AgentException($"Tracked regular file was not snapshot-verified: {entry.RelativePath}");
 
                 TrackedFileDurability.FsyncRegularFile(path, entry.RelativePath, expectedSnapshot);
@@ -271,26 +286,52 @@ internal sealed class GitRepository(AgentConfig config)
         }
 
         foreach (var directory in directories.OrderByDescending(x => x.Count(c => c == Path.DirectorySeparatorChar)))
-            Durability.FsyncRequiredDirectory(directory, directory);
+        {
+            var fullDirectory = Path.GetFullPath(directory);
+            if (!verified.Directories.TryGetValue(fullDirectory, out var expectedDirectory))
+                throw new AgentException($"Checkout directory was not snapshot-verified: {fullDirectory}");
+
+            Durability.FsyncDirectorySnapshotNoFollow(
+                fullDirectory,
+                fullDirectory,
+                expectedDirectory);
+        }
 
         foreach (var root in await GitMetadataRootsAsync(repository))
             FsyncDirectoryTree(root);
 
         foreach (var submodule in submodules)
-            await FsyncRepositoryAsync(submodule.Path, submodule.Commit, verifiedFiles);
+            await FsyncRepositoryAsync(submodule.Path, submodule.Commit, verified);
     }
 
     private static void EnsureSnapshotsUnchanged(
-        IReadOnlyDictionary<string, FileSnapshot> expected,
-        IReadOnlyDictionary<string, FileSnapshot> actual)
+        RepositoryDurabilitySnapshot expected,
+        RepositoryDurabilitySnapshot actual)
+    {
+        EnsureSnapshotMapUnchanged(
+            expected.Files,
+            actual.Files,
+            "Tracked regular file");
+        EnsureSnapshotMapUnchanged(
+            expected.Directories,
+            actual.Directories,
+            "Checkout directory");
+    }
+
+    private static void EnsureSnapshotMapUnchanged<T>(
+        IReadOnlyDictionary<string, T> expected,
+        IReadOnlyDictionary<string, T> actual,
+        string kind)
+        where T : notnull
     {
         if (expected.Count != actual.Count)
-            throw new AgentException("Tracked regular file set changed during durability barrier");
+            throw new AgentException($"{kind} set changed during durability barrier");
 
         foreach (var pair in expected)
         {
-            if (!actual.TryGetValue(pair.Key, out var snapshot) || snapshot != pair.Value)
-                throw new AgentException($"Tracked regular file changed during durability barrier: {pair.Key}");
+            if (!actual.TryGetValue(pair.Key, out var snapshot) ||
+                !EqualityComparer<T>.Default.Equals(snapshot, pair.Value))
+                throw new AgentException($"{kind} changed during durability barrier: {pair.Key}");
         }
     }
 
