@@ -20,6 +20,36 @@ internal sealed record RepositoryDurabilitySnapshot(
     Dictionary<string, FileSnapshot> Files,
     Dictionary<string, DirectorySnapshot> Directories);
 
+internal static class GitMetadataEnumeration
+{
+    internal static IEnumerable<string> EnumerateMarkers(string repository)
+        => Directory.EnumerateFileSystemEntries(
+            repository,
+            GIT_METADATA_NAME,
+            RecursiveNoFollowOptions());
+
+    internal static IEnumerable<string> EnumerateFiles(string root)
+        => Directory.EnumerateFiles(
+            root,
+            "*",
+            RecursiveNoFollowOptions());
+
+    internal static IEnumerable<string> EnumerateDirectories(string root)
+        => Directory.EnumerateDirectories(
+            root,
+            "*",
+            RecursiveNoFollowOptions());
+
+    private static EnumerationOptions RecursiveNoFollowOptions()
+        => new()
+        {
+            RecurseSubdirectories = true,
+            AttributesToSkip = FileAttributes.ReparsePoint,
+            IgnoreInaccessible = false,
+            ReturnSpecialDirectories = false
+        };
+}
+
 internal static class GitProcessIdentity
 {
     private const string GIT_EXECUTABLE_NAME = "git";
@@ -340,13 +370,13 @@ internal sealed class GitRepository(AgentConfig config)
         if (!Directory.Exists(root))
             throw new AgentException($"Git metadata disappeared: {root}");
 
-        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        foreach (var file in GitMetadataEnumeration.EnumerateFiles(root))
         {
             var info = new FileInfo(file);
             if (info.LinkTarget is null)
                 Durability.FsyncFile(file);
         }
-        foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories)
+        foreach (var dir in GitMetadataEnumeration.EnumerateDirectories(root)
                      .OrderByDescending(x => x.Count(c => c == Path.DirectorySeparatorChar)))
             Durability.FsyncRequiredDirectory(dir, dir);
         Durability.FsyncRequiredDirectory(root, root);
@@ -364,7 +394,7 @@ internal sealed class GitRepository(AgentConfig config)
             roots.Add(Path.GetFullPath(result.StdOut.Trim()));
         }
 
-        foreach (var marker in Directory.EnumerateFileSystemEntries(repository, GIT_METADATA_NAME, SearchOption.AllDirectories))
+        foreach (var marker in GitMetadataEnumeration.EnumerateMarkers(repository))
         {
             if (Directory.Exists(marker) && new DirectoryInfo(marker).LinkTarget is null)
             {
