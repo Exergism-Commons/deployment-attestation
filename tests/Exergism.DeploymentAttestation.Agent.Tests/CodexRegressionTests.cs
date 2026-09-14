@@ -631,6 +631,8 @@ public sealed class CodexRegressionTests
 
         var topOld = await GitAsync(checkout, "rev-parse", "HEAD");
         var child = Path.Combine(checkout, "child");
+        await GitAsync(child, "config", "user.name", "Regression Test");
+        await GitAsync(child, "config", "user.email", "regression@example.test");
         var grand = Path.Combine(child, "grand");
         var modernGrandGitDir = Path.GetFullPath(await GitAsync(
             grand,
