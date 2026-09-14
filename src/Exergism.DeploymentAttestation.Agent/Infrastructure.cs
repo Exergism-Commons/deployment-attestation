@@ -195,11 +195,14 @@ internal static class Durability
     private const int O_CLOEXEC = 0x80000;
     private const int AT_EMPTY_PATH = 0x1000;
     private const uint STATX_TYPE = 0x00000001;
+    private const uint STATX_MTIME = 0x00000040;
     private const uint STATX_CTIME = 0x00000080;
     private const uint STATX_INO = 0x00000100;
     private const uint STATX_SIZE = 0x00000200;
-    private const uint STATX_REQUIRED = STATX_TYPE | STATX_CTIME | STATX_INO | STATX_SIZE;
+    private const uint STATX_REGULAR_REQUIRED = STATX_TYPE | STATX_CTIME | STATX_INO | STATX_SIZE;
+    private const uint STATX_DIRECTORY_REQUIRED = STATX_TYPE | STATX_MTIME | STATX_CTIME | STATX_INO;
     private const ushort S_IFMT = 0xF000;
+    private const ushort S_IFDIR = 0x4000;
     private const ushort S_IFREG = 0x8000;
 
     public static void EnsureDirectory(string target, UnixFileMode mode)
@@ -343,16 +346,111 @@ internal static class Durability
         }
     }
 
+    public static FileSnapshot VerifyAndFsyncRegularFileNoFollow(
+        string path,
+        string displayPath,
+        string expectedSha256,
+        bool requireExecutable)
+    {
+        var fd = OpenRegularFileNoFollow(path, displayPath, out var beforeStat);
+        try
+        {
+            using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
+            fd = -1;
+            using var stream = new FileStream(handle, FileAccess.Read);
+            var openFd = checked((int)handle.DangerousGetHandle());
+
+            var mode = (UnixFileMode)(beforeStat.Mode & ~S_IFMT);
+            if (requireExecutable &&
+                (mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
+                throw new AgentException($"{displayPath} is not executable");
+
+            var digest = HashStream(stream);
+            if (!string.Equals(digest, expectedSha256, StringComparison.Ordinal))
+                throw new AgentException($"{displayPath} digest mismatch");
+
+            var afterReadStat = StatRegularFileDescriptor(openFd, displayPath);
+            var snapshot = FileSnapshot.FromDigest(afterReadStat, digest);
+            if (!snapshot.MatchesMetadata(beforeStat))
+                throw new AgentException($"{displayPath} changed while being verified");
+
+            if (Native.fsync(openFd) != 0)
+                throw new AgentException($"fsync failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+            var afterFsyncStat = StatRegularFileDescriptor(openFd, displayPath);
+            EnsureSnapshotMetadata(snapshot, afterFsyncStat, displayPath);
+            stream.Position = 0;
+            EnsureSnapshotDigest(snapshot, stream, displayPath, "after fsync");
+            return snapshot;
+        }
+        finally
+        {
+            if (fd >= 0)
+                _ = Native.close(fd);
+        }
+    }
+
+    public static DirectorySnapshot ReadDirectorySnapshotNoFollow(string path, string displayPath)
+    {
+        var fd = OpenDirectoryNoFollow(path, displayPath, out var stat);
+        try
+        {
+            return DirectorySnapshot.From(stat);
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
+    public static void FsyncDirectorySnapshotNoFollow(
+        string path,
+        string displayPath,
+        DirectorySnapshot expectedSnapshot)
+    {
+        var fd = OpenDirectoryNoFollow(path, displayPath, out var beforeStat);
+        try
+        {
+            if (!expectedSnapshot.Matches(beforeStat))
+                throw new AgentException($"Directory changed before fsync: {displayPath}");
+
+            if (Native.fsync(fd) != 0)
+                throw new AgentException($"fsync directory failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+            var afterStat = StatDirectoryDescriptor(fd, displayPath);
+            if (!expectedSnapshot.Matches(afterStat))
+                throw new AgentException($"Directory changed during fsync: {displayPath}");
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
     private static LinuxStatx StatRegularFileDescriptor(int fd, string displayPath)
     {
-        if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_REQUIRED, out var stat) != 0)
+        if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_REGULAR_REQUIRED, out var stat) != 0)
             throw new AgentException($"statx tracked regular file failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
 
-        if ((stat.Mask & STATX_REQUIRED) != STATX_REQUIRED)
+        if ((stat.Mask & STATX_REGULAR_REQUIRED) != STATX_REGULAR_REQUIRED)
             throw new AgentException($"statx omitted tracked file snapshot fields for {displayPath}");
 
         if ((stat.Mode & S_IFMT) != S_IFREG)
             throw new AgentException($"Tracked path is not a regular file: {displayPath}");
+
+        return stat;
+    }
+
+    private static LinuxStatx StatDirectoryDescriptor(int fd, string displayPath)
+    {
+        if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_DIRECTORY_REQUIRED, out var stat) != 0)
+            throw new AgentException($"statx directory failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+        if ((stat.Mask & STATX_DIRECTORY_REQUIRED) != STATX_DIRECTORY_REQUIRED)
+            throw new AgentException($"statx omitted directory snapshot fields for {displayPath}");
+
+        if ((stat.Mode & S_IFMT) != S_IFDIR)
+            throw new AgentException($"Path is not a directory: {displayPath}");
 
         return stat;
     }
@@ -373,9 +471,36 @@ internal static class Durability
         string phase)
     {
         stream.Position = 0;
-        var digest = Convert.ToHexStringLower(SHA256.HashData(stream));
+        var digest = HashStream(stream);
         if (!string.Equals(digest, expectedSnapshot.Sha256, StringComparison.Ordinal))
             throw new AgentException($"Tracked regular file bytes changed {phase}: {displayPath}");
+    }
+
+    private static string HashStream(Stream stream)
+    {
+        stream.Position = 0;
+        return Convert.ToHexStringLower(SHA256.HashData(stream));
+    }
+
+    private static int OpenDirectoryNoFollow(
+        string path,
+        string displayPath,
+        out LinuxStatx stat)
+    {
+        var fd = Native.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException($"open directory failed for {displayPath}: errno={Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            stat = StatDirectoryDescriptor(fd, displayPath);
+            return fd;
+        }
+        catch
+        {
+            _ = Native.close(fd);
+            throw;
+        }
     }
 
     private static int OpenRegularFileNoFollow(
@@ -447,18 +572,44 @@ internal readonly record struct FileSnapshot(
     string Sha256)
 {
     internal static FileSnapshot From(LinuxStatx stat, ReadOnlySpan<byte> data)
+        => FromDigest(stat, Convert.ToHexStringLower(SHA256.HashData(data)));
+
+    internal static FileSnapshot FromDigest(LinuxStatx stat, string sha256)
         => new(
             FileIdentity.From(stat),
             stat.ChangeTimeSeconds,
             stat.ChangeTimeNanoseconds,
             stat.Size,
-            Convert.ToHexStringLower(SHA256.HashData(data)));
+            sha256);
 
     internal bool MatchesMetadata(LinuxStatx stat)
         => Identity == FileIdentity.From(stat) &&
            ChangeTimeSeconds == stat.ChangeTimeSeconds &&
            ChangeTimeNanoseconds == stat.ChangeTimeNanoseconds &&
            Size == stat.Size;
+}
+
+internal readonly record struct DirectorySnapshot(
+    FileIdentity Identity,
+    long ChangeTimeSeconds,
+    uint ChangeTimeNanoseconds,
+    long ModificationTimeSeconds,
+    uint ModificationTimeNanoseconds)
+{
+    internal static DirectorySnapshot From(LinuxStatx stat)
+        => new(
+            FileIdentity.From(stat),
+            stat.ChangeTimeSeconds,
+            stat.ChangeTimeNanoseconds,
+            stat.ModificationTimeSeconds,
+            stat.ModificationTimeNanoseconds);
+
+    internal bool Matches(LinuxStatx stat)
+        => Identity == FileIdentity.From(stat) &&
+           ChangeTimeSeconds == stat.ChangeTimeSeconds &&
+           ChangeTimeNanoseconds == stat.ChangeTimeNanoseconds &&
+           ModificationTimeSeconds == stat.ModificationTimeSeconds &&
+           ModificationTimeNanoseconds == stat.ModificationTimeNanoseconds;
 }
 
 internal readonly record struct VerifiedRegularFile(
@@ -486,6 +637,12 @@ internal struct LinuxStatx
 
     [FieldOffset(104)]
     internal uint ChangeTimeNanoseconds;
+
+    [FieldOffset(112)]
+    internal long ModificationTimeSeconds;
+
+    [FieldOffset(120)]
+    internal uint ModificationTimeNanoseconds;
 
     [FieldOffset(136)]
     internal uint DeviceMajor;
