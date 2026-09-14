@@ -243,7 +243,7 @@ public sealed class CodexRegressionTests
         File.WriteAllText(tracked, "content");
 
         var verified = TrackedFileDurability.ReadVerifiedRegularFile(tracked, "tracked");
-        TrackedFileDurability.FsyncRegularFile(tracked, "tracked", verified.Identity);
+        TrackedFileDurability.FsyncRegularFile(tracked, "tracked", verified.Snapshot);
     }
 
     [TestMethod]
@@ -262,7 +262,40 @@ public sealed class CodexRegressionTests
             () => TrackedFileDurability.FsyncRegularFile(
                 tracked,
                 "tracked",
-                verified.Identity));
+                verified.Snapshot));
+    }
+
+    [TestMethod]
+    public void SameInodeContentMutationFailsSnapshotBoundFsyncBarrier()
+    {
+        using var environment = TestEnvironment.Create();
+        var tracked = Path.Combine(environment.Root, "tracked");
+        File.WriteAllText(tracked, "expected");
+
+        var verified = TrackedFileDurability.ReadVerifiedRegularFile(tracked, "tracked");
+        File.WriteAllText(tracked, "changed!");
+
+        TestAssert.Throws<AgentException>(
+            () => TrackedFileDurability.FsyncRegularFile(
+                tracked,
+                "tracked",
+                verified.Snapshot));
+    }
+
+    [TestMethod]
+    public void RestoredSameInodeBytesStillChangeSnapshot()
+    {
+        using var environment = TestEnvironment.Create();
+        var tracked = Path.Combine(environment.Root, "tracked");
+        File.WriteAllText(tracked, "expected");
+
+        var before = TrackedFileDurability.ReadVerifiedRegularFile(tracked, "tracked");
+        File.WriteAllText(tracked, "changed!");
+        File.WriteAllText(tracked, "expected");
+        var after = TrackedFileDurability.ReadVerifiedRegularFile(tracked, "tracked");
+
+        CollectionAssert.AreEqual(before.Data, after.Data);
+        Assert.AreNotEqual(before.Snapshot, after.Snapshot);
     }
 
     [TestMethod]
