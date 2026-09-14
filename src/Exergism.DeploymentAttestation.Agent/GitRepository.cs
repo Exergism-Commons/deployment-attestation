@@ -12,8 +12,8 @@ internal static class TrackedFileDurability
     internal static void FsyncRegularFile(
         string path,
         string relativePath,
-        FileIdentity expectedIdentity)
-        => Durability.FsyncRegularFileNoFollow(path, relativePath, expectedIdentity);
+        FileSnapshot expectedSnapshot)
+        => Durability.FsyncRegularFileNoFollow(path, relativePath, expectedSnapshot);
 }
 
 internal static class GitProcessIdentity
@@ -68,7 +68,8 @@ internal sealed class GitRepository(AgentConfig config)
     {
         var verifiedFiles = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
         await FsyncRepositoryAsync(_config.AppDirectory, commit, verifiedFiles);
-        await VerifySourceTreeExactAsync(commit);
+        var finalFiles = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        EnsureSnapshotsUnchanged(verifiedFiles, finalFiles);
     }
 
     public async Task ReconcileStaleGitLocksAsync()
@@ -96,12 +97,12 @@ internal sealed class GitRepository(AgentConfig config)
         await AssertNoRelatedGitAsync(protectedRoots);
     }
 
-    private async Task<Dictionary<string, FileIdentity>> VerifyRepositoryExactAsync(
+    private async Task<Dictionary<string, FileSnapshot>> VerifyRepositoryExactAsync(
         string repository,
         string commit,
-        Dictionary<string, FileIdentity>? verifiedFiles = null)
+        Dictionary<string, FileSnapshot>? verifiedFiles = null)
     {
-        verifiedFiles ??= new Dictionary<string, FileIdentity>(StringComparer.Ordinal);
+        verifiedFiles ??= new Dictionary<string, FileSnapshot>(StringComparer.Ordinal);
         repository = Path.GetFullPath(repository);
         if (!Directory.Exists(repository) || new DirectoryInfo(repository).LinkTarget is not null)
             throw new AgentException($"Repository path is not a real directory: {repository}");
@@ -149,7 +150,7 @@ internal sealed class GitRepository(AgentConfig config)
                 if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
                     throw new AgentException($"Executable bit mismatch: {entry.RelativePath}");
                 data = verified.Data;
-                verifiedFiles[Path.GetFullPath(fullPath)] = verified.Identity;
+                verifiedFiles[Path.GetFullPath(fullPath)] = verified.Snapshot;
             }
             else
             {
@@ -222,7 +223,7 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task FsyncRepositoryAsync(
         string repository,
         string commit,
-        IReadOnlyDictionary<string, FileIdentity> verifiedFiles)
+        IReadOnlyDictionary<string, FileSnapshot> verifiedFiles)
     {
         var entries = await ReadTreeAsync(repository, commit);
         var directories = new HashSet<string>(StringComparer.Ordinal) { repository };
@@ -252,10 +253,10 @@ internal sealed class GitRepository(AgentConfig config)
             if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
                 var fullPath = Path.GetFullPath(path);
-                if (!verifiedFiles.TryGetValue(fullPath, out var expectedIdentity))
-                    throw new AgentException($"Tracked regular file was not identity-verified: {entry.RelativePath}");
+                if (!verifiedFiles.TryGetValue(fullPath, out var expectedSnapshot))
+                    throw new AgentException($"Tracked regular file was not snapshot-verified: {entry.RelativePath}");
 
-                TrackedFileDurability.FsyncRegularFile(path, entry.RelativePath, expectedIdentity);
+                TrackedFileDurability.FsyncRegularFile(path, entry.RelativePath, expectedSnapshot);
                 continue;
             }
 
@@ -277,6 +278,20 @@ internal sealed class GitRepository(AgentConfig config)
 
         foreach (var submodule in submodules)
             await FsyncRepositoryAsync(submodule.Path, submodule.Commit, verifiedFiles);
+    }
+
+    private static void EnsureSnapshotsUnchanged(
+        IReadOnlyDictionary<string, FileSnapshot> expected,
+        IReadOnlyDictionary<string, FileSnapshot> actual)
+    {
+        if (expected.Count != actual.Count)
+            throw new AgentException("Tracked regular file set changed during durability barrier");
+
+        foreach (var pair in expected)
+        {
+            if (!actual.TryGetValue(pair.Key, out var snapshot) || snapshot != pair.Value)
+                throw new AgentException($"Tracked regular file changed during durability barrier: {pair.Key}");
+        }
     }
 
     private static void FsyncDirectoryTree(string root)
