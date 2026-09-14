@@ -42,7 +42,9 @@ internal sealed class AgentConfig
         AttestationEndpoint = RequireOptionalHttpUri(
             ENV_ATTESTATION_ENDPOINT,
             Optional(ENV_ATTESTATION_ENDPOINT));
-        HmacSecretFile = Optional(ENV_HMAC_SECRET_FILE);
+        HmacSecretFile = RequireAttestationSecret(
+            AttestationEndpoint,
+            Optional(ENV_HMAC_SECRET_FILE));
         SmokeScript = Optional(ENV_SMOKE_SCRIPT);
         SmokeTimeout = PositiveSeconds(Optional(ENV_SMOKE_TIMEOUT, "60"), ENV_SMOKE_TIMEOUT);
         DownloadTimeout = PositiveSeconds(Optional(ENV_DOWNLOAD_TIMEOUT, "120"), ENV_DOWNLOAD_TIMEOUT);
@@ -249,6 +251,39 @@ internal sealed class AgentConfig
             (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             throw new AgentException($"{key} must be an absolute HTTP(S) URL");
         return uri;
+    }
+
+    internal static string RequireAttestationSecret(string endpoint, string secretPath)
+    {
+        if (string.IsNullOrEmpty(endpoint))
+        {
+            if (string.IsNullOrEmpty(secretPath))
+                return string.Empty;
+            return RequireAbsolutePath(ENV_HMAC_SECRET_FILE, secretPath);
+        }
+
+        if (string.IsNullOrWhiteSpace(secretPath))
+            throw new AgentException($"{ENV_HMAC_SECRET_FILE} is required when {ENV_ATTESTATION_ENDPOINT} is configured");
+
+        var fullPath = RequireAbsolutePath(ENV_HMAC_SECRET_FILE, secretPath);
+        var info = new FileInfo(fullPath);
+        if (!info.Exists || info.LinkTarget is not null)
+            throw new AgentException($"{ENV_HMAC_SECRET_FILE} must be a readable regular file, not a symlink");
+
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(fullPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new AgentException($"{ENV_HMAC_SECRET_FILE} is not readable", ex);
+        }
+
+        if (!bytes.Any(value => value is not (9 or 10 or 13 or 32)))
+            throw new AgentException($"{ENV_HMAC_SECRET_FILE} must not be empty");
+
+        return fullPath;
     }
 
     private static TimeSpan PositiveSeconds(string value, string key)
