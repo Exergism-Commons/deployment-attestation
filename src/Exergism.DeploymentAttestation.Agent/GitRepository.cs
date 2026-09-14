@@ -202,7 +202,8 @@ internal sealed class GitRepository(AgentConfig config)
         var metadataHierarchy = await VerifiedGitMetadataRootsAsync(
             _config.AppDirectory,
             commit,
-            parentMetadataHierarchy: null);
+            parentMetadataHierarchy: null,
+            requirePopulatedGitlinks: true);
         await FsyncRepositoryAsync(
             _config.AppDirectory,
             commit,
@@ -218,7 +219,8 @@ internal sealed class GitRepository(AgentConfig config)
         var roots = await VerifiedGitMetadataRootsAsync(
             _config.AppDirectory,
             head,
-            parentMetadataHierarchy: null);
+            parentMetadataHierarchy: null,
+            requirePopulatedGitlinks: false);
         var protectedRoots = new HashSet<string>(roots, StringComparer.Ordinal) { Path.GetFullPath(_config.AppDirectory) };
 
         await AssertNoRelatedGitAsync(protectedRoots);
@@ -526,7 +528,8 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task<List<string>> VerifiedGitMetadataRootsAsync(
         string repository,
         string commit,
-        IReadOnlyCollection<string>? parentMetadataHierarchy)
+        IReadOnlyCollection<string>? parentMetadataHierarchy,
+        bool requirePopulatedGitlinks)
     {
         repository = Path.GetFullPath(repository);
         var ownRoots = await GitMetadataRootsAsync(repository);
@@ -549,14 +552,30 @@ internal sealed class GitRepository(AgentConfig config)
             var submodulePath = Path.GetFullPath(Path.Combine(
                 repository,
                 entry.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!File.Exists(submodulePath) && !Directory.Exists(submodulePath))
+            {
+                if (requirePopulatedGitlinks)
+                    throw new AgentException($"gitlink is not populated: {entry.RelativePath}");
+                continue;
+            }
+
             if (!Directory.Exists(submodulePath) ||
                 new DirectoryInfo(submodulePath).LinkTarget is not null)
                 throw new AgentException($"gitlink is not a real directory: {entry.RelativePath}");
 
+            var gitMarker = Path.Combine(submodulePath, GIT_METADATA_NAME);
+            if (!File.Exists(gitMarker) && !Directory.Exists(gitMarker))
+            {
+                if (requirePopulatedGitlinks)
+                    throw new AgentException($"gitlink metadata is missing: {entry.RelativePath}");
+                continue;
+            }
+
             var childRoots = await VerifiedGitMetadataRootsAsync(
                 submodulePath,
                 entry.ObjectId,
-                hierarchy);
+                hierarchy,
+                requirePopulatedGitlinks);
             hierarchy.UnionWith(childRoots);
         }
 
