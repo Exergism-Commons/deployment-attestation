@@ -483,6 +483,67 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public async Task RecoveryDoesNotFollowUnsafeGitlinkRemnants()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = environment.Config.AppDirectory;
+        var childSource = Path.Combine(environment.Root, "child-source");
+        var external = Path.Combine(environment.Root, "external");
+        Directory.CreateDirectory(childSource);
+        Directory.CreateDirectory(external);
+
+        async Task<string> GitAsync(string workingDirectory, params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync(
+                "git",
+                args,
+                workingDirectory: workingDirectory);
+            Assert.IsTrue(result.Success, result.StdErr);
+            return result.StdOut.Trim();
+        }
+
+        foreach (var repositoryPath in new[] { childSource, external, checkout })
+        {
+            await GitAsync(repositoryPath, "init");
+            await GitAsync(repositoryPath, "config", "user.name", "Regression Test");
+            await GitAsync(repositoryPath, "config", "user.email", "regression@example.test");
+            await GitAsync(repositoryPath, "commit", "--allow-empty", "-m", "initial");
+        }
+
+        foreach (var name in new[] { "child-path", "child-marker" })
+        {
+            await GitAsync(
+                checkout,
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                childSource,
+                name);
+        }
+        await GitAsync(checkout, "commit", "-am", "children");
+
+        var symlinkedChild = Path.Combine(checkout, "child-path");
+        Directory.Delete(symlinkedChild, recursive: true);
+        Directory.CreateSymbolicLink(symlinkedChild, external);
+
+        var markerChild = Path.Combine(checkout, "child-marker");
+        var marker = Path.Combine(markerChild, GIT_METADATA_NAME);
+        Assert.IsTrue(File.Exists(marker));
+        File.Delete(marker);
+        Directory.CreateSymbolicLink(marker, Path.Combine(external, GIT_METADATA_NAME));
+
+        var deploymentRepository = new GitRepository(environment.Config);
+        var roots = await deploymentRepository.RecoveryGitMetadataRootsAsync(
+            await deploymentRepository.HeadAsync());
+
+        var externalRoot = Path.GetFullPath(external);
+        Assert.IsFalse(
+            roots.Any(root =>
+                GitMetadataBoundary.IsSameOrDescendant(root, externalRoot)));
+    }
+
+    [TestMethod]
     public async Task RecoveryTraversesNestedOldFormSubmoduleFromCurrentCheckout()
     {
         using var environment = TestEnvironment.Create();
