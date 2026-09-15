@@ -848,6 +848,18 @@ internal static class Native
     internal static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
 
     [DllImport("libc", SetLastError = true)]
+    internal static extern int openat(
+        int dirfd,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string pathname,
+        int flags);
+
+    [DllImport("libc", SetLastError = true)]
+    internal static extern int unlinkat(
+        int dirfd,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string pathname,
+        int flags);
+
+    [DllImport("libc", SetLastError = true)]
     internal static extern int statx(
         int dirfd,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string pathname,
