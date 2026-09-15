@@ -186,9 +186,15 @@ internal static partial class Protocol
             throw new AgentException("Invalid transaction source/runtime digest");
         if (tx.OldReleaseManifestSha256 is not null && !DigestPattern.IsMatch(tx.OldReleaseManifestSha256))
             throw new AgentException("Invalid transaction old manifest digest");
-        if (tx.NewReleaseManifestSha256 is null ||
-            !DigestPattern.IsMatch(tx.NewReleaseManifestSha256))
+        if (tx.NewReleaseManifestSha256 is null)
+        {
+            if (tx.Phase == PHASE_ACTIVATING)
+                throw new AgentException("Activating transaction requires a new manifest digest");
+        }
+        else if (!DigestPattern.IsMatch(tx.NewReleaseManifestSha256))
+        {
             throw new AgentException("Invalid transaction new manifest digest");
+        }
         return tx;
     }
 
