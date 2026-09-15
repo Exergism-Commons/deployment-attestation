@@ -166,6 +166,10 @@ jobs:
           grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
           grep -Fq 'committed_release_metadata_matches()' agent/ec-deployment-agent.sh
           grep -Fq 'refresh_committed_release_metadata()' agent/ec-deployment-agent.sh
+          grep -Fq 'state_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256' agent/ec-deployment-agent.sh
+          grep -Fq 'state_tag="$(json_field "$CURRENT_STATE_FILE" release_tag' agent/ec-deployment-agent.sh
+          grep -Fq '&& "$state_manifest" == "$RELEASE_MANIFEST_SHA256"' agent/ec-deployment-agent.sh
+          grep -Fq '&& "$state_tag" == "$EC_RELEASE_TAG"' agent/ec-deployment-agent.sh
           grep -Fq 'Could not durably refresh release metadata for the unchanged source/runtime pair' agent/ec-deployment-agent.sh
           grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
           grep -Fq 'snapshot="$(collect_checks' agent/ec-deployment-agent.sh
@@ -469,6 +473,11 @@ jobs:
           noop_attest = agent.index('attest || true; return 0', noop_metadata_refresh)
           assert metadata_refresh < metadata_refresh_pre < metadata_refresh_write < metadata_refresh_post
           assert noop_pair < noop_metadata_check < noop_metadata_refresh < noop_attest
+          collect_state_manifest = agent.index('state_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256', collect)
+          collect_state_tag = agent.index('state_tag="$(json_field "$CURRENT_STATE_FILE" release_tag', collect_state_manifest)
+          collect_state_integrity_manifest = agent.index('&& "$state_manifest" == "$RELEASE_MANIFEST_SHA256"', collect_state_tag)
+          collect_state_integrity_tag = agent.index('&& "$state_tag" == "$EC_RELEASE_TAG"', collect_state_integrity_manifest)
+          assert collect < collect_state_manifest < collect_state_tag < collect_state_integrity_manifest < collect_state_integrity_tag < collect_final_snapshot
 
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
