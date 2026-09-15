@@ -109,6 +109,39 @@ public sealed class ProtocolTests
     }
 
     [TestMethod]
+    public void CommittedRollbackJournalAllowsBootstrapNullManifest()
+    {
+        using var environment = TestEnvironment.Create();
+        var state = new CurrentState(
+            new string('a', 40),
+            new string('b', 64),
+            null,
+            "runtime-main");
+        var transaction = new DeploymentTransaction(
+            PHASE_COMMITTED,
+            new string('d', 40),
+            new string('e', 64),
+            new string('f', 64),
+            Path.Combine(environment.Root, "backup"),
+            state.SourceCommit,
+            state.BinarySha256,
+            null);
+
+        File.WriteAllBytes(
+            environment.Config.TransactionFile,
+            Protocol.WriteTransaction(transaction));
+
+        Assert.AreEqual(
+            transaction,
+            Protocol.ReadTransaction(environment.Config.TransactionFile));
+        Assert.IsTrue(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction,
+                "runtime-main"));
+    }
+
+    [TestMethod]
     public void CommittedRecoveryRequiresExactDurableManifestBinding()
     {
         var manifest = new string('c', 64);
