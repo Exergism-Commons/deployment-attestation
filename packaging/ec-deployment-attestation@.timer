@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic Exergism Commons deployment attestation/update for %i
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+Persistent=true
+Unit=ec-deployment-attestation@%i.service
+
+[Install]
+WantedBy=timers.target
