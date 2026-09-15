@@ -468,7 +468,7 @@ jobs:
           journal_publish = text.index('create_install_transaction')
           assert timer_baseline < pretxn_guard < timer_stop < updater_stop < agent_lock < recovery_default < recovery_installed < updater_recover < target_baseline < journal_publish
 
-          select_recovered = recovery.index('TXN_PHASE="recovered"')
+          select_recovered = recovery.index('recovered) path="$INSTALL_RECOVERED_DIR" ;;')
           recovered_completion = recovery.index('if [[ "$TXN_PHASE" == "recovered" ]]; then')
           phase_to_recovering = recovery.index('mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
           assert select_recovered < recovered_completion < phase_to_recovering
