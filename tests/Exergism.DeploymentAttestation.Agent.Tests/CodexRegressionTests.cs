@@ -1,3 +1,4 @@
+using System.Text;
 using Exergism.DeploymentAttestation.Agent;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using static Exergism.DeploymentAttestation.Agent.AgentConstants;
@@ -7,6 +8,52 @@ namespace Exergism.DeploymentAttestation.Agent.Tests;
 [TestClass]
 public sealed class CodexRegressionTests
 {
+    [TestMethod]
+    public void ResolverCommandLineMustBindConfiguredSource()
+    {
+        const string APP_DIR = "/srv/id.exergism.org";
+        var registry = Path.Combine(APP_DIR, RESOLVER_REGISTRY_RELATIVE_PATH);
+
+        static byte[] CommandLine(params string[] arguments)
+            => Encoding.UTF8.GetBytes(string.Join('\0', arguments) + "\0");
+
+        Assert.IsTrue(RuntimeInspector.CommandLineUsesConfiguredSource(
+            CommandLine(
+                "/usr/local/bin/idresolver",
+                "-listen", "127.0.0.1:8080",
+                RESOLVER_ARG_ROOT, APP_DIR,
+                RESOLVER_ARG_REGISTRY, registry),
+            APP_DIR));
+
+        Assert.IsTrue(RuntimeInspector.CommandLineUsesConfiguredSource(
+            CommandLine(
+                "/usr/local/bin/idresolver",
+                $"{RESOLVER_ARG_ROOT}={APP_DIR}",
+                $"{RESOLVER_ARG_REGISTRY}={registry}"),
+            APP_DIR));
+
+        Assert.IsFalse(RuntimeInspector.CommandLineUsesConfiguredSource(
+            CommandLine(
+                "/usr/local/bin/idresolver",
+                RESOLVER_ARG_ROOT, "/srv/unrelated",
+                RESOLVER_ARG_REGISTRY, registry),
+            APP_DIR));
+
+        Assert.IsFalse(RuntimeInspector.CommandLineUsesConfiguredSource(
+            CommandLine(
+                "/usr/local/bin/idresolver",
+                RESOLVER_ARG_ROOT, APP_DIR,
+                RESOLVER_ARG_ROOT, APP_DIR,
+                RESOLVER_ARG_REGISTRY, registry),
+            APP_DIR));
+
+        Assert.IsFalse(RuntimeInspector.CommandLineUsesConfiguredSource(
+            CommandLine(
+                "/usr/local/bin/idresolver",
+                RESOLVER_ARG_ROOT, APP_DIR),
+            APP_DIR));
+    }
+
     [TestMethod]
     public void InactiveServiceWithRemovedCgroupIsQuiescent()
         => Assert.IsTrue(ServiceQuiescence.IsQuiescentSnapshot(
