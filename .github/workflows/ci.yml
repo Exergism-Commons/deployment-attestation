@@ -164,6 +164,9 @@ jobs:
           grep -Fq 'AGENT_VERSION="0.1.0-pre17"' agent/ec-deployment-agent.sh
           grep -Fq '"phase":"activating"' agent/ec-deployment-agent.sh
           grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
+          grep -Fq 'committed_release_metadata_matches()' agent/ec-deployment-agent.sh
+          grep -Fq 'refresh_committed_release_metadata()' agent/ec-deployment-agent.sh
+          grep -Fq 'Could not durably refresh release metadata for the unchanged source/runtime pair' agent/ec-deployment-agent.sh
           grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
           grep -Fq 'snapshot="$(collect_checks' agent/ec-deployment-agent.sh
           grep -Fq '"runtime_sha256":actual' agent/ec-deployment-agent.sh
@@ -455,6 +458,17 @@ jobs:
           update_switch = agent.index('if ! switch_source "$RELEASE_SOURCE_COMMIT" 1; then')
           assert stop_helper < rollback_call < stale_lock_reconcile < rollback_switch
           assert stop_helper < update_call < update_switch
+
+          metadata_refresh = agent.index('refresh_committed_release_metadata()')
+          metadata_refresh_pre = agent.index('artifact_integrity "$commit" "$binary" || return 1', metadata_refresh)
+          metadata_refresh_write = agent.index('write_current_state "$commit" "$binary" "$RELEASE_MANIFEST_SHA256" || return 1', metadata_refresh_pre)
+          metadata_refresh_post = agent.index('artifact_integrity "$commit" "$binary"', metadata_refresh_write)
+          noop_pair = agent.index('if [[ "$current" == "$RELEASE_SOURCE_COMMIT" && "$current_binary" == "$RELEASE_ASSET_SHA256" ]]; then')
+          noop_metadata_check = agent.index('if ! committed_release_metadata_matches; then', noop_pair)
+          noop_metadata_refresh = agent.index('refresh_committed_release_metadata "$current" "$current_binary"', noop_metadata_check)
+          noop_attest = agent.index('attest || true; return 0', noop_metadata_refresh)
+          assert metadata_refresh < metadata_refresh_pre < metadata_refresh_write < metadata_refresh_post
+          assert noop_pair < noop_metadata_check < noop_metadata_refresh < noop_attest
 
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
