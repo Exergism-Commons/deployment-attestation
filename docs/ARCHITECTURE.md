@@ -62,7 +62,8 @@ Each service has root-owned state under `/var/lib/ec-deployment-attestation/<ser
 - `current-state.json` — committed source commit, runtime SHA-256 and release-manifest SHA-256;
 - `transaction.json` — durable pre-activation rollback journal;
 - `backups/` — verified rollback binaries;
-- `agent.lock` — process exclusion lock.
+- `agent.lock` — process exclusion lock;
+- `agent-health.json` — durable health of the attestation agent itself: cycle state, last success/error and last attestation delivery.
 
 Before creating a transaction, the agent requires repository `HEAD` and the installed binary digest to match `current-state.json`. It then writes and fsyncs the rollback material before atomically persisting `transaction.json`.
 
@@ -108,6 +109,14 @@ The receiver must:
 9. project only first-seen accepted observations to GitHub using credentials that never reach the production host.
 
 Transport retries intentionally reuse the same signed body. A duplicate must return the same successful acknowledgement and must not increment failure thresholds or create duplicate GitHub mutations.
+
+## Agent self-health
+
+Target-service health and attestation-agent health are separate failure domains. The agent therefore records its own durable lifecycle rather than deriving self-health from the observation it emits about the target service.
+
+`ec-deployment-agent health` returns non-zero unless the last successful agent cycle is recent, the installed agent version matches the recorded version, the periodic timer is active and enabled, the cycle is not stale, and recent attestation delivery succeeded when a receiver is configured. An actionable transaction journal during an active non-stale cycle is reported as degraded; a journal left behind while idle/error is unhealthy.
+
+`ec-deployment-agent status` emits the same JSON status but always behaves as an observation command. The receiver must additionally treat absence of accepted attestations beyond its policy window as a failure signal: a dead attestation pipeline cannot be allowed to look healthy merely because it stopped reporting.
 
 ## GitHub projection
 

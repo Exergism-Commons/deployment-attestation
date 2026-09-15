@@ -14,6 +14,9 @@ TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 RECOVERY_UNIT="id-exergism-install-recovery.service"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
+AGENT_SOURCE="${EC_NATIVE_AGENT_BINARY:-$ROOT/agent/ec-deployment-agent.sh}"
+AGENT_INSTALL_SOURCE="$AGENT_SOURCE"
+NATIVE_AGENT_STAGE=""
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
@@ -48,14 +51,45 @@ INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
+path_exists_any() {
+  [[ -e "$1" || -L "$1" ]]
+}
+
+require_real_phase_or_absent() {
+  local path="$1"
+  if path_exists_any "$path"; then
+    [[ -d "$path" && ! -L "$path" ]] || {
+      echo "CRITICAL: installer transaction path is not a real directory: $path" >&2
+      return 1
+    }
+  fi
+}
+
+validate_phase_paths() {
+  require_real_phase_or_absent "$INSTALL_PENDING_DIR"
+  require_real_phase_or_absent "$INSTALL_VALIDATED_DIR"
+  require_real_phase_or_absent "$INSTALL_RECOVERING_DIR"
+  require_real_phase_or_absent "$INSTALL_RECOVERED_DIR"
+  require_real_phase_or_absent "$INSTALL_COMMITTED_DIR"
+}
+
 MANIFEST_URL="https://github.com/Exergism-Commons/id/releases/download/runtime-main/DEPLOYMENT_MANIFEST.json"
 
-for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat sleep; do
+for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze flock jq install mktemp awk sed tr date hostname uname mv rm grep findmnt nsenter cp cat sleep stat; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "Required dependency not found: $command" >&2
     exit 1
   }
 done
+
+if [[ ! -f "$AGENT_SOURCE" || -L "$AGENT_SOURCE" ]]; then
+  echo "Agent source must be a real file: $AGENT_SOURCE" >&2
+  exit 1
+fi
+if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" && ! -x "$AGENT_SOURCE" ]]; then
+  echo "EC_NATIVE_AGENT_BINARY must point to an executable Native AOT binary." >&2
+  exit 1
+fi
 
 exec 9>"$INSTALL_LOCK"
 flock -n 9 || {
@@ -131,7 +165,7 @@ atomic_install_root_file() {
   # Content reaches stable storage before the rename. Until rename, the old
   # destination remains intact; after rename, fsync the directory entry.
   durable_sync_paths "$tmp"
-  mv -f "$tmp" "$dest"
+  mv -fT -- "$tmp" "$dest"
   durable_sync_paths "$dest" "$dir"
 
   trap - RETURN
@@ -146,6 +180,8 @@ install -d -o root -g root -m 0755 "$AGENT_RECOVERY_DROPIN_DIR"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_PARENT"
 install -d -o root -g root -m 0700 "$INSTALL_STATE_ROOT"
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/ec-deployment-attestation/secrets   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   "$INSTALL_STATE_ROOT"
+
+validate_phase_paths
 
 manager_version="$(systemctl show --property=Version --value 2>/dev/null || true)"
 systemd_version="$(printf '%s\n' "$manager_version" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
@@ -209,7 +245,8 @@ durable_sync_paths "$INSTALL_STATE_ROOT"
 
 tmp_manifest="$(mktemp)"
 trap 'rm -f "$tmp_manifest"' EXIT
-curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
+curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 \
+  --proto '=https' --proto-redir '=https' -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
 python3 "$ROOT/agent/validate-release-manifest.py" "$ROOT/spec/release-manifest-v0.1.schema.json" "$tmp_manifest" || {
   echo "runtime-main publishes a schema-invalid DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2
   exit 1
@@ -232,6 +269,30 @@ PY
 rm -f "$tmp_manifest"
 trap - EXIT
 
+cleanup_native_stage() {
+  if [[ -n "$NATIVE_AGENT_STAGE" ]]; then
+    rm -rf -- "$NATIVE_AGENT_STAGE" || true
+    NATIVE_AGENT_STAGE=""
+  fi
+}
+
+if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
+  # Pin the exact candidate into a root-owned, process-private staging directory.
+  # All preflight checks and the eventual installation consume this same copy,
+  # so later mutation/replacement of EC_NATIVE_AGENT_BINARY cannot change what
+  # gets published.
+  NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
+  trap cleanup_native_stage EXIT
+  AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
+  install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"
+
+  native_preflight_config="$ENV_FILE"
+  if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
+    native_preflight_config="$ROOT/examples/id.exergism.org.env.example"
+  fi
+  EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config
+  "$AGENT_INSTALL_SOURCE" self-test
+fi
 
 current_boot_id="$(cat "$BOOT_ID_FILE")"
 [[ "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
@@ -408,6 +469,7 @@ restore_pretransaction_timer_on_exit() {
       stop_and_wait_quiescent "$TIMER_UNIT" || rc=1
     fi
   fi
+  cleanup_native_stage
   exit "$rc"
 }
 trap restore_pretransaction_timer_on_exit EXIT
@@ -431,7 +493,14 @@ fi
 
 # Reconcile the updater's own durable transaction before measuring target state.
 if [[ -r "$ENV_FILE" ]]; then
-  if ! EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover; then
+  recovery_agent="$ROOT/agent/ec-deployment-agent.sh"
+  # Recover an existing transaction with the implementation that created it
+  # whenever possible. This keeps future journal evolution tied to the installed
+  # generation while preserving the Bash implementation for first install.
+  if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then
+    recovery_agent="$AGENT"
+  fi
+  if ! EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover; then
     pretransaction_restore_timer=0
     echo "Deployment updater transaction could not be recovered; leaving updater/timer quiesced." >&2
     exit 1
@@ -463,7 +532,9 @@ artifact_path() {
 
 create_install_transaction() {
   local stage key path present
-  [[ ! -e "$INSTALL_PENDING_DIR" && ! -e "$INSTALL_VALIDATED_DIR" && ! -e "$INSTALL_RECOVERING_DIR" && ! -e "$INSTALL_RECOVERED_DIR" ]] || return 1
+  for phase_path in "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR" "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"; do
+    path_exists_any "$phase_path" && return 1
+  done
 
   stage="$(mktemp -d "${INSTALL_STATE_ROOT}/.${SERVICE}.pending.XXXXXX")"
   install -d -o root -g root -m 0700 "$stage/backups"
@@ -477,9 +548,14 @@ create_install_transaction() {
   for key in agent smoke service_unit timer_unit env fence; do
     path="$(artifact_path "$key")"
     present=0
-    if [[ -e "$path" || -L "$path" ]]; then
+    if path_exists_any "$path"; then
+      [[ -f "$path" || -L "$path" ]] || {
+        echo "Refusing to journal non-file artifact for $key: $path" >&2
+        rm -rf -- "$stage"
+        return 1
+      }
       present=1
-      cp -a -- "$path" "$stage/backups/$key"
+      cp -aT -- "$path" "$stage/backups/$key"
     fi
     printf '%s\n' "$present" > "$stage/${key}_present"
   done
@@ -491,6 +567,7 @@ import stat
 import sys
 
 root = pathlib.Path(sys.argv[1])
+directories = []
 for p in root.rglob("*"):
     st = os.lstat(p)
     if stat.S_ISREG(st.st_mode):
@@ -499,8 +576,10 @@ for p in root.rglob("*"):
             os.fsync(fd)
         finally:
             os.close(fd)
-for p in sorted((q for q in root.rglob("*") if q.is_dir()), key=lambda q: len(q.parts), reverse=True):
-    fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY)
+    elif stat.S_ISDIR(st.st_mode):
+        directories.append(p)
+for p in sorted(directories, key=lambda q: len(q.parts), reverse=True):
+    fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
     finally:
@@ -512,7 +591,7 @@ finally:
     os.close(fd)
 PY
 
-  mv "$stage" "$INSTALL_PENDING_DIR"
+  mv -T -- "$stage" "$INSTALL_PENDING_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 }
 
@@ -523,13 +602,13 @@ persist_installed_generation() {
 }
 
 mark_generation_validated() {
-  mv "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"
+  mv -T -- "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 }
 
 finalize_install_transaction() {
   rm -rf "$INSTALL_COMMITTED_DIR"
-  mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"
+  mv -T -- "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
   rm -rf "$INSTALL_COMMITTED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
@@ -547,6 +626,7 @@ rollback_install_on_exit() {
       rc=1
     fi
   fi
+  cleanup_native_stage
   exit "$rc"
 }
 
@@ -562,7 +642,7 @@ stop_and_wait_quiescent "$TIMER_UNIT"
 stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
-install -o root -g root -m 0755 "$ROOT/agent/ec-deployment-agent.sh" "$AGENT"
+install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"
 install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
@@ -606,6 +686,7 @@ systemctl is-active --quiet "$TIMER_UNIT"
 
 finalize_install_transaction
 install_complete=1
+cleanup_native_stage
 trap - EXIT
 
 printf '\nInstalled Deployment Attestation agent for %s.\n' "$SERVICE"

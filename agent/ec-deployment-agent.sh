@@ -9,7 +9,18 @@ log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-[[ -r "$CONFIG_FILE" ]] || die "Configuration not readable: $CONFIG_FILE"
+command -v stat >/dev/null 2>&1 || die "Required command not found: stat"
+[[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] ||
+  die "Configuration must be a readable real file: $CONFIG_FILE"
+config_owner="$(stat -Lc '%u' -- "$CONFIG_FILE")" ||
+  die "Could not inspect configuration owner"
+config_mode="$(stat -Lc '%a' -- "$CONFIG_FILE")" ||
+  die "Could not inspect configuration mode"
+[[ "$config_owner" == "$EUID" ]] ||
+  die "Configuration must be owned by the effective user"
+(( (8#$config_mode & 022) == 0 )) ||
+  die "Configuration must not be writable by group or others"
+
 set -a
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
@@ -39,6 +50,150 @@ EC_STATE_DIR="${EC_STATE_DIR:-/var/lib/ec-deployment-attestation/${EC_SERVICE}}"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${EC_SERVICE//[^A-Za-z0-9_.-]/-}.agent.lock"
 INSTALL_TRANSACTION_ROOT="/var/lib/ec-deployment-attestation/install"
 EC_CHECK_PUBLIC="${EC_CHECK_PUBLIC:-1}"
+[[ "$EC_CHECK_PUBLIC" =~ ^[01]$ ]] ||
+  die "EC_CHECK_PUBLIC must be exactly 0 or 1"
+
+python3 - \
+  "$EC_SERVICE" "$EC_REPOSITORY" "$EC_RELEASE_TAG" \
+  "$EC_APP_DIR" "$EC_APP_BIN" "$EC_SERVICE_UNIT" "$EC_SOURCE_REVISION_FILE" \
+  "$EC_LOCAL_URL" "$EC_PUBLIC_URL" "$EC_GITHUB_DOWNLOAD_BASE" \
+  "$EC_ATTESTATION_ENDPOINT" "$EC_HMAC_SECRET_FILE" "$EC_SMOKE_SCRIPT" \
+  "$EC_STATE_DIR" "$EC_RELEASE_MANIFEST" \
+  "$EC_RELEASE_MANIFEST_VALIDATOR" "$EC_RELEASE_MANIFEST_SCHEMA" <<'PY'
+import ipaddress
+import os
+import pathlib
+import re
+import stat
+import sys
+import urllib.parse
+
+(
+    service, repository, release_tag,
+    app_dir_raw, app_bin_raw, service_unit, revision_raw,
+    local_url, public_url, download_base,
+    attestation_endpoint, hmac_raw, smoke_raw,
+    state_raw, manifest_name,
+    manifest_validator_raw, manifest_schema_raw,
+) = sys.argv[1:]
+
+SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SAFE_UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@:-]*$")
+SAFE_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SAFE_RELEASE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SAFE_ASSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+def fail(message):
+    raise RuntimeError(message)
+
+def absolute(name, raw):
+    p = pathlib.Path(raw)
+    if not p.is_absolute():
+        fail(f"{name} must be an absolute path")
+    return pathlib.Path(os.path.normpath(str(p)))
+
+def under(path, root):
+    path = os.path.normpath(str(path))
+    root = os.path.normpath(str(root))
+    try:
+        return os.path.commonpath((path, root)) == root
+    except ValueError:
+        return False
+
+def overlap(left, right):
+    return under(left, right) or under(right, left)
+
+def parse_http(name, raw):
+    try:
+        uri = urllib.parse.urlsplit(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an absolute HTTP(S) URL") from exc
+    if uri.scheme not in {"http", "https"} or not uri.hostname or uri.username or uri.password:
+        fail(f"{name} must be an absolute HTTP(S) URL without userinfo")
+    return uri
+
+def is_loopback(uri):
+    host = (uri.hostname or "").casefold()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+if not SAFE_SERVICE.fullmatch(service):
+    fail("EC_SERVICE contains unsafe characters")
+if not SAFE_REPOSITORY.fullmatch(repository):
+    fail("EC_REPOSITORY must match owner/repository")
+if not SAFE_RELEASE_TAG.fullmatch(release_tag):
+    fail("EC_RELEASE_TAG contains unsafe characters")
+if not SAFE_UNIT.fullmatch(service_unit):
+    fail("EC_SERVICE_UNIT contains unsafe characters")
+if not SAFE_ASSET.fullmatch(manifest_name):
+    fail("EC_RELEASE_MANIFEST must be a safe single asset name")
+
+app_dir = absolute("EC_APP_DIR", app_dir_raw)
+app_bin = absolute("EC_APP_BIN", app_bin_raw)
+revision = absolute("EC_SOURCE_REVISION_FILE", revision_raw)
+state_dir = absolute("EC_STATE_DIR", state_raw)
+manifest_validator = absolute("EC_RELEASE_MANIFEST_VALIDATOR", manifest_validator_raw)
+manifest_schema = absolute("EC_RELEASE_MANIFEST_SCHEMA", manifest_schema_raw)
+hmac = absolute("EC_HMAC_SECRET_FILE", hmac_raw) if hmac_raw else None
+smoke = absolute("EC_SMOKE_SCRIPT", smoke_raw) if smoke_raw else None
+
+if app_dir == pathlib.Path(app_dir.anchor):
+    fail("EC_APP_DIR must not be a filesystem root")
+if state_dir == pathlib.Path(state_dir.anchor):
+    fail("EC_STATE_DIR must not be a filesystem root")
+if overlap(app_dir, state_dir):
+    fail("EC_STATE_DIR must not overlap EC_APP_DIR")
+for name, path in (
+    ("EC_APP_BIN", app_bin),
+    ("EC_SOURCE_REVISION_FILE", revision),
+    ("EC_RELEASE_MANIFEST_VALIDATOR", manifest_validator),
+    ("EC_RELEASE_MANIFEST_SCHEMA", manifest_schema),
+):
+    if under(path, app_dir):
+        fail(f"{name} must not be inside EC_APP_DIR")
+if under(app_bin, state_dir):
+    fail("EC_APP_BIN must not be inside EC_STATE_DIR")
+if hmac is not None and under(hmac, app_dir):
+    fail("EC_HMAC_SECRET_FILE must not be inside EC_APP_DIR")
+if smoke is not None:
+    if under(smoke, app_dir):
+        fail("EC_SMOKE_SCRIPT must not be inside EC_APP_DIR")
+    if under(smoke, state_dir):
+        fail("EC_SMOKE_SCRIPT must not be inside EC_STATE_DIR")
+
+local = parse_http("EC_LOCAL_URL", local_url)
+if not is_loopback(local):
+    fail("EC_LOCAL_URL must target loopback")
+public = parse_http("EC_PUBLIC_URL", public_url)
+if public.scheme != "https":
+    fail("EC_PUBLIC_URL must use HTTPS")
+download = parse_http("EC_GITHUB_DOWNLOAD_BASE", download_base)
+if download.scheme != "https":
+    fail("EC_GITHUB_DOWNLOAD_BASE must use HTTPS")
+
+if attestation_endpoint:
+    receiver = parse_http("EC_ATTESTATION_ENDPOINT", attestation_endpoint)
+    if receiver.scheme != "https" and not is_loopback(receiver):
+        fail("EC_ATTESTATION_ENDPOINT must use HTTPS unless loopback")
+    if hmac is None:
+        fail("EC_HMAC_SECRET_FILE is required when EC_ATTESTATION_ENDPOINT is configured")
+    try:
+        st = os.lstat(hmac)
+    except OSError as exc:
+        raise RuntimeError("EC_HMAC_SECRET_FILE is not readable") from exc
+    if not stat.S_ISREG(st.st_mode):
+        fail("EC_HMAC_SECRET_FILE must be a real regular file")
+    try:
+        secret = hmac.read_bytes()
+    except OSError as exc:
+        raise RuntimeError("EC_HMAC_SECRET_FILE is not readable") from exc
+    if not secret.strip():
+        fail("EC_HMAC_SECRET_FILE must not be empty")
+PY
 
 CURRENT_STATE_FILE="$EC_STATE_DIR/current-state.json"
 TRANSACTION_FILE="$EC_STATE_DIR/transaction.json"
@@ -49,31 +204,67 @@ durable_mkdir_tree() {
   local target="$1" mode="${2:-0700}"
   python3 - "$target" "$mode" <<'PY'
 import os, pathlib, stat, sys
+
 p = pathlib.Path(sys.argv[1])
 mode = int(sys.argv[2], 8)
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
 if not p.is_absolute():
     raise RuntimeError("state path must be absolute")
+p = pathlib.Path(os.path.normpath(str(p)))
+
+def validate_existing_chain(path):
+    current = path
+    while True:
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(st.st_mode):
+                raise RuntimeError(f"unsafe symlink ancestor: {current}")
+            if current != path and not stat.S_ISDIR(st.st_mode):
+                raise RuntimeError(f"unsafe non-directory ancestor: {current}")
+        if current == current.parent:
+            return
+        current = current.parent
+
+validate_existing_chain(p)
+existed = p.exists()
 missing = []
 cur = p
 while not cur.exists():
     missing.append(cur)
+    if cur == cur.parent:
+        raise RuntimeError(f"cannot resolve existing ancestor: {p}")
     cur = cur.parent
-if not cur.is_dir() or cur.is_symlink():
+
+st = os.lstat(cur)
+if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
     raise RuntimeError(f"unsafe existing ancestor: {cur}")
+
 for d in reversed(missing):
     os.mkdir(d, mode)
     os.chmod(d, mode)
-    fd = os.open(d.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-st = p.lstat()
-if not stat.S_ISDIR(st.st_mode):
-    raise RuntimeError(f"state path is not a directory: {p}")
-os.chmod(p, mode)
+    for sync in (d, d.parent):
+        fd = os.open(sync, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+st = os.lstat(p)
+if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+    raise RuntimeError(f"state path is not a real directory: {p}")
+if existed and stat.S_IMODE(st.st_mode) != mode:
+    raise RuntimeError(
+        f"existing state directory permissions differ: {p} "
+        f"expected={oct(mode)} actual={oct(stat.S_IMODE(st.st_mode))}"
+    )
+
+validate_existing_chain(p)
 for d in (p, p.parent):
-    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
     try:
         os.fsync(fd)
     finally:
@@ -129,6 +320,7 @@ arch() {
 
 download() {
   curl --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+    --proto '=https' --proto-redir '=https' \
     --max-time "$EC_DOWNLOAD_TIMEOUT" -fsSL \
     "$EC_GITHUB_DOWNLOAD_BASE/$1" -o "$2"
 }
@@ -207,6 +399,19 @@ root_commit = sys.argv[2]
 def git(repo, *args, binary=False):
     return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL, text=not binary)
 
+def tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    if (not relative or pure.is_absolute()
+            or any(part in {"", ".", "..", ".git"} for part in pure.parts)):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    p = pathlib.Path(os.path.normpath(str(repo.joinpath(*pure.parts))))
+    try:
+        if os.path.commonpath((str(p), str(repo))) != str(repo) or p == repo:
+            raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    except ValueError as exc:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}") from exc
+    return p
+
 def blob_oid(data, algorithm):
     h = hashlib.new(algorithm)
     h.update(f"blob {len(data)}\0".encode("ascii")); h.update(data)
@@ -252,7 +457,7 @@ def verify(repo, commit):
         raise RuntimeError(f"unsupported object format: {algorithm}")
     expected = set(); submods = {}
     for mode, kind, oid, rel in entries(repo, commit):
-        p = repo / rel
+        p = tree_path(repo, rel)
         if mode == "160000" and kind == "commit":
             st = p.lstat()
             if not stat.S_ISDIR(st.st_mode):
@@ -282,7 +487,7 @@ def verify(repo, commit):
     if actual != expected:
         raise RuntimeError(f"worktree file set differs; extra={sorted(actual-expected)!r} missing={sorted(expected-actual)!r}")
     for rel, oid in submods.items():
-        verify(repo / rel, oid)
+        verify(tree_path(repo, rel), oid)
 
 verify(root, root_commit)
 PY
@@ -293,13 +498,25 @@ prepare_gitlinks() {
   python3 - "$EC_APP_DIR" "$commit" <<'PY'
 import os, pathlib, shutil, stat, subprocess, sys
 root = pathlib.Path(sys.argv[1]).absolute(); commit = sys.argv[2]
+
+def tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    if (not relative or pure.is_absolute()
+            or any(part in {"", ".", "..", ".git"} for part in pure.parts)):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    p = pathlib.Path(os.path.normpath(str(repo.joinpath(*pure.parts))))
+    if os.path.commonpath((str(p), str(repo))) != str(repo) or p == repo:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    return p
+
 raw = subprocess.check_output(["git","-C",str(root),"ls-tree","-rz","--full-tree",commit])
 for rec in raw.split(b"\0"):
     if not rec: continue
     meta, raw_path = rec.split(b"\t", 1)
     mode, kind, _ = meta.decode("ascii").split()
     if mode != "160000" or kind != "commit": continue
-    p = root / os.fsdecode(raw_path)
+    relative = os.fsdecode(raw_path)
+    p = tree_path(root, relative)
     try: st = p.lstat()
     except FileNotFoundError: continue
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
@@ -335,6 +552,16 @@ NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 def git(repo, *args, binary=False):
     return subprocess.check_output(["git","-C",str(repo),*args], stderr=subprocess.DEVNULL, text=not binary)
+
+def tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    if (not relative or pure.is_absolute()
+            or any(part in {"", ".", "..", ".git"} for part in pure.parts)):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    p = pathlib.Path(os.path.normpath(str(repo.joinpath(*pure.parts))))
+    if os.path.commonpath((str(p), str(repo))) != str(repo) or p == repo:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    return p
 
 def fsync_regular(p):
     st = p.lstat()
@@ -386,7 +613,7 @@ def sync_repo(repo, commit):
         raise RuntimeError(f"HEAD changed during fsync: {repo}")
     dirs = {repo}; submods = []
     for mode, kind, oid, rel in entries(repo, commit):
-        p = repo / rel
+        p = tree_path(repo, rel)
         if mode == "160000" and kind == "commit":
             pst = p.lstat()
             if not stat.S_ISDIR(pst.st_mode):
@@ -445,6 +672,21 @@ PY
   atomic_write "$CURRENT_STATE_FILE" "$body" 0600 || return 1
   atomic_write "$EC_SOURCE_REVISION_FILE" "$commit"$'\n' 0644 || return 1
 }
+
+committed_release_metadata_matches() {
+  local manifest tag
+  manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256)" || return 1
+  tag="$(json_field "$CURRENT_STATE_FILE" release_tag)" || return 1
+  [[ "$manifest" == "$RELEASE_MANIFEST_SHA256" && "$tag" == "$EC_RELEASE_TAG" ]]
+}
+
+refresh_committed_release_metadata() {
+  local commit="$1" binary="$2"
+  artifact_integrity "$commit" "$binary" || return 1
+  write_current_state "$commit" "$binary" "$RELEASE_MANIFEST_SHA256" || return 1
+  artifact_integrity "$commit" "$binary"
+}
+
 
 bootstrap_state() {
   [[ -f "$CURRENT_STATE_FILE" ]] && return 0
@@ -820,72 +1062,232 @@ PY
 }
 
 reconcile_stale_git_locks() {
-  # Recovery owns both agent locks, but manual Git does not honor them. Prove
-  # no live Git writer references the checkout through cwd, global selectors,
-  # GIT_* environment variables or open fds before removing stale lockfiles.
-  python3 - "$EC_APP_DIR" <<'PY'
+  local rollback_commit="${1:-}"
+  # Recovery derives metadata only from the verified Git topology: the current
+  # checkout plus the durable rollback target. Never trust arbitrary .git
+  # markers discovered by walking the filesystem.
+  python3 - "$EC_APP_DIR" "$rollback_commit" <<'PY'
 import os
 import pathlib
 import stat
 import subprocess
 import sys
 
-app = pathlib.Path(sys.argv[1]).resolve()
+app = pathlib.Path(os.path.normpath(sys.argv[1]))
+rollback_commit = sys.argv[2].strip()
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
-def under(child, parent):
+def git(repo, *args, check=True):
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        raise RuntimeError(f"git failed in {repo}: {result.stderr.strip()}")
+    return result
+
+def lexical_under(path, root):
+    path = os.path.normpath(str(path))
+    root = os.path.normpath(str(root))
     try:
-        pathlib.Path(child).resolve(strict=False).relative_to(pathlib.Path(parent).resolve(strict=False))
-        return True
-    except (ValueError, OSError):
+        return os.path.commonpath((path, root)) == root
+    except ValueError:
         return False
 
-def git_path(flag):
-    out = subprocess.check_output(
-        ["git", "-C", str(app), "rev-parse", "--path-format=absolute", flag],
-        stderr=subprocess.DEVNULL,
-        text=True,
-    ).strip()
-    return pathlib.Path(out).resolve(strict=False)
+def safe_tree_path(repo, relative):
+    pure = pathlib.PurePosixPath(relative)
+    parts = pure.parts
+    if (
+        not relative
+        or pure.is_absolute()
+        or any(part in {"", ".", "..", ".git"} for part in parts)
+    ):
+        raise RuntimeError(f"unsafe Git tree path: {relative}")
+    candidate = pathlib.Path(os.path.normpath(str(repo.joinpath(*parts))))
+    if not lexical_under(candidate, repo) or candidate == repo:
+        raise RuntimeError(f"Git tree path escapes repository: {relative}")
+    return candidate
 
-roots = []
-for flag in ("--git-dir", "--git-common-dir"):
-    root = git_path(flag)
-    if root not in roots:
-        roots.append(root)
+def git_roots(repo):
+    roots = []
+    for flag in ("--git-dir", "--git-common-dir"):
+        result = git(repo, "rev-parse", "--path-format=absolute", flag)
+        value = result.stdout.strip()
+        if not value:
+            raise RuntimeError(f"Git returned empty {flag} for {repo}")
+        root = pathlib.Path(os.path.normpath(value))
+        if not root.is_absolute():
+            raise RuntimeError(f"Git returned non-absolute {flag} for {repo}")
+        if root not in roots:
+            roots.append(root)
+    return roots
 
-# Include gitfile targets for populated submodules, even if they live outside
-# the superproject common-dir.
-for marker in app.rglob(".git"):
+def validate_real_directory_chain(path, boundary):
+    if not lexical_under(path, boundary):
+        raise RuntimeError(f"Git metadata escapes hierarchy: {path}")
+    current = path
+    while True:
+        try:
+            st = os.lstat(current)
+        except OSError as exc:
+            raise RuntimeError(f"cannot inspect Git metadata path: {current}") from exc
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            raise RuntimeError(f"Git metadata path is not a real directory: {current}")
+        if current == boundary:
+            return
+        if current == current.parent:
+            raise RuntimeError(f"Git metadata escaped boundary: {path}")
+        current = current.parent
+
+def validate_roots(repo, own_roots, parent_roots):
+    if not own_roots:
+        raise RuntimeError("Git metadata hierarchy is empty")
+
+    if parent_roots is None:
+        embedded = repo / ".git"
+        try:
+            st = os.lstat(embedded)
+        except OSError as exc:
+            raise RuntimeError("top-level repository must have in-tree .git directory") from exc
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            raise RuntimeError("top-level repository must have a real in-tree .git directory")
+        for root in own_roots:
+            validate_real_directory_chain(root, embedded)
+        return
+
+    parents = list(dict.fromkeys(parent_roots))
+    for root in own_roots:
+        if root in parents:
+            raise RuntimeError("submodule Git metadata aliases ancestor metadata")
+
+    allowed = list(parents)
+    embedded = repo / ".git"
     try:
-        if marker.is_file() and not marker.is_symlink():
-            text = marker.read_text(encoding="utf-8").strip()
-            if not text.lower().startswith("gitdir:"):
-                raise RuntimeError(f"malformed gitfile: {marker}")
-            raw = text.split(":", 1)[1].strip()
-            root = pathlib.Path(raw)
-            if not root.is_absolute():
-                root = marker.parent / root
-            root = root.resolve(strict=False)
-            if root not in roots:
-                roots.append(root)
-        elif marker.is_dir() and not marker.is_symlink():
-            root = marker.resolve(strict=False)
-            if root not in roots:
-                roots.append(root)
-    except (OSError, UnicodeError) as exc:
-        raise RuntimeError(f"cannot inspect git metadata marker {marker}") from exc
+        embedded_st = os.lstat(embedded)
+    except FileNotFoundError:
+        embedded_st = None
+    if embedded_st is not None and stat.S_ISDIR(embedded_st.st_mode) and not stat.S_ISLNK(embedded_st.st_mode):
+        allowed.append(embedded)
+
+    for root in own_roots:
+        candidates = [boundary for boundary in allowed if lexical_under(root, boundary)]
+        if not candidates:
+            raise RuntimeError(f"submodule Git metadata escapes verified hierarchy: {root}")
+        boundary = max(candidates, key=lambda value: len(str(value)))
+        validate_real_directory_chain(root, boundary)
+
+def gitlinks(repo, commit):
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", "-rz", "--full-tree", commit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"cannot read Git tree {commit} in {repo}")
+    links = []
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            meta, raw_path = record.split(b"\t", 1)
+            mode, kind, oid = meta.decode("ascii").split()
+            relative = raw_path.decode("utf-8", "strict")
+        except (ValueError, UnicodeError) as exc:
+            raise RuntimeError("malformed git ls-tree record") from exc
+        if mode == "160000" and kind == "commit":
+            links.append((relative, oid))
+    return links
+
+def populated_marker(submodule):
+    try:
+        st = os.lstat(submodule)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        return None
+    marker = submodule / ".git"
+    try:
+        marker_st = os.lstat(marker)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(marker_st.st_mode):
+        return None
+    if not (stat.S_ISREG(marker_st.st_mode) or stat.S_ISDIR(marker_st.st_mode)):
+        return None
+    return marker
+
+def collect(repo, commit, parent_roots, mode):
+    repo = pathlib.Path(os.path.normpath(str(repo)))
+    own_roots = git_roots(repo)
+    validate_roots(repo, own_roots, parent_roots)
+    hierarchy = list(dict.fromkeys([*(parent_roots or []), *own_roots]))
+
+    for relative, target_oid in gitlinks(repo, commit):
+        child = safe_tree_path(repo, relative)
+        if populated_marker(child) is None:
+            continue
+
+        child_own = git_roots(child)
+        validate_roots(child, child_own, hierarchy)
+
+        child_commit = target_oid
+        if mode == "current":
+            head = git(child, "rev-parse", "HEAD", check=False)
+            if head.returncode != 0 or not head.stdout.strip():
+                hierarchy.extend(root for root in child_own if root not in hierarchy)
+                continue
+            child_commit = head.stdout.strip()
+        else:
+            target = git(child, "cat-file", "-e", f"{target_oid}^{{commit}}", check=False)
+            if target.returncode != 0:
+                head = git(child, "rev-parse", "HEAD", check=False)
+                if head.returncode != 0 or not head.stdout.strip():
+                    hierarchy.extend(root for root in child_own if root not in hierarchy)
+                    continue
+                child_commit = head.stdout.strip()
+
+        child_roots = collect(child, child_commit, hierarchy, mode)
+        hierarchy.extend(root for root in child_roots if root not in hierarchy)
+
+    return hierarchy
+
+current_head = git(app, "rev-parse", "HEAD").stdout.strip()
+roots = collect(app, current_head, None, "current")
+if rollback_commit and rollback_commit != current_head:
+    rollback_roots = collect(app, rollback_commit, None, "rollback")
+    roots.extend(root for root in rollback_roots if root not in roots)
 
 protected = [app, *roots]
 
-def resolve_from(value, cwd):
-    p = pathlib.Path(value)
-    if not p.is_absolute():
-        p = cwd / p
-    return p.resolve(strict=False)
+def resolved(path):
+    try:
+        return pathlib.Path(path).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+def under(child, parent):
+    child = resolved(child)
+    parent = resolved(parent)
+    if child is None or parent is None:
+        return False
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 def points_into_protected(value, cwd):
     try:
-        p = resolve_from(value, cwd)
+        p = pathlib.Path(value)
+        if not p.is_absolute():
+            p = cwd / p
+        p = p.resolve(strict=False)
     except (OSError, RuntimeError):
         return True
     return any(under(p, root) or under(root, p) for root in protected)
@@ -916,7 +1318,10 @@ def process_is_git(proc):
     if argv:
         names.append(pathlib.Path(argv[0]).name)
     try:
-        names.append((proc / "exe").resolve().name)
+        target = os.readlink(proc / "exe")
+        if target.endswith(" (deleted)"):
+            target = target[:-10]
+        names.append(pathlib.Path(target).name)
     except (FileNotFoundError, ProcessLookupError):
         pass
     except PermissionError as exc:
@@ -930,7 +1335,6 @@ def git_process_references_checkout(proc, argv):
         return False
     except PermissionError as exc:
         raise RuntimeError(f"cannot inspect cwd for git process {proc.name}") from exc
-
     if any(under(cwd, root) or under(root, cwd) for root in protected):
         return True
 
@@ -938,15 +1342,16 @@ def git_process_references_checkout(proc, argv):
     if env is None:
         return False
 
+    def inspect_value(value):
+        return bool(value) and points_into_protected(value, cwd)
+
     i = 1
     while i < len(argv):
         arg = argv[i]
         value = None
-        if arg.startswith("--git-dir="):
+        if arg.startswith("--git-dir=") or arg.startswith("--work-tree=") or arg.startswith("--separate-git-dir="):
             value = arg.split("=", 1)[1]
-        elif arg.startswith("--work-tree="):
-            value = arg.split("=", 1)[1]
-        elif arg in ("--git-dir", "--work-tree", "-C"):
+        elif arg in ("--git-dir", "--work-tree", "--separate-git-dir", "-C"):
             if i + 1 >= len(argv):
                 raise RuntimeError(f"malformed git selector in process {proc.name}")
             value = argv[i + 1]
@@ -960,45 +1365,52 @@ def git_process_references_checkout(proc, argv):
             i += 1
             if "=" in config:
                 key, config_value = config.split("=", 1)
-                if key.lower() == "core.worktree" and points_into_protected(config_value, cwd):
+                if key.lower() == "core.worktree" and inspect_value(config_value):
                     return True
         elif arg.startswith("-c") and arg != "-c":
             config = arg[2:]
             if "=" in config:
                 key, config_value = config.split("=", 1)
-                if key.lower() == "core.worktree" and points_into_protected(config_value, cwd):
+                if key.lower() == "core.worktree" and inspect_value(config_value):
                     return True
         elif arg.startswith("--config-env="):
             spec = arg.split("=", 1)[1]
-            if "=" in spec:
-                key, env_name = spec.split("=", 1)
-                config_value = env.get(env_name)
-                if key.lower() == "core.worktree" and config_value and points_into_protected(config_value, cwd):
-                    return True
-        elif not arg.startswith("-") and points_into_protected(arg, cwd):
+            if "=" not in spec:
+                raise RuntimeError(f"malformed --config-env in process {proc.name}")
+            key, env_name = spec.split("=", 1)
+            config_value = env.get(env_name)
+            if not env_name or config_value is None:
+                raise RuntimeError(f"unresolvable --config-env in process {proc.name}")
+            if key.lower() == "core.worktree" and inspect_value(config_value):
+                return True
+        elif arg.startswith("-") and "=" in arg:
+            option_value = arg.split("=", 1)[1]
+            if not option_value:
+                raise RuntimeError(f"malformed Git option in process {proc.name}")
+            if inspect_value(option_value):
+                return True
+        elif not arg.startswith("-") and inspect_value(arg):
             return True
-        if value is not None and points_into_protected(value, cwd):
+        if value is not None and inspect_value(value):
             return True
         i += 1
 
-    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
-        value = env.get(key)
-        if value and points_into_protected(value, cwd):
+    for key in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL",
+    ):
+        if inspect_value(env.get(key)):
             return True
-    alt = env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-    if alt:
-        for value in alt.split(os.pathsep):
-            if value and points_into_protected(value, cwd):
-                return True
+    for value in env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES", "").split(os.pathsep):
+        if inspect_value(value):
+            return True
 
-    # Git also accepts arbitrary config through GIT_CONFIG_COUNT plus
-    # GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n. Cover core.worktree explicitly.
     count = env.get("GIT_CONFIG_COUNT")
     if count is not None:
         try:
             count_i = int(count)
-        except ValueError:
-            raise RuntimeError(f"malformed GIT_CONFIG_COUNT in process {proc.name}")
+        except ValueError as exc:
+            raise RuntimeError(f"malformed GIT_CONFIG_COUNT in process {proc.name}") from exc
         if count_i < 0 or count_i > 10000:
             raise RuntimeError(f"unsafe GIT_CONFIG_COUNT in process {proc.name}")
         for n in range(count_i):
@@ -1006,13 +1418,9 @@ def git_process_references_checkout(proc, argv):
             value = env.get(f"GIT_CONFIG_VALUE_{n}")
             if key is None or value is None:
                 raise RuntimeError(f"incomplete Git config environment in process {proc.name}")
-            if key.lower() == "core.worktree" and points_into_protected(value, cwd):
+            if key.lower() == "core.worktree" and inspect_value(value):
                 return True
 
-    # Resolve Git's effective worktree using the same repository/config
-    # selectors as the live process. This covers ordinary repository config,
-    # include/includeIf, GIT_CONFIG_PARAMETERS and config supplied through
-    # global Git options without reimplementing Git's config grammar.
     probe_env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LANG": "C",
@@ -1044,10 +1452,12 @@ def git_process_references_checkout(proc, argv):
             probe_args.extend((arg, argv[i + 1]))
             i += 2
             continue
-        if ((arg.startswith("-C") and arg != "-C")
-                or (arg.startswith("-c") and arg != "-c")
-                or arg.startswith("--git-dir=")
-                or arg.startswith("--work-tree=")):
+        if (
+            (arg.startswith("-C") and arg != "-C")
+            or (arg.startswith("-c") and arg != "-c")
+            or arg.startswith("--git-dir=")
+            or arg.startswith("--work-tree=")
+        ):
             probe_args.append(arg)
             i += 1
             continue
@@ -1067,33 +1477,41 @@ def git_process_references_checkout(proc, argv):
             continue
         break
 
-    try:
-        probe = subprocess.run(
-            [
-                *probe_args,
-                "-c", "safe.directory=*",
-                "rev-parse", "--path-format=absolute", "--show-toplevel",
-            ],
-            cwd=str(cwd),
-            env=probe_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"timed out resolving Git worktree for process {proc.name}") from exc
-    if probe.returncode == 0:
-        effective_worktree = probe.stdout.strip()
-        if not effective_worktree:
-            raise RuntimeError(f"Git returned an empty worktree for process {proc.name}")
-        if points_into_protected(effective_worktree, cwd):
+    resolved_any = False
+    resolved_git_dir = False
+    resolved_common_dir = False
+    for selector in ("--show-toplevel", "--git-dir", "--git-common-dir"):
+        try:
+            probe = subprocess.run(
+                [
+                    *probe_args, "-c", "safe.directory=*",
+                    "rev-parse", "--path-format=absolute", selector,
+                ],
+                cwd=str(cwd),
+                env=probe_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"timed out resolving Git paths for process {proc.name}") from exc
+        if probe.returncode != 0:
+            continue
+        effective = probe.stdout.strip()
+        if not effective:
+            raise RuntimeError(f"Git returned empty {selector} for process {proc.name}")
+        resolved_any = True
+        resolved_git_dir = resolved_git_dir or selector == "--git-dir"
+        resolved_common_dir = resolved_common_dir or selector == "--git-common-dir"
+        if points_into_protected(effective, cwd):
             return True
-    elif "GIT_CONFIG_PARAMETERS" in env:
-        # This source is intentionally left to Git to parse. If Git cannot
-        # resolve it, fail closed instead of assuming it cannot select us.
-        raise RuntimeError(f"cannot resolve GIT_CONFIG_PARAMETERS for process {proc.name}")
+
+    if resolved_any and not (resolved_git_dir and resolved_common_dir):
+        raise RuntimeError(f"cannot resolve complete Git metadata paths for process {proc.name}")
+    if not resolved_any and ("GIT_CONFIG_PARAMETERS" in env or "GIT_CONFIG_COUNT" in env):
+        raise RuntimeError(f"cannot resolve live Git configuration for process {proc.name}")
 
     try:
         fds = list((proc / "fd").iterdir())
@@ -1125,7 +1543,7 @@ def assert_no_related_git():
 
 def lock_is_open(lock):
     try:
-        lst = lock.stat()
+        lst = os.lstat(lock)
     except FileNotFoundError:
         return False
     wanted = (lst.st_dev, lst.st_ino)
@@ -1144,32 +1562,49 @@ def lock_is_open(lock):
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except PermissionError as exc:
-                raise RuntimeError(f"cannot inspect fd for process {proc.name} before lock cleanup") from exc
+                raise RuntimeError(f"cannot inspect fd for process {proc.name}") from exc
             if (st.st_dev, st.st_ino) == wanted:
                 return True
     return False
 
+def lock_files(root):
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        base = pathlib.Path(dirpath)
+        kept = []
+        for name in dirnames:
+            child = base / name
+            try:
+                st = os.lstat(child)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+                kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            if name.endswith(".lock"):
+                yield base / name
+
 assert_no_related_git()
 for root in roots:
-    st = root.lstat()
-    if not stat.S_ISDIR(st.st_mode):
-        raise RuntimeError(f"git metadata root is not a directory: {root}")
-    for lock in sorted(root.rglob("*.lock")):
+    st = os.lstat(root)
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        raise RuntimeError(f"git metadata root is not a real directory: {root}")
+    for lock in sorted(lock_files(root), key=str):
         try:
-            st = lock.lstat()
+            st = os.lstat(lock)
         except FileNotFoundError:
             continue
-        if not stat.S_ISREG(st.st_mode):
+        if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
             raise RuntimeError(f"refusing to remove non-regular git lock: {lock}")
         assert_no_related_git()
         if lock_is_open(lock):
             raise RuntimeError(f"refusing to remove open git lock: {lock}")
-        lock.unlink()
-        fd = os.open(lock.parent, os.O_RDONLY | os.O_DIRECTORY)
+        parent_fd = os.open(lock.parent, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
         try:
-            os.fsync(fd)
+            os.unlink(lock.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
         finally:
-            os.close(fd)
+            os.close(parent_fd)
 assert_no_related_git()
 PY
 }
@@ -1242,7 +1677,7 @@ rollback_transaction() {
 
   warn "Recovering transaction to $commit"
   stop_service_quiescent || return 1
-  reconcile_stale_git_locks || return 1
+  reconcile_stale_git_locks "$commit" || return 1
   switch_source "$commit" 0 || return 1
 
   install -o root -g root -m 0755 "$backup" "${EC_APP_BIN}.rollback" || return 1
@@ -1298,7 +1733,7 @@ recover_transaction() {
 collect_checks() {
   local expected="$1" expected_binary="$2" deployed="$3" state_binary="$4"
   local systemd=false local_http=false public_https=true release_revision=false service_smoke=true artifact_fence=false runtime_process=false source_tree=false state_integrity=false runtime_digest=false runtime_present=false
-  local actual disk_actual final_actual
+  local actual disk_actual final_actual state_manifest state_tag
 
   # The smoke hook runs first and cannot leave descendants behind. Accept live
   # artifact evidence only from one stable service instance that both sees the
@@ -1330,7 +1765,13 @@ collect_checks() {
   disk_actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
   [[ "$actual" =~ ^[0-9a-f]{64}$ ]] && runtime_present=true
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
-  [[ "$runtime_process" == true && "$actual" == "$state_binary" && "$disk_actual" == "$state_binary" ]] && state_integrity=true
+  state_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256 2>/dev/null || true)"
+  state_tag="$(json_field "$CURRENT_STATE_FILE" release_tag 2>/dev/null || true)"
+  [[ "$runtime_process" == true \
+     && "$actual" == "$state_binary" \
+     && "$disk_actual" == "$state_binary" \
+     && "$state_manifest" == "$RELEASE_MANIFEST_SHA256" \
+     && "$state_tag" == "$EC_RELEASE_TAG" ]] && state_integrity=true
   [[ "$runtime_process" == true && "$actual" == "$expected_binary" && "$disk_actual" == "$expected_binary" ]] && runtime_digest=true
 
   # Close the observation window with a second live snapshot. If the service
@@ -1429,6 +1870,12 @@ update_release() {
   current="$(json_field "$CURRENT_STATE_FILE" source_commit)"
   current_binary="$(json_field "$CURRENT_STATE_FILE" binary_sha256)"
   if [[ "$current" == "$RELEASE_SOURCE_COMMIT" && "$current_binary" == "$RELEASE_ASSET_SHA256" ]]; then
+    if ! committed_release_metadata_matches; then
+      refresh_committed_release_metadata "$current" "$current_binary" || {
+        rm -rf "$dir"
+        die "Could not durably refresh release metadata for the unchanged source/runtime pair"
+      }
+    fi
     rm -rf "$dir"; log "Already running exact source/runtime pair $current"; attest || true; return 0
   fi
 

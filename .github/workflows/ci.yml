@@ -164,6 +164,13 @@ jobs:
           grep -Fq 'AGENT_VERSION="0.1.0-pre17"' agent/ec-deployment-agent.sh
           grep -Fq '"phase":"activating"' agent/ec-deployment-agent.sh
           grep -Fq 'mark_transaction_committed' agent/ec-deployment-agent.sh
+          grep -Fq 'committed_release_metadata_matches()' agent/ec-deployment-agent.sh
+          grep -Fq 'refresh_committed_release_metadata()' agent/ec-deployment-agent.sh
+          grep -Fq 'state_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256' agent/ec-deployment-agent.sh
+          grep -Fq 'state_tag="$(json_field "$CURRENT_STATE_FILE" release_tag' agent/ec-deployment-agent.sh
+          grep -Fq '&& "$state_manifest" == "$RELEASE_MANIFEST_SHA256"' agent/ec-deployment-agent.sh
+          grep -Fq '&& "$state_tag" == "$EC_RELEASE_TAG"' agent/ec-deployment-agent.sh
+          grep -Fq 'Could not durably refresh release metadata for the unchanged source/runtime pair' agent/ec-deployment-agent.sh
           grep -Fq 'if [[ "$phase" == "committed" ]]' agent/ec-deployment-agent.sh
           grep -Fq 'snapshot="$(collect_checks' agent/ec-deployment-agent.sh
           grep -Fq '"runtime_sha256":actual' agent/ec-deployment-agent.sh
@@ -184,19 +191,22 @@ jobs:
           grep -Fq 'recover_transaction' agent/ec-deployment-agent.sh
           grep -Fq 'reconcile_stale_git_locks()' agent/ec-deployment-agent.sh
           grep -Fq 'live git process' agent/ec-deployment-agent.sh
-          grep -Fq 'root.rglob("*.lock")' agent/ec-deployment-agent.sh
-          grep -Fq 'reconcile_stale_git_locks || return 1' agent/ec-deployment-agent.sh
+          grep -Fq 'os.walk(root, topdown=True, followlinks=False)' agent/ec-deployment-agent.sh
+          grep -Fq 'reconcile_stale_git_locks "$commit" || return 1' agent/ec-deployment-agent.sh
           grep -Fq 'arg.startswith("--git-dir=")' agent/ec-deployment-agent.sh
           grep -Fq 'arg.startswith("--work-tree=")' agent/ec-deployment-agent.sh
-          grep -Fq 'arg in ("--git-dir", "--work-tree", "-C")' agent/ec-deployment-agent.sh
+          grep -Fq 'arg in ("--git-dir", "--work-tree", "--separate-git-dir", "-C")' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_COMMON_DIR' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_INDEX_FILE' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_COUNT' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_PARAMETERS' agent/ec-deployment-agent.sh
-          grep -Fq 'rev-parse", "--path-format=absolute", "--show-toplevel' agent/ec-deployment-agent.sh
+          grep -Fq 'for selector in ("--show-toplevel", "--git-dir", "--git-common-dir"):' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_KEY_' agent/ec-deployment-agent.sh
           grep -Fq 'GIT_CONFIG_VALUE_' agent/ec-deployment-agent.sh
-          grep -Fq 'for marker in app.rglob(".git")' agent/ec-deployment-agent.sh
+          grep -Fq 'def validate_roots(repo, own_roots, parent_roots):' agent/ec-deployment-agent.sh
+          grep -Fq 'for relative, target_oid in gitlinks(repo, commit):' agent/ec-deployment-agent.sh
+          grep -Fq 'for selector in ("--show-toplevel", "--git-dir", "--git-common-dir"):' agent/ec-deployment-agent.sh
+          grep -Fq 'os.unlink(lock.name, dir_fd=parent_fd)' agent/ec-deployment-agent.sh
           grep -Fq 'refusing to remove open git lock' agent/ec-deployment-agent.sh
           grep -Fq 'core.worktree' agent/ec-deployment-agent.sh
           grep -Fq -- '--config-env=' agent/ec-deployment-agent.sh
@@ -221,7 +231,7 @@ jobs:
           grep -Fq 'systemd-analyze' install/install-id-exergism.sh
           grep -Fq 'Publish the complete recovery core durably *before* exposing any' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file()' install/install-id-exergism.sh
-          grep -Fq 'mv -f "$tmp" "$dest"' install/install-id-exergism.sh
+          grep -Fq 'mv -fT -- "$tmp" "$dest"' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755' install/install-id-exergism.sh
@@ -234,7 +244,18 @@ jobs:
           grep -Fq 'Timer did not remain provably quiescent after enablement.' install/install-id-exergism.sh
           grep -Fq 'Could not determine exact timer enablement state' install/install-id-exergism.sh
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
-          grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover' install/install-id-exergism.sh
+          grep -Fq 'AGENT_SOURCE="${EC_NATIVE_AGENT_BINARY:-$ROOT/agent/ec-deployment-agent.sh}"' install/install-id-exergism.sh
+          grep -Fq 'AGENT_INSTALL_SOURCE="$AGENT_SOURCE"' install/install-id-exergism.sh
+          grep -Fq 'NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"' install/install-id-exergism.sh
+          grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"' install/install-id-exergism.sh
+          grep -Fq 'EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config' install/install-id-exergism.sh
+          grep -Fq 'recovery_agent="$ROOT/agent/ec-deployment-agent.sh"' install/install-id-exergism.sh
+          grep -Fq 'if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then' install/install-id-exergism.sh
+          grep -Fq 'recovery_agent="$AGENT"' install/install-id-exergism.sh
+          grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
+          grep -Fq 'install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"' install/install-id-exergism.sh
+          grep -Fq '"$AGENT_INSTALL_SOURCE" self-test' install/install-id-exergism.sh
+          grep -Fq 'EC_NATIVE_AGENT_BINARY must point to an executable Native AOT binary.' install/install-id-exergism.sh
           grep -Fq 'Deployment updater transaction could not be recovered' install/install-id-exergism.sh
           grep -Fq 'pretransaction_journal_published=0' install/install-id-exergism.sh
           grep -Fq 'restore_pretransaction_timer_on_exit()' install/install-id-exergism.sh
@@ -260,10 +281,15 @@ jobs:
           grep -Fq 'INSTALL_RECOVERING_DIR=' install/install-id-exergism.sh
           grep -Fq 'create_install_transaction()' install/install-id-exergism.sh
           grep -Fq 'mark_generation_validated()' install/install-id-exergism.sh
-          grep -Fq 'mv "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"' install/install-id-exergism.sh
+          grep -Fq 'validate_phase_paths' install/install-id-exergism.sh
+          grep -Fq 'mv -T -- "$stage" "$INSTALL_PENDING_DIR"' install/install-id-exergism.sh
+          grep -Fq 'require_real_phase_if_present' install/recover-id-exergism-install.sh
+          grep -Fq 'cp -aT -- "$backup" "$path"' install/recover-id-exergism-install.sh
+          grep -Fq 'Recovered journal scalar is missing or unsafe' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'mv -T -- "$INSTALL_PENDING_DIR" "$INSTALL_VALIDATED_DIR"' install/install-id-exergism.sh
           grep -Fq 'persist_installed_generation' install/install-id-exergism.sh
           grep -Fq 'INSTALL_COMMITTED_DIR=' install/install-id-exergism.sh
-          grep -Fq 'mv "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
+          grep -Fq 'mv -T -- "$INSTALL_VALIDATED_DIR" "$INSTALL_COMMITTED_DIR"' install/install-id-exergism.sh
           grep -Fq '"$VALIDATOR"' install/install-id-exergism.sh
           grep -Fq 'verify_production_artifact_fence()' install/install-id-exergism.sh
           grep -Fq 'open("/proc/self/mountinfo"' install/verify-id-exergism-artifact-fence.sh
@@ -283,7 +309,7 @@ jobs:
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
           grep -Fq 'target_was_active' install/install-id-exergism.sh
           grep -Fq 'for key in agent smoke service_unit timer_unit env fence' install/install-id-exergism.sh
-          grep -Fq 'cp -a -- "$path" "$stage/backups/$key"' install/install-id-exergism.sh
+          grep -Fq 'cp -aT -- "$path" "$stage/backups/$key"' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755' install/install-id-exergism.sh
           grep -Fq 'atomic_install_root_file "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA" 0644' install/install-id-exergism.sh
           grep -Fq 'TARGET_RECOVERY_INTERLOCK=' install/install-id-exergism.sh
@@ -296,16 +322,16 @@ jobs:
           grep -Fxq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-agent-recovery-interlock.conf
           ! grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'After=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
-          grep -Fq 'TXN_PHASE="pending"' install/recover-id-exergism-install.sh
-          grep -Fq 'TXN_PHASE="validated"' install/recover-id-exergism-install.sh
+          grep -Fq 'select_transaction()' install/recover-id-exergism-install.sh
+          grep -Fq 'TXN_PHASE="$phase"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="recovering"' install/recover-id-exergism-install.sh
-          grep -Fq 'TXN_PHASE="recovered"' install/recover-id-exergism-install.sh
+          grep -Fq 'recovered) path="$INSTALL_RECOVERED_DIR" ;;' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_FINALIZE_UNIT=' install/recover-id-exergism-install.sh
           grep -Fq '"$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$RECOVERY_FINALIZE_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq '"$RECOVERY_FINALIZER"' install/recover-id-exergism-install.sh
           grep -Fq '"$TXN_PHASE" == "validated" || "$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
-          grep -Fq 'mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
+          grep -Fq 'mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
           grep -Fq '[[ "$schema_version" == 2 ]]' install/recover-id-exergism-install.sh
           grep -Fq 'origin_boot_id=' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="normal"' install/recover-id-exergism-install.sh
@@ -337,7 +363,7 @@ jobs:
           grep -Fq 'Timer did not remain provably quiescent after synchronous recovery.' install/recover-id-exergism-install.sh
           grep -Fq '"$VALIDATOR" || restore_rc=1' install/recover-id-exergism-install.sh
           grep -Fq 'services remain quiesced and recovery journal is retained' install/recover-id-exergism-install.sh
-          grep -Fq 'mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
+          grep -Fq 'mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"' install/recover-id-exergism-install.sh
           grep -Fq 'if [[ "$MODE" == "normal" ]]; then' install/recover-id-exergism-install.sh
           grep -Fq 'Keep the actionable marker, then queue an independent finalizer' install/recover-id-exergism-install.sh
           grep -Fq 'ConditionPathExists=/var/lib/ec-deployment-attestation/install/id.exergism.org.recovered' packaging/id-exergism-install-recovery-finalize.service
@@ -356,7 +382,7 @@ jobs:
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Timer did not reach a provably quiescent terminal state.' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Could not re-check timer enablement after runtime restoration.' install/finalize-id-exergism-recovery.sh
-          grep -Fq 'mv "$RECOVERED_DIR" "$FINALIZED_DIR"' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'mv -T -- "$RECOVERED_DIR" "$FINALIZED_DIR"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'RuntimeMaxSec=90s' install/validate-id-exergism-generation.sh
           grep -Fq 'ReadOnlyPaths=$APP_DIR' install/validate-id-exergism-generation.sh
           grep -Fq 'governance/profile/0.1-DRAFT' install/validate-id-exergism-generation.sh
@@ -371,6 +397,12 @@ jobs:
           from pathlib import Path
 
           text = Path('install/install-id-exergism.sh').read_text()
+          native_stage = text.index('install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"')
+          native_preflight = text.index('EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config')
+          native_self_test = text.index('"$AGENT_INSTALL_SOURCE" self-test', native_preflight)
+          agent_replace = text.index('install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"')
+          assert native_stage < native_preflight < native_self_test < agent_replace
+
           validator = text.index('atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755')
           fence_auditor = text.index('atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755')
           manifest_validator = text.index('atomic_install_root_file "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755')
@@ -398,7 +430,7 @@ jobs:
           hard_quiesce = recovery.index('if (( quiesce_failed != 0 )); then')
           first_restore = recovery.index('restore_artifact "$key"')
           validate = recovery.index('"$VALIDATOR" || restore_rc=1')
-          retire = recovery.index('mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
+          retire = recovery.index('mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
           direct_start = recovery.index('if ! systemctl start "$TARGET_UNIT"')
           direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR"', direct_start)
           direct_quiesce = recovery.index('quiesce_unit "$TARGET_UNIT"', direct_fence)
@@ -430,26 +462,44 @@ jobs:
           assert global_lock < state_lock < installer_phase_guard < dispatch
           stop_helper = agent.index('stop_service_quiescent()')
           rollback_call = agent.index('stop_service_quiescent || return 1', stop_helper)
-          stale_lock_reconcile = agent.index('reconcile_stale_git_locks || return 1')
+          stale_lock_reconcile = agent.index('reconcile_stale_git_locks "$commit" || return 1')
           rollback_switch = agent.index('switch_source "$commit" 0 || return 1')
           update_call = agent.index('if ! stop_service_quiescent; then')
           update_switch = agent.index('if ! switch_source "$RELEASE_SOURCE_COMMIT" 1; then')
           assert stop_helper < rollback_call < stale_lock_reconcile < rollback_switch
           assert stop_helper < update_call < update_switch
 
+          metadata_refresh = agent.index('refresh_committed_release_metadata()')
+          metadata_refresh_pre = agent.index('artifact_integrity "$commit" "$binary" || return 1', metadata_refresh)
+          metadata_refresh_write = agent.index('write_current_state "$commit" "$binary" "$RELEASE_MANIFEST_SHA256" || return 1', metadata_refresh_pre)
+          metadata_refresh_post = agent.index('artifact_integrity "$commit" "$binary"', metadata_refresh_write)
+          noop_pair = agent.index('if [[ "$current" == "$RELEASE_SOURCE_COMMIT" && "$current_binary" == "$RELEASE_ASSET_SHA256" ]]; then')
+          noop_metadata_check = agent.index('if ! committed_release_metadata_matches; then', noop_pair)
+          noop_metadata_refresh = agent.index('refresh_committed_release_metadata "$current" "$current_binary"', noop_metadata_check)
+          noop_attest = agent.index('attest || true; return 0', noop_metadata_refresh)
+          assert metadata_refresh < metadata_refresh_pre < metadata_refresh_write < metadata_refresh_post
+          assert noop_pair < noop_metadata_check < noop_metadata_refresh < noop_attest
+          collect_state_manifest = agent.index('state_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256', collect)
+          collect_state_tag = agent.index('state_tag="$(json_field "$CURRENT_STATE_FILE" release_tag', collect_state_manifest)
+          collect_state_integrity_manifest = agent.index('&& "$state_manifest" == "$RELEASE_MANIFEST_SHA256"', collect_state_tag)
+          collect_state_integrity_tag = agent.index('&& "$state_tag" == "$EC_RELEASE_TAG"', collect_state_integrity_manifest)
+          assert collect < collect_state_manifest < collect_state_tag < collect_state_integrity_manifest < collect_state_integrity_tag < collect_final_snapshot
+
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
           timer_stop = text.index('stop_and_wait_quiescent "$TIMER_UNIT"', pretxn_guard)
           updater_stop = text.index('stop_and_wait_quiescent "$AGENT_RUN_UNIT"', timer_stop)
           agent_lock = text.index('if ! flock -n 8; then', updater_stop)
-          updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$ROOT/agent/ec-deployment-agent.sh" recover')
+          recovery_default = text.index('recovery_agent="$ROOT/agent/ec-deployment-agent.sh"', agent_lock)
+          recovery_installed = text.index('recovery_agent="$AGENT"', recovery_default)
+          updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover', recovery_installed)
           target_baseline = text.index('target_was_active="$(capture_active_baseline "$TARGET_UNIT")"')
           journal_publish = text.index('create_install_transaction')
-          assert timer_baseline < pretxn_guard < timer_stop < updater_stop < agent_lock < updater_recover < target_baseline < journal_publish
+          assert timer_baseline < pretxn_guard < timer_stop < updater_stop < agent_lock < recovery_default < recovery_installed < updater_recover < target_baseline < journal_publish
 
-          select_recovered = recovery.index('TXN_PHASE="recovered"')
+          select_recovered = recovery.index('recovered) path="$INSTALL_RECOVERED_DIR" ;;')
           recovered_completion = recovery.index('if [[ "$TXN_PHASE" == "recovered" ]]; then')
-          phase_to_recovering = recovery.index('mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
+          phase_to_recovering = recovery.index('mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
           assert select_recovered < recovered_completion < phase_to_recovering
 
           live_fence = text.index('verify_production_artifact_fence', text.index('systemctl start "$TARGET_UNIT"'))
@@ -463,7 +513,7 @@ jobs:
           finalizer_quiesce = finalizer_text.index('quiesce_target_after_failed_validation || true', finalizer_fence)
           timer_terminal = finalizer_text.index('expected_active="$(expected_timer_active)"')
           enablement_recheck = finalizer_text.index('Could not re-check timer enablement after runtime restoration.')
-          marker_retire = finalizer_text.index('mv "$RECOVERED_DIR" "$FINALIZED_DIR"')
+          marker_retire = finalizer_text.index('mv -T -- "$RECOVERED_DIR" "$FINALIZED_DIR"')
           assert finalizer_health < finalizer_fence < finalizer_quiesce < timer_terminal < enablement_recheck < marker_retire
           PY
 

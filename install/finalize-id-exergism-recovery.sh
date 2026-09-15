@@ -19,6 +19,20 @@ INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
+path_exists_any() {
+  [[ -e "$1" || -L "$1" ]]
+}
+
+require_real_dir_if_present() {
+  local path="$1"
+  if path_exists_any "$path"; then
+    [[ -d "$path" && ! -L "$path" ]] || {
+      echo "CRITICAL: recovery phase path is not a real directory: $path" >&2
+      return 1
+    }
+  fi
+}
+
 if [[ "${EC_INSTALL_LOCK_HELD:-0}" != 1 ]]; then
   exec 9>"$INSTALL_LOCK"
   flock -n 9 || {
@@ -34,15 +48,18 @@ if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]]; then
   }
 fi
 
+require_real_dir_if_present "$RECOVERED_DIR"
+require_real_dir_if_present "$FINALIZED_DIR"
 [[ -d "$RECOVERED_DIR" ]] || exit 0
 
 read_value() {
-  local name="$1"
-  [[ -f "${RECOVERED_DIR}/${name}" ]] || {
-    echo "Recovered journal is missing ${name}" >&2
+  local name="$1" path
+  path="${RECOVERED_DIR}/${name}"
+  [[ -f "$path" && ! -L "$path" ]] || {
+    echo "Recovered journal scalar is missing or unsafe: ${name}" >&2
     return 1
   }
-  cat "${RECOVERED_DIR}/${name}"
+  cat "$path"
 }
 
 schema_version="$(read_value schema_version)"
@@ -364,8 +381,8 @@ actual_enabled="$(enabled_state)" || {
 }
 
 # Atomic disappearance of .recovered is the completion commit point.
-rm -rf "$FINALIZED_DIR"
-mv "$RECOVERED_DIR" "$FINALIZED_DIR"
+rm -rf -- "$FINALIZED_DIR"
+mv -T -- "$RECOVERED_DIR" "$FINALIZED_DIR"
 python3 - "$INSTALL_STATE_ROOT" <<'PY'
 import os
 import sys
@@ -375,7 +392,7 @@ try:
 finally:
     os.close(fd)
 PY
-rm -rf "$FINALIZED_DIR"
+rm -rf -- "$FINALIZED_DIR"
 python3 - "$INSTALL_STATE_ROOT" <<'PY'
 import os
 import sys

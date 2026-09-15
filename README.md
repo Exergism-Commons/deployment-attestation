@@ -20,7 +20,9 @@ The repository deliberately separates **deployment authority** from **semantic/a
 
 - `spec/release-manifest-v0.1.schema.json` — atomic release snapshot binding source commit to runtime digests.
 - `spec/attestation-v0.1.schema.json` — wire contract for host observations.
-- `agent/ec-deployment-agent.sh` — reference release updater + health/attestation agent.
+- `src/Exergism.DeploymentAttestation.Agent/` — .NET 10 Native AOT deployment/attestation agent.
+- `agent/ec-deployment-agent.sh` — Bash reference/fallback implementation during the AOT migration.
+- `tests/Exergism.DeploymentAttestation.Agent.Tests/` — unit tests for protocol, recovery guards and health semantics.
 - `packaging/` — systemd service/timer templates.
 - `examples/id.exergism.org.env.example` — configuration for the current PID resolver deployment.
 - `examples/id.exergism.org-smoke.sh` — semantic smoke checks for the resolver.
@@ -32,6 +34,8 @@ The repository deliberately separates **deployment authority** from **semantic/a
 The production host MUST NOT deploy `git pull main` directly and MUST NOT independently combine mutable `SOURCE_COMMIT`, checksum and binary assets. A release channel publishes one `DEPLOYMENT_MANIFEST.json` response that binds the exact source commit and SHA-256 digest of every architecture-specific runtime asset. The agent first snapshots that single manifest, then accepts only a runtime matching the digest in that snapshot and checks out the exact commit named by it. If a rolling release is being republished concurrently, mismatched old/new artifacts fail closed rather than producing a mixed deployment.
 
 Activation is a durable transaction. Before mutating source or runtime, the agent verifies the currently recorded source/runtime pair, fsyncs a rollback binary, and atomically persists `transaction.json`. Any later run that finds this file restores the old pair before establishing a new baseline. `current-state.json` is atomically committed only after the new runtime passes mandatory health checks; failure to record that state is itself an activation failure and triggers rollback.
+
+The Native AOT agent also maintains independent self-health in `agent-health.json`. On installations that explicitly stage the Native AOT binary with `EC_NATIVE_AGENT_BINARY`, `ec-deployment-agent health` evaluates freshness, the last completed cycle, timer state, transaction state and attestation delivery without recursively trusting the target-service attestation, while `ec-deployment-agent status` emits the same self-health document for observability without using health as an exit gate. The default Bash fallback remains the production default during this migration; its legacy `health` command is target attestation and it does not implement `status`.
 
 The host MUST NOT hold a GitHub token capable of mutating EC repositories. It signs an attestation with a service-specific HMAC key and sends it to a receiver. Every observation contains a signed `observation_id`; receiver-side deduplication is mandatory so transport retries cannot increment incident thresholds twice. The receiver owns the GitHub integration and can publish Deployment/Check status or open incidents.
 

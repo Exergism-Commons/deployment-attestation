@@ -38,6 +38,20 @@ INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
 
+path_exists_any() {
+  [[ -e "$1" || -L "$1" ]]
+}
+
+require_real_phase_if_present() {
+  local path="$1"
+  if path_exists_any "$path"; then
+    [[ -d "$path" && ! -L "$path" ]] || {
+      echo "CRITICAL: installer transaction path is not a real directory: $path" >&2
+      return 1
+    }
+  fi
+}
+
 durable_sync_paths() {
   python3 - "$@" <<'PY'
 import os
@@ -95,36 +109,37 @@ PY
 }
 
 select_transaction() {
-  local count=0
+  local count=0 path phase
   TXN_PHASE=""
   TXN_DIR=""
 
-  if [[ -d "$INSTALL_PENDING_DIR" ]]; then
-    TXN_PHASE="pending"; TXN_DIR="$INSTALL_PENDING_DIR"; count=$((count + 1))
-  fi
-  if [[ -d "$INSTALL_VALIDATED_DIR" ]]; then
-    TXN_PHASE="validated"; TXN_DIR="$INSTALL_VALIDATED_DIR"; count=$((count + 1))
-  fi
-  if [[ -d "$INSTALL_RECOVERING_DIR" ]]; then
-    TXN_PHASE="recovering"; TXN_DIR="$INSTALL_RECOVERING_DIR"; count=$((count + 1))
-  fi
-  if [[ -d "$INSTALL_RECOVERED_DIR" ]]; then
-    TXN_PHASE="recovered"; TXN_DIR="$INSTALL_RECOVERED_DIR"; count=$((count + 1))
-  fi
+  for phase in pending validated recovering recovered; do
+    case "$phase" in
+      pending) path="$INSTALL_PENDING_DIR" ;;
+      validated) path="$INSTALL_VALIDATED_DIR" ;;
+      recovering) path="$INSTALL_RECOVERING_DIR" ;;
+      recovered) path="$INSTALL_RECOVERED_DIR" ;;
+    esac
+    require_real_phase_if_present "$path" || return 2
+    if [[ -d "$path" ]]; then
+      TXN_PHASE="$phase"
+      TXN_DIR="$path"
+      count=$((count + 1))
+    fi
+  done
 
   (( count <= 1 )) || {
     echo "CRITICAL: multiple installer transaction phases exist simultaneously." >&2
-    return 1
+    return 2
   }
-  (( count == 1 ))
+  (( count == 1 )) || return 1
 }
 
-if ! select_transaction; then
-  # No transaction is the normal fast path. select_transaction emits a message
-  # itself only for the impossible multi-phase case.
-  if [[ ! -d "$INSTALL_PENDING_DIR" && ! -d "$INSTALL_VALIDATED_DIR" && ! -d "$INSTALL_RECOVERING_DIR" && ! -d "$INSTALL_RECOVERED_DIR" ]]; then
-    exit 0
-  fi
+if select_transaction; then
+  :
+else
+  select_rc=$?
+  (( select_rc == 1 )) && exit 0
   exit 1
 fi
 
@@ -166,19 +181,20 @@ fi
 # touching any live artifact. This also closes the validated lock-contention
 # admission window for concurrent unit starts.
 if [[ "$TXN_PHASE" != "recovering" ]]; then
-  mv "$TXN_DIR" "$INSTALL_RECOVERING_DIR"
+  mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
   TXN_PHASE="recovering"
   TXN_DIR="$INSTALL_RECOVERING_DIR"
 fi
 
 read_value() {
-  local name="$1"
-  [[ -f "${TXN_DIR}/${name}" ]] || {
-    echo "Recovery journal is missing ${name}" >&2
+  local name="$1" path
+  path="${TXN_DIR}/${name}"
+  [[ -f "$path" && ! -L "$path" ]] || {
+    echo "Recovery journal scalar is missing or unsafe: ${name}" >&2
     return 1
   }
-  cat "${TXN_DIR}/${name}"
+  cat "$path"
 }
 
 schema_version="$(read_value schema_version)"
@@ -228,13 +244,26 @@ restore_artifact() {
   present="$(read_value "${key}_present")"
   [[ "$present" == 0 || "$present" == 1 ]] || return 1
   backup="${TXN_DIR}/backups/${key}"
-  if [[ "$present" == 1 && ! -e "$backup" && ! -L "$backup" ]]; then
-    echo "Recovery backup for $key is missing." >&2
+
+  if [[ "$present" == 1 ]]; then
+    path_exists_any "$backup" || {
+      echo "Recovery backup for $key is missing." >&2
+      return 1
+    }
+    [[ -f "$backup" || -L "$backup" ]] || {
+      echo "Recovery backup for $key is not a file/symlink." >&2
+      return 1
+    }
+  fi
+
+  if [[ -d "$path" && ! -L "$path" ]]; then
+    echo "Refusing to replace unexpected directory at artifact path: $path" >&2
     return 1
   fi
-  rm -f -- "$path"
+  rm -f -- "$path" || return 1
+
   if [[ "$present" == 1 ]]; then
-    cp -a -- "$backup" "$path"
+    cp -aT -- "$backup" "$path" || return 1
   fi
 }
 
@@ -461,8 +490,11 @@ fi
 # The restored generation is now exact, durable and transiently healthy.
 # Retire the blocking phase atomically, but keep a recovered marker until the
 # recorded runtime state has also been restored successfully.
-rm -rf "$INSTALL_RECOVERED_DIR"
-mv "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"
+path_exists_any "$INSTALL_RECOVERED_DIR" && {
+  echo "CRITICAL: recovered phase appeared while recovery lock is held." >&2
+  exit 1
+}
+mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
 if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
@@ -533,7 +565,7 @@ fi
 if [[ "$MODE" == "normal" ]]; then
   # Synchronous/direct recovery has verified final target/timer states, so the
   # recovered marker can be retired durably.
-  rm -rf "$INSTALL_RECOVERED_DIR"
+  rm -rf -- "$INSTALL_RECOVERED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 else
   # Dependency/boot recovery used --no-block for at least one possible start.
