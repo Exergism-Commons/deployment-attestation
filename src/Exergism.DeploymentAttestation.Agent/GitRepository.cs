@@ -57,6 +57,255 @@ internal static class GitMetadataEnumeration
         };
 }
 
+internal sealed class PinnedGitMetadataRoot : IDisposable
+{
+    private const int O_RDONLY = 0;
+    private const int O_DIRECTORY = 0x10000;
+    private const int O_NOFOLLOW = 0x20000;
+    private const int O_CLOEXEC = 0x80000;
+    private const int O_PATH = 0x200000;
+    private const int AT_EMPTY_PATH = 0x1000;
+    private const int AT_FDCWD = -100;
+    private const int AT_SYMLINK_NOFOLLOW = 0x100;
+    private const uint STATX_BASIC_STATS = 0x000007ff;
+    private const ushort S_IFMT = 0xF000;
+    private const ushort S_IFDIR = 0x4000;
+    private const ushort S_IFREG = 0x8000;
+    private const int ENOENT = 2;
+    private const int ESRCH = 3;
+    private const int EPERM = 1;
+    private const int EACCES = 13;
+
+    private int _rootFd;
+    private readonly string _displayRoot;
+
+    private PinnedGitMetadataRoot(int rootFd, string displayRoot)
+    {
+        _rootFd = rootFd;
+        _displayRoot = displayRoot;
+    }
+
+    internal static PinnedGitMetadataRoot Open(string root)
+    {
+        root = Path.GetFullPath(root);
+        var fd = Native.open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException(
+                $"Git metadata root could not be pinned as a real directory: {root}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+        return new PinnedGitMetadataRoot(fd, root);
+    }
+
+    internal async Task CleanupLocksAsync(
+        Func<Task> assertNoRelatedGit,
+        Func<FileIdentity, Task<bool>> anyProcessHasOpenIdentity)
+    {
+        ObjectDisposedException.ThrowIf(_rootFd < 0, this);
+        await WalkAsync(_rootFd, _displayRoot, assertNoRelatedGit, anyProcessHasOpenIdentity);
+    }
+
+    private static async Task WalkAsync(
+        int directoryFd,
+        string displayDirectory,
+        Func<Task> assertNoRelatedGit,
+        Func<FileIdentity, Task<bool>> anyProcessHasOpenIdentity)
+    {
+        string[] names;
+        try
+        {
+            names = Directory
+                .EnumerateFileSystemEntries($"/proc/self/fd/{directoryFd}")
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrEmpty(name))
+                .Cast<string>()
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new AgentException(
+                $"Could not enumerate pinned Git metadata directory {displayDirectory}",
+                exception);
+        }
+
+        foreach (var name in names)
+        {
+            if (Native.statx(
+                    directoryFd,
+                    name,
+                    AT_SYMLINK_NOFOLLOW,
+                    STATX_BASIC_STATS,
+                    out var entryStat) != 0)
+            {
+                var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                if (error == ENOENT)
+                    continue;
+                throw new AgentException(
+                    $"Could not inspect Git metadata entry {Path.Combine(displayDirectory, name)}; errno={error}");
+            }
+
+            var type = (ushort)(entryStat.Mode & S_IFMT);
+            if (type == S_IFDIR)
+            {
+                var childFd = Native.openat(
+                    directoryFd,
+                    name,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (childFd < 0)
+                    throw new AgentException(
+                        $"Could not pin Git metadata directory {Path.Combine(displayDirectory, name)}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+                try
+                {
+                    await WalkAsync(
+                        childFd,
+                        Path.Combine(displayDirectory, name),
+                        assertNoRelatedGit,
+                        anyProcessHasOpenIdentity);
+                }
+                finally
+                {
+                    _ = Native.close(childFd);
+                }
+                continue;
+            }
+
+            if (type != S_IFREG || !name.EndsWith(".lock", StringComparison.Ordinal))
+                continue;
+
+            await assertNoRelatedGit();
+
+            var lockFd = Native.openat(directoryFd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+            if (lockFd < 0)
+            {
+                var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                if (error == ENOENT)
+                    continue;
+                throw new AgentException(
+                    $"Could not pin Git lock {Path.Combine(displayDirectory, name)}; errno={error}");
+            }
+
+            FileIdentity identity;
+            try
+            {
+                if (Native.statx(
+                        lockFd,
+                        "",
+                        AT_EMPTY_PATH,
+                        STATX_BASIC_STATS,
+                        out var lockStat) != 0)
+                    throw new AgentException(
+                        $"Could not inspect pinned Git lock {Path.Combine(displayDirectory, name)}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+                if ((lockStat.Mode & S_IFMT) != S_IFREG)
+                    throw new AgentException(
+                        $"Git lock changed type during cleanup: {Path.Combine(displayDirectory, name)}");
+
+                identity = FileIdentity.From(lockStat);
+            }
+            finally
+            {
+                _ = Native.close(lockFd);
+            }
+
+            if (await anyProcessHasOpenIdentity(identity))
+                throw new AgentException(
+                    $"Refusing to remove open git lock: {Path.Combine(displayDirectory, name)}");
+
+            await assertNoRelatedGit();
+
+            if (Native.statx(
+                    directoryFd,
+                    name,
+                    AT_SYMLINK_NOFOLLOW,
+                    STATX_BASIC_STATS,
+                    out var currentStat) != 0)
+            {
+                var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                if (error == ENOENT)
+                    continue;
+                throw new AgentException(
+                    $"Could not re-check Git lock {Path.Combine(displayDirectory, name)}; errno={error}");
+            }
+
+            if ((currentStat.Mode & S_IFMT) != S_IFREG ||
+                FileIdentity.From(currentStat) != identity)
+                throw new AgentException(
+                    $"Git lock changed while being inspected: {Path.Combine(displayDirectory, name)}");
+
+            if (Native.unlinkat(directoryFd, name, 0) != 0)
+            {
+                var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                if (error == ENOENT)
+                    continue;
+                throw new AgentException(
+                    $"Could not remove stale Git lock {Path.Combine(displayDirectory, name)}; errno={error}");
+            }
+
+            if (Native.fsync(directoryFd) != 0)
+                throw new AgentException(
+                    $"Could not fsync Git metadata directory {displayDirectory}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+        }
+    }
+
+    internal static async Task<bool> AnyProcessHasOpenIdentityAsync(FileIdentity identity)
+    {
+        foreach (var procDir in Directory.EnumerateDirectories("/proc"))
+        {
+            if (!int.TryParse(Path.GetFileName(procDir), out _))
+                continue;
+
+            var fdDir = Path.Combine(procDir, "fd");
+            string[] descriptors;
+            try
+            {
+                descriptors = Directory.EnumerateFileSystemEntries(fdDir).ToArray();
+            }
+            catch (DirectoryNotFoundException)
+            {
+                continue;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new AgentException(
+                    $"Cannot inspect process {Path.GetFileName(procDir)} fds before lock cleanup");
+            }
+
+            foreach (var descriptor in descriptors)
+            {
+                if (Native.statx(
+                        AT_FDCWD,
+                        descriptor,
+                        0,
+                        STATX_BASIC_STATS,
+                        out var descriptorStat) == 0)
+                {
+                    if ((descriptorStat.Mode & S_IFMT) == S_IFREG &&
+                        FileIdentity.From(descriptorStat) == identity)
+                        return true;
+                    continue;
+                }
+
+                var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                if (error is ENOENT or ESRCH)
+                    continue;
+                if (error is EPERM or EACCES)
+                    throw new AgentException(
+                        $"Cannot inspect process {Path.GetFileName(procDir)} fds before lock cleanup");
+            }
+        }
+
+        await Task.CompletedTask;
+        return false;
+    }
+
+    public void Dispose()
+    {
+        if (_rootFd < 0)
+            return;
+        _ = Native.close(_rootFd);
+        _rootFd = -1;
+    }
+}
+
 internal static class GitMetadataBoundary
 {
     internal static void EnsureRepositoryRoots(
@@ -269,17 +518,10 @@ internal sealed class GitRepository(AgentConfig config)
 
         foreach (var root in roots)
         {
-            if (!Directory.Exists(root))
-                throw new AgentException($"Git metadata root is not a directory: {root}");
-
-            foreach (var lockFile in GitMetadataEnumeration.EnumerateLockFiles(root).Order(StringComparer.Ordinal))
-            {
-                await AssertNoRelatedGitAsync(protectedRoots);
-                if (await AnyProcessHasOpenPathAsync(lockFile))
-                    throw new AgentException($"Refusing to remove open git lock: {lockFile}");
-                File.Delete(lockFile);
-                Durability.FsyncDirectory(Path.GetDirectoryName(lockFile)!);
-            }
+            using var pinnedRoot = PinnedGitMetadataRoot.Open(root);
+            await pinnedRoot.CleanupLocksAsync(
+                () => AssertNoRelatedGitAsync(protectedRoots),
+                PinnedGitMetadataRoot.AnyProcessHasOpenIdentityAsync);
         }
 
         await AssertNoRelatedGitAsync(protectedRoots);
@@ -936,33 +1178,6 @@ internal sealed class GitRepository(AgentConfig config)
                 result[entry[..eq]] = entry[(eq + 1)..];
         }
         return result;
-    }
-
-    private static async Task<bool> AnyProcessHasOpenPathAsync(string path)
-    {
-        path = Path.GetFullPath(path);
-        foreach (var procDir in Directory.EnumerateDirectories("/proc"))
-        {
-            if (!int.TryParse(Path.GetFileName(procDir), out _))
-                continue;
-            var fdDir = Path.Combine(procDir, "fd");
-            try
-            {
-                foreach (var fd in Directory.EnumerateFileSystemEntries(fdDir))
-                {
-                    var target = ResolveProcLink(fd);
-                    if (target is not null && Path.GetFullPath(target) == path)
-                        return true;
-                }
-            }
-            catch (DirectoryNotFoundException) { }
-            catch (UnauthorizedAccessException)
-            {
-                throw new AgentException($"Cannot inspect process {Path.GetFileName(procDir)} fds before lock cleanup");
-            }
-        }
-        await Task.CompletedTask;
-        return false;
     }
 
     private async Task<List<TreeEntry>> ReadTreeAsync(string repository, string commit)
