@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
@@ -229,8 +230,10 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     public async Task<string> LiveRuntimeSnapshotSha256Async()
     {
         var pid = await _systemd.MainPidAsync();
+        await VerifySourceBindingAsync(pid);
         await VerifyArtifactFenceAsync(pid);
         var digest = await BoundRuntimeSha256Async(pid);
+        await VerifySourceBindingAsync(pid);
         var pidAfter = await _systemd.MainPidAsync();
         if (pidAfter != pid)
             throw new AgentException("Production resolver changed PID during live runtime snapshot");
@@ -249,6 +252,82 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
 
     public async Task VerifyLiveRuntimeInvariantsAsync()
         => _ = await LiveRuntimeSnapshotSha256Async();
+
+    private async Task VerifySourceBindingAsync(int pid)
+    {
+        byte[] commandLine;
+        try
+        {
+            commandLine = await File.ReadAllBytesAsync($"/proc/{pid}/cmdline");
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            throw new AgentException("Could not read production resolver command line", exception);
+        }
+
+        if (!CommandLineUsesConfiguredSource(commandLine, _config.AppDirectory))
+            throw new AgentException("MainPID is not using the configured source/registry paths");
+
+        var pidAfter = await _systemd.MainPidAsync();
+        if (pidAfter != pid)
+            throw new AgentException("Production resolver changed PID during source-binding audit");
+    }
+
+    internal static bool CommandLineUsesConfiguredSource(
+        byte[] commandLine,
+        string appDirectory)
+    {
+        string text;
+        try
+        {
+            text = new UTF8Encoding(
+                encoderShouldEmitUTF8Identifier: false,
+                throwOnInvalidBytes: true).GetString(commandLine);
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+
+        var arguments = text.Split(
+            '\0',
+            StringSplitOptions.RemoveEmptyEntries);
+        if (arguments.Length == 0)
+            return false;
+
+        var expectedRoot = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(appDirectory));
+        var expectedRegistry = Path.Combine(
+            expectedRoot,
+            RESOLVER_REGISTRY_RELATIVE_PATH);
+
+        return GetOptionValues(arguments, RESOLVER_ARG_ROOT)
+                   .SequenceEqual([expectedRoot], StringComparer.Ordinal) &&
+               GetOptionValues(arguments, RESOLVER_ARG_REGISTRY)
+                   .SequenceEqual([expectedRegistry], StringComparer.Ordinal);
+    }
+
+    private static IEnumerable<string> GetOptionValues(
+        IReadOnlyList<string> arguments,
+        string option)
+    {
+        for (var index = 1; index < arguments.Count; index++)
+        {
+            var argument = arguments[index];
+            if (argument == option)
+            {
+                if (index + 1 >= arguments.Count)
+                    yield break;
+                yield return arguments[++index];
+                continue;
+            }
+
+            var prefix = option + "=";
+            if (argument.StartsWith(prefix, StringComparison.Ordinal))
+                yield return argument[prefix.Length..];
+        }
+    }
 
     private async Task<string> BoundRuntimeSha256Async(int pid)
     {
