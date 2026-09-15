@@ -382,15 +382,16 @@ quiesce_unit() {
   return 1
 }
 
-quiesce_target_for_recovery() {
-  # In dependency-triggered boot recovery the target start job is already
-  # queued behind this recovery unit. Stopping an already-quiescent target
-  # would replace/cancel that queued job. Preserve it while the dependency
+quiesce_dependent_unit_for_recovery() {
+  local unit="$1"
+  # In dependency-triggered boot recovery a dependent start job may already be
+  # queued behind this recovery unit. Stopping an already-quiescent unit would
+  # replace/cancel that safely waiting job. Preserve it while dependency
   # ordering keeps it unable to start until recovery exits.
-  if [[ "$MODE" == "boot" ]] && unit_is_quiescent "$TARGET_UNIT"; then
+  if [[ "$MODE" == "boot" ]] && unit_is_quiescent "$unit"; then
     return 0
   fi
-  quiesce_unit "$TARGET_UNIT"
+  quiesce_unit "$unit"
 }
 
 # Nothing that can execute or mutate the generation may remain live while old
@@ -398,8 +399,8 @@ quiesce_target_for_recovery() {
 # never touch an artifact if even one unit can still execute or trigger work.
 quiesce_failed=0
 quiesce_unit "$TIMER_UNIT" || quiesce_failed=1
-quiesce_unit "$AGENT_RUN_UNIT" || quiesce_failed=1
-quiesce_target_for_recovery || quiesce_failed=1
+quiesce_dependent_unit_for_recovery "$AGENT_RUN_UNIT" || quiesce_failed=1
+quiesce_dependent_unit_for_recovery "$TARGET_UNIT" || quiesce_failed=1
 if (( quiesce_failed != 0 )); then
   echo "CRITICAL: recovery could not prove all units quiescent; no deployment artifact was modified and journal is retained." >&2
   exit 1
