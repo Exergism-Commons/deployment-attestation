@@ -998,6 +998,34 @@ public sealed class CodexRegressionTests
     }
 
     [TestMethod]
+    public async Task PinnedMetadataRootCannotBeRedirectedByReplacementSymlink()
+    {
+        using var environment = TestEnvironment.Create();
+        var metadata = Path.Combine(environment.Root, "metadata");
+        var displaced = Path.Combine(environment.Root, "metadata-original");
+        var external = Path.Combine(environment.Root, "external");
+        Directory.CreateDirectory(metadata);
+        Directory.CreateDirectory(external);
+
+        var internalLock = Path.Combine(metadata, "index.lock");
+        var externalLock = Path.Combine(external, "unrelated.lock");
+        File.WriteAllText(internalLock, "inside");
+        File.WriteAllText(externalLock, "outside");
+
+        using var pinned = PinnedGitMetadataRoot.Open(metadata);
+        Directory.Move(metadata, displaced);
+        Directory.CreateSymbolicLink(metadata, external);
+
+        await pinned.CleanupLocksAsync(
+            () => Task.CompletedTask,
+            _ => Task.FromResult(false));
+
+        Assert.IsFalse(File.Exists(Path.Combine(displaced, "index.lock")));
+        Assert.IsTrue(File.Exists(externalLock));
+        Assert.AreEqual("outside", File.ReadAllText(externalLock));
+    }
+
+    [TestMethod]
     public void GitMetadataTreeEnumerationDoesNotFollowSymlinkDirectories()
     {
         using var environment = TestEnvironment.Create();
