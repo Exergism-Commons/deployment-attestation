@@ -877,6 +877,52 @@ runtime_process_binding() {
   bound_running_runtime_sha256 >/dev/null
 }
 
+runtime_source_binding() {
+  local pid pid_after
+  pid="$(service_main_pid)" || return 1
+  python3 - "$pid" "$EC_APP_DIR" <<'PY' || return 1
+import os
+import sys
+
+pid, app_dir = sys.argv[1:]
+expected_root = os.path.normpath(app_dir)
+expected_registry = os.path.join(expected_root, "resolver", "registry.json")
+
+try:
+    raw = open(f"/proc/{pid}/cmdline", "rb").read()
+except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+    raise SystemExit(1)
+
+parts = [os.fsdecode(part) for part in raw.split(b"\0") if part]
+if not parts:
+    raise SystemExit(1)
+
+def option_values(name):
+    values = []
+    index = 1
+    while index < len(parts):
+        arg = parts[index]
+        if arg == name:
+            if index + 1 >= len(parts):
+                raise SystemExit(1)
+            values.append(parts[index + 1])
+            index += 2
+            continue
+        prefix = name + "="
+        if arg.startswith(prefix):
+            values.append(arg[len(prefix):])
+        index += 1
+    return values
+
+roots = option_values("-root")
+registries = option_values("-registry")
+if roots != [expected_root] or registries != [expected_registry]:
+    raise SystemExit(1)
+PY
+  pid_after="$(service_main_pid)" || return 1
+  [[ "$pid_after" == "$pid" ]]
+}
+
 service_cgroup_has_processes() {
   local cgroup
   if ! cgroup="$(systemctl show "$EC_SERVICE_UNIT" -p ControlGroup --value 2>/dev/null)"; then
@@ -1000,8 +1046,10 @@ PY
 live_runtime_snapshot_sha256() {
   local pid_before pid_after digest
   pid_before="$(service_main_pid)" || return 1
+  runtime_source_binding || return 1
   artifact_write_fence || return 1
   digest="$(bound_running_runtime_sha256)" || return 1
+  runtime_source_binding || return 1
   pid_after="$(service_main_pid)" || return 1
   [[ "$pid_after" == "$pid_before" ]] || return 1
   printf '%s\n' "$digest"
