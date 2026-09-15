@@ -604,7 +604,6 @@ internal sealed class DeploymentAgent
         => transaction.Phase == PHASE_COMMITTED &&
            state.SourceCommit == transaction.NewSourceCommit &&
            state.BinarySha256 == transaction.NewBinarySha256 &&
-           transaction.NewReleaseManifestSha256 is not null &&
            state.ReleaseManifestSha256 == transaction.NewReleaseManifestSha256 &&
            state.ReleaseTag == configuredReleaseTag;
 
