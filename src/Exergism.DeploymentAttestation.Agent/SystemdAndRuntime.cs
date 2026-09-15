@@ -302,31 +302,53 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
             expectedRoot,
             RESOLVER_REGISTRY_RELATIVE_PATH);
 
-        return GetOptionValues(arguments, RESOLVER_ARG_ROOT)
-                   .SequenceEqual([expectedRoot], StringComparer.Ordinal) &&
-               GetOptionValues(arguments, RESOLVER_ARG_REGISTRY)
-                   .SequenceEqual([expectedRegistry], StringComparer.Ordinal);
+        return HasExactOption(
+                   arguments,
+                   RESOLVER_ARG_ROOT,
+                   expectedRoot) &&
+               HasExactOption(
+                   arguments,
+                   RESOLVER_ARG_REGISTRY,
+                   expectedRegistry);
     }
 
-    private static IEnumerable<string> GetOptionValues(
+    private static bool HasExactOption(
         IReadOnlyList<string> arguments,
-        string option)
+        string option,
+        string expectedValue)
     {
+        string? found = null;
+        var count = 0;
+
         for (var index = 1; index < arguments.Count; index++)
         {
             var argument = arguments[index];
+            string? value = null;
+
             if (argument == option)
             {
                 if (index + 1 >= arguments.Count)
-                    yield break;
-                yield return arguments[++index];
-                continue;
+                    return false;
+                value = arguments[++index];
+            }
+            else
+            {
+                var prefix = option + "=";
+                if (argument.StartsWith(prefix, StringComparison.Ordinal))
+                    value = argument[prefix.Length..];
             }
 
-            var prefix = option + "=";
-            if (argument.StartsWith(prefix, StringComparison.Ordinal))
-                yield return argument[prefix.Length..];
+            if (value is null)
+                continue;
+
+            count++;
+            if (count > 1)
+                return false;
+            found = value;
         }
+
+        return count == 1 &&
+               string.Equals(found, expectedValue, StringComparison.Ordinal);
     }
 
     private async Task<string> BoundRuntimeSha256Async(int pid)
