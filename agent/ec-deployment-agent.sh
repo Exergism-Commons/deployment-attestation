@@ -1716,7 +1716,7 @@ recover_transaction() {
 collect_checks() {
   local expected="$1" expected_binary="$2" deployed="$3" state_binary="$4"
   local systemd=false local_http=false public_https=true release_revision=false service_smoke=true artifact_fence=false runtime_process=false source_tree=false state_integrity=false runtime_digest=false runtime_present=false
-  local actual disk_actual final_actual
+  local actual disk_actual final_actual state_manifest state_tag
 
   # The smoke hook runs first and cannot leave descendants behind. Accept live
   # artifact evidence only from one stable service instance that both sees the
@@ -1748,7 +1748,13 @@ collect_checks() {
   disk_actual="$(sha256_file "$EC_APP_BIN" 2>/dev/null || true)"
   [[ "$actual" =~ ^[0-9a-f]{64}$ ]] && runtime_present=true
   if [[ "$(git -C "$EC_APP_DIR" rev-parse HEAD 2>/dev/null || true)" == "$deployed" ]] && source_tree_exact "$deployed"; then source_tree=true; fi
-  [[ "$runtime_process" == true && "$actual" == "$state_binary" && "$disk_actual" == "$state_binary" ]] && state_integrity=true
+  state_manifest="$(json_field "$CURRENT_STATE_FILE" release_manifest_sha256 2>/dev/null || true)"
+  state_tag="$(json_field "$CURRENT_STATE_FILE" release_tag 2>/dev/null || true)"
+  [[ "$runtime_process" == true \
+     && "$actual" == "$state_binary" \
+     && "$disk_actual" == "$state_binary" \
+     && "$state_manifest" == "$RELEASE_MANIFEST_SHA256" \
+     && "$state_tag" == "$EC_RELEASE_TAG" ]] && state_integrity=true
   [[ "$runtime_process" == true && "$actual" == "$expected_binary" && "$disk_actual" == "$expected_binary" ]] && runtime_digest=true
 
   # Close the observation window with a second live snapshot. If the service
