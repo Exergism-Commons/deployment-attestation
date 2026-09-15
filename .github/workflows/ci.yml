@@ -138,6 +138,9 @@ jobs:
           grep -Fq 'running_runtime_sha256()' agent/ec-deployment-agent.sh
           grep -Fq 'bound_running_runtime_sha256()' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_process_binding()' agent/ec-deployment-agent.sh
+          grep -Fq 'runtime_source_binding()' agent/ec-deployment-agent.sh
+          grep -Fq 'option_values("-root")' agent/ec-deployment-agent.sh
+          grep -Fq 'option_values("-registry")' agent/ec-deployment-agent.sh
           grep -Fq 'live_runtime_snapshot_sha256()' agent/ec-deployment-agent.sh
           grep -Fq 'os.open(f"/proc/{pid}/exe", os.O_RDONLY)' agent/ec-deployment-agent.sh
           grep -Fq '(live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino)' agent/ec-deployment-agent.sh
@@ -252,8 +255,10 @@ jobs:
           grep -Fq 'AGENT_COORDINATION_LOCK=' install/install-id-exergism.sh
           grep -Fq 'A direct deployment agent invocation is still running' install/install-id-exergism.sh
           grep -Fq '[[ "$unit" == *.timer ]]' install/install-id-exergism.sh
-          grep -Fq 'quiesce_target_for_recovery()' install/recover-id-exergism-install.sh
-          grep -Fq 'if [[ "$MODE" == "boot" ]] && unit_is_quiescent "$TARGET_UNIT"; then' install/recover-id-exergism-install.sh
+          grep -Fq 'quiesce_dependent_unit_for_recovery()' install/recover-id-exergism-install.sh
+          grep -Fq 'if [[ "$MODE" == "boot" ]] && unit_is_quiescent "$unit"; then' install/recover-id-exergism-install.sh
+          grep -Fq 'quiesce_dependent_unit_for_recovery "$AGENT_RUN_UNIT"' install/recover-id-exergism-install.sh
+          grep -Fq 'quiesce_dependent_unit_for_recovery "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'flock -n 9' install/install-id-exergism.sh
           grep -Fq 'INSTALL_PENDING_DIR=' install/install-id-exergism.sh
           grep -Fq 'INSTALL_VALIDATED_DIR=' install/install-id-exergism.sh
@@ -271,7 +276,11 @@ jobs:
           grep -Fq 'runtime is writable via' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'Production resolver changed PID during artifact-fence audit' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'verify_runtime_process_binding()' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'verify_source_process_binding()' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'option_values("-root")' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'option_values("-registry")' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'Production resolver MainPID is not executing the configured runtime object.' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'Production resolver MainPID is not using the configured source/registry paths.' install/verify-id-exergism-artifact-fence.sh
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/install-id-exergism.sh
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/recover-id-exergism-install.sh
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/finalize-id-exergism-recovery.sh
@@ -392,9 +401,10 @@ jobs:
           assert helper < recovery_unit < core_barrier < agent_interlock
 
           recovery = Path('install/recover-id-exergism-install.sh').read_text()
-          target_quiesce_helper = recovery.index('quiesce_target_for_recovery()')
-          preserve_boot_start = recovery.index('if [[ "$MODE" == "boot" ]] && unit_is_quiescent "$TARGET_UNIT"; then', target_quiesce_helper)
-          target_quiesce_call = recovery.index('quiesce_target_for_recovery || quiesce_failed=1', preserve_boot_start)
+          dependent_quiesce_helper = recovery.index('quiesce_dependent_unit_for_recovery()')
+          preserve_boot_start = recovery.index('if [[ "$MODE" == "boot" ]] && unit_is_quiescent "$unit"; then', dependent_quiesce_helper)
+          updater_quiesce_call = recovery.index('quiesce_dependent_unit_for_recovery "$AGENT_RUN_UNIT" || quiesce_failed=1', preserve_boot_start)
+          target_quiesce_call = recovery.index('quiesce_dependent_unit_for_recovery "$TARGET_UNIT" || quiesce_failed=1', updater_quiesce_call)
           hard_quiesce = recovery.index('if (( quiesce_failed != 0 )); then')
           first_restore = recovery.index('restore_artifact "$key"')
           validate = recovery.index('"$VALIDATOR" || restore_rc=1')
@@ -404,15 +414,17 @@ jobs:
           direct_quiesce = recovery.index('quiesce_unit "$TARGET_UNIT"', direct_fence)
           direct_restart = recovery.index('previously active resolver could not be restored healthy after direct recovery')
           timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
-          assert target_quiesce_helper < preserve_boot_start < target_quiesce_call < hard_quiesce
+          assert dependent_quiesce_helper < preserve_boot_start < updater_quiesce_call < target_quiesce_call < hard_quiesce
           assert hard_quiesce < first_restore
           assert validate < retire < direct_start < direct_fence < direct_quiesce < direct_restart < timer_restore
 
           agent = Path('agent/ec-deployment-agent.sh').read_text()
           assert agent.index('recover)') < agent.index('run|update)')
           live_snapshot = agent.index('live_runtime_snapshot_sha256()')
-          live_fence_agent = agent.index('artifact_write_fence || return 1', live_snapshot)
-          bound_digest = agent.index('digest="$(bound_running_runtime_sha256)"', live_snapshot)
+          source_binding_before = agent.index('runtime_source_binding || return 1', live_snapshot)
+          live_fence_agent = agent.index('artifact_write_fence || return 1', source_binding_before)
+          bound_digest = agent.index('digest="$(bound_running_runtime_sha256)"', live_fence_agent)
+          source_binding_after = agent.index('runtime_source_binding || return 1', bound_digest)
           post_start = agent.index('post_start_integrity()')
           post_start_first_live = agent.index('live_digest="$(live_runtime_snapshot_sha256)"', post_start)
           post_start_integrity = agent.index('artifact_integrity "$commit" "$binary" || return 1', post_start_first_live)
@@ -420,7 +432,7 @@ jobs:
           collect = agent.index('collect_checks()')
           collect_snapshot = agent.index('actual="$(live_runtime_snapshot_sha256', collect)
           collect_final_snapshot = agent.index('final_actual="$(live_runtime_snapshot_sha256', collect_snapshot)
-          assert live_snapshot < live_fence_agent < bound_digest
+          assert live_snapshot < source_binding_before < live_fence_agent < bound_digest < source_binding_after
           assert post_start < post_start_first_live < post_start_integrity < post_start_second_live
           assert collect < collect_snapshot < collect_final_snapshot
           global_lock = agent.index('if [[ "${EC_AGENT_COORDINATION_LOCK_HELD:-0}" != 1 ]] && ! flock -n 8; then')
