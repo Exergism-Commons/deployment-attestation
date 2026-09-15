@@ -4,6 +4,7 @@ set -Eeuo pipefail
 TARGET_UNIT="${EC_ID_TARGET_UNIT:-id-exergism.service}"
 APP_DIR="${EC_ID_APP_DIR:-/srv/id.exergism.org}"
 APP_BIN="${EC_ID_APP_BIN:-/usr/local/bin/idresolver}"
+REGISTRY="${EC_ID_REGISTRY:-${APP_DIR}/resolver/registry.json}"
 
 for command in systemctl nsenter python3; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -44,6 +45,54 @@ PY
 
 verify_runtime_process_binding "$pid" || {
   echo "Production resolver MainPID is not executing the configured runtime object." >&2
+  exit 1
+}
+
+verify_source_process_binding() {
+  local candidate_pid="$1"
+  python3 - "$candidate_pid" "$APP_DIR" "$REGISTRY" <<'PY'
+import os
+import sys
+
+pid, app_dir, registry = sys.argv[1:]
+expected_root = os.path.normpath(app_dir)
+expected_registry = os.path.normpath(registry)
+
+try:
+    raw = open(f"/proc/{pid}/cmdline", "rb").read()
+except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+    raise SystemExit(1)
+
+parts = [os.fsdecode(part) for part in raw.split(b"\0") if part]
+if not parts:
+    raise SystemExit(1)
+
+def option_values(name):
+    values = []
+    index = 1
+    while index < len(parts):
+        arg = parts[index]
+        if arg == name:
+            if index + 1 >= len(parts):
+                raise SystemExit(1)
+            values.append(parts[index + 1])
+            index += 2
+            continue
+        prefix = name + "="
+        if arg.startswith(prefix):
+            values.append(arg[len(prefix):])
+        index += 1
+    return values
+
+if option_values("-root") != [expected_root]:
+    raise SystemExit(1)
+if option_values("-registry") != [expected_registry]:
+    raise SystemExit(1)
+PY
+}
+
+verify_source_process_binding "$pid" || {
+  echo "Production resolver MainPID is not using the configured source/registry paths." >&2
   exit 1
 }
 
@@ -113,6 +162,10 @@ pid_after="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/nul
 }
 verify_runtime_process_binding "$pid_after" || {
   echo "Production resolver executable changed during artifact-fence audit." >&2
+  exit 1
+}
+verify_source_process_binding "$pid_after" || {
+  echo "Production resolver source/registry binding changed during artifact-fence audit." >&2
   exit 1
 }
 systemctl is-active --quiet "$TARGET_UNIT"
