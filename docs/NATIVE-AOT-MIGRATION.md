@@ -1,6 +1,6 @@
-# Native AOT agent migration
+# Native AOT agent
 
-This branch ports the host deployment/attestation agent from Bash to a .NET 10 Native AOT executable.
+The host deployment/attestation agent is a .NET 10 Native AOT executable. The former Bash agent has been retired to keep one security-critical state machine and one test surface.
 
 ## Boundary
 
@@ -20,7 +20,7 @@ The Native AOT executable owns the runtime state machine:
 - deterministic attestation construction and HMAC delivery;
 - independent durable self-health via `agent-health.json`, `health` and `status`.
 
-The installer/recovery scripts remain shell in this migration. They are separate host-generation transactions and can be migrated independently after the agent reaches behavioral parity.
+The installer/recovery/finalization scripts remain shell. They implement the host-generation transaction around installation and systemd recovery; they are not a second deployment-agent implementation.
 
 ## AOT constraints
 
@@ -35,35 +35,22 @@ JSON is parsed with `JsonDocument` and emitted with `Utf8JsonWriter`. The projec
 
 CI runs a dedicated MSTest unit-test project first, then publishes a real `linux-x64` Native AOT ELF and executes its dependency-free `self-test` command. Unit tests cover pure protocol/state logic and regression cases; `self-test` remains a native-binary smoke test rather than a substitute for unit testing.
 
-## Rollout rule
+## Installation contract
 
-Do not replace the installed `/usr/local/libexec/ec-deployment-agent` with the AOT binary merely because it compiles.
+The repository has one deployment-agent implementation: the Native AOT executable.
 
-The switch is allowed only after:
-
-1. managed build and AOT analyzers are clean;
-2. Native AOT publish succeeds;
-3. the published ELF passes self-tests;
-4. transaction/recovery parity is reviewed;
-5. deployment packaging has a durable way to obtain the architecture-specific binary;
-6. the stacked PR has no unresolved P1/P2 review findings.
-
-Until then, the Bash agent remains the production reference implementation.
-
-
-## Opt-in host installation
-
-The existing installer can stage a reviewed Native AOT binary without changing the default production path:
+A reviewed architecture-specific binary is mandatory:
 
 ```sh
 sudo EC_NATIVE_AGENT_BINARY=/path/to/ec-deployment-agent \
   ./install/install-id-exergism.sh
 ```
 
-The installer validates that the supplied path is a real executable file, installs it through the existing generation transaction, runs its dependency-free `self-test`, and keeps the same rollback artifact/journal semantics. If an installed agent already exists, pre-install transaction recovery prefers that installed generation so the implementation that created a journal is also the implementation that reconciles it.
+The installer requires the supplied path to be a real executable file, pins the exact candidate into root-owned process-private staging, validates its configuration, runs its dependency-free `self-test`, and installs that pinned object through the durable generation transaction.
 
-Without `EC_NATIVE_AGENT_BINARY`, the installer continues to install the Bash reference agent. This is deliberate until the Native AOT PR has parity review and a durable release/distribution channel.
+If an installed agent already exists, pre-install transaction recovery prefers that installed generation so the implementation that created an existing journal reconciles it. On first installation, the pinned Native AOT candidate performs the recovery check.
 
+There is intentionally no Bash fallback. This prevents security fixes, recovery semantics, quiescence checks, and attestation handling from diverging across two implementations.
 
 ## C# conventions
 
