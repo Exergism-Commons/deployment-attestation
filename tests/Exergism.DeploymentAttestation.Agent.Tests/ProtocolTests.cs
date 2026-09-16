@@ -25,6 +25,38 @@ public sealed class ProtocolTests
     """;
 
     [TestMethod]
+    public void AttestationReportsObservedDeployedCommit()
+    {
+        using var environment = TestEnvironment.Create();
+        var observed = new string('d', 40);
+        var expected = new string('a', 40);
+        var checks = new Dictionary<string, bool>(StringComparer.Ordinal)
+        {
+            [CHECK_SYSTEMD] = false
+        };
+
+        var attestation = Protocol.BuildAttestation(
+            environment.Config,
+            observed,
+            expected,
+            STATUS_UNHEALTHY,
+            checks,
+            new string('c', 64),
+            new string('e', 64),
+            new string('b', 64),
+            "2026-09-16T00:00:00Z",
+            "test");
+
+        using var document = System.Text.Json.JsonDocument.Parse(attestation);
+        Assert.AreEqual(
+            observed,
+            document.RootElement.GetProperty(JSON_DEPLOYED_COMMIT).GetString());
+        Assert.AreEqual(
+            expected,
+            document.RootElement.GetProperty(JSON_EXPECTED_COMMIT).GetString());
+    }
+
+    [TestMethod]
     public void ManifestParsesExpectedArchitecture()
     {
         var snapshot = Protocol.ParseReleaseManifest(
