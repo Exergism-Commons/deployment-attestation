@@ -532,7 +532,7 @@ internal sealed class DeploymentAgent
             [CHECK_SYSTEMD] = false,
             [CHECK_LOCAL_HTTP] = false,
             [CHECK_PUBLIC_HTTPS] = !_config.CheckPublic,
-            [CHECK_RELEASE_REVISION] = state.SourceCommit == release.SourceCommit,
+            [CHECK_RELEASE_REVISION] = false,
             [CHECK_SERVICE_SMOKE] = string.IsNullOrEmpty(_config.SmokeScript),
             [CHECK_ARTIFACT_FENCE] = false,
             [CHECK_RUNTIME_PROCESS] = false,
@@ -573,6 +573,12 @@ internal sealed class DeploymentAgent
         try
         {
             observedSourceCommit = await _git.HeadAsync();
+            if (IsCommit(observedSourceCommit))
+            {
+                checks[CHECK_RELEASE_REVISION] =
+                    observedSourceCommit == release.SourceCommit;
+            }
+
             if (IsCommit(observedSourceCommit) && observedSourceCommit == state.SourceCommit)
             {
                 await _git.VerifySourceTreeExactAsync(state.SourceCommit);
@@ -627,13 +633,20 @@ internal sealed class DeploymentAgent
                         finalObservedSourceCommit,
                         StringComparison.Ordinal))
                     checks[CHECK_SOURCE_TREE] = false;
+
                 observedSourceCommit = finalObservedSourceCommit;
+                checks[CHECK_RELEASE_REVISION] =
+                    observedSourceCommit == release.SourceCommit;
+                if (observedSourceCommit != state.SourceCommit)
+                    checks[CHECK_STATE_INTEGRITY] = false;
             }
         }
         catch
         {
             observedSourceCommit = null;
+            checks[CHECK_RELEASE_REVISION] = false;
             checks[CHECK_SOURCE_TREE] = false;
+            checks[CHECK_STATE_INTEGRITY] = false;
         }
 
         return new CheckSnapshot(observedSourceCommit, actual, checks);
