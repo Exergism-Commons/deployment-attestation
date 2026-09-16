@@ -479,6 +479,40 @@ public sealed class SecurityAndRegressionTests
     }
 
     [TestMethod]
+    public void GitMetadataFsyncRejectsMutationAfterSnapshot()
+    {
+        using var environment = TestEnvironment.Create();
+        var metadata = Path.Combine(environment.Root, "metadata");
+        Directory.CreateDirectory(metadata);
+        var head = Path.Combine(metadata, "HEAD");
+        File.WriteAllText(head, "ref: refs/heads/main\n");
+
+        var snapshot = GitMetadataDurability.Capture(metadata);
+        File.WriteAllText(head, "ref: refs/heads/other\n");
+
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataDurability.Fsync(metadata, snapshot));
+    }
+
+    [TestMethod]
+    public void GitMetadataFsyncRejectsRestoredBytesWithChangedMetadata()
+    {
+        using var environment = TestEnvironment.Create();
+        var metadata = Path.Combine(environment.Root, "metadata");
+        Directory.CreateDirectory(metadata);
+        var head = Path.Combine(metadata, "HEAD");
+        const string EXPECTED = "ref: refs/heads/main\n";
+        File.WriteAllText(head, EXPECTED);
+
+        var snapshot = GitMetadataDurability.Capture(metadata);
+        File.WriteAllText(head, "ref: refs/heads/evil\n");
+        File.WriteAllText(head, EXPECTED);
+
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataDurability.Fsync(metadata, snapshot));
+    }
+
+    [TestMethod]
     public void MetadataFsyncRejectsSymlink()
     {
         using var environment = TestEnvironment.Create();
