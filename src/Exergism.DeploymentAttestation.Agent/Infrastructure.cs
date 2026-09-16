@@ -200,7 +200,10 @@ internal static class Durability
     private const int O_DIRECTORY = 0x10000;
     private const int O_NOFOLLOW = 0x20000;
     private const int O_CLOEXEC = 0x80000;
+    private const int AT_FDCWD = -100;
+    private const int AT_SYMLINK_NOFOLLOW = 0x100;
     private const int AT_EMPTY_PATH = 0x1000;
+    private const int ERRNO_NO_ENTRY = 2;
     private const uint STATX_TYPE = 0x00000001;
     private const uint STATX_MODE = 0x00000002;
     private const uint STATX_UID = 0x00000008;
@@ -215,6 +218,31 @@ internal static class Durability
     private const ushort S_IFMT = 0xF000;
     private const ushort S_IFDIR = 0x4000;
     private const ushort S_IFREG = 0x8000;
+
+    public static bool PathExistsNoFollow(string path)
+    {
+        if (!Path.IsPathFullyQualified(path))
+            throw new AgentException($"Path must be absolute: {path}");
+
+        path = Path.GetFullPath(path);
+        if (Native.statx(
+                AT_FDCWD,
+                path,
+                AT_SYMLINK_NOFOLLOW,
+                STATX_TYPE,
+                out var stat) == 0)
+        {
+            if ((stat.Mask & STATX_TYPE) != STATX_TYPE)
+                throw new AgentException($"statx omitted path type for {path}");
+            return true;
+        }
+
+        var error = Marshal.GetLastPInvokeError();
+        if (error == ERRNO_NO_ENTRY)
+            return false;
+
+        throw new AgentException($"Could not inspect path without following final symlink: {path}; errno={error}");
+    }
 
     public static string ReadTrustedConfigText(string path)
     {
