@@ -52,9 +52,9 @@ static async Task<int> RunAsync(string[] args)
         foreach (var phase in new[] { PHASE_PENDING, PHASE_VALIDATED, PHASE_RECOVERING, PHASE_RECOVERED })
         {
             var path = Path.Combine(config.InstallTransactionRoot, $"{config.Service}.{phase}");
-            if (Directory.Exists(path))
+            if (Durability.PathExistsNoFollow(path))
                 throw new AgentException(
-                    $"Installer transaction phase '{phase}' is still actionable; run installer recovery before deployment-agent work");
+                    $"Installer transaction phase '{phase}' is still actionable or malformed; run installer recovery before deployment-agent work");
         }
 
         healthStore = new AgentHealthStore(config);
