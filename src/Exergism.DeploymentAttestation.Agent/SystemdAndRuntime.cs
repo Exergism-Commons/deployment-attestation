@@ -324,8 +324,12 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
         {
             var argument = arguments[index];
             string? value = null;
+            var longOption = "-" + option;
 
-            if (argument == option)
+            if (argument == "--")
+                break;
+
+            if (argument == option || argument == longOption)
             {
                 if (index + 1 >= arguments.Count)
                     return false;
@@ -334,8 +338,11 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
             else
             {
                 var prefix = option + "=";
+                var longPrefix = longOption + "=";
                 if (argument.StartsWith(prefix, StringComparison.Ordinal))
                     value = argument[prefix.Length..];
+                else if (argument.StartsWith(longPrefix, StringComparison.Ordinal))
+                    value = argument[longPrefix.Length..];
             }
 
             if (value is null)
