@@ -48,7 +48,7 @@ sudo EC_NATIVE_AGENT_BINARY=/path/to/ec-deployment-agent \
 
 The installer requires the supplied path to be a real executable file, pins the exact candidate into root-owned process-private staging, validates its configuration, runs its dependency-free `self-test`, and installs that pinned object through the durable generation transaction.
 
-If an installed agent already exists, pre-install transaction recovery prefers that installed generation so the implementation that created an existing journal reconciles it. On first installation, the pinned Native AOT candidate performs the recovery check.
+Pre-install transaction recovery is always executed by the already-pinned Native AOT candidate. Supported historical journal formats are migrated/reconciled there; unsupported formats fail closed. The installer does not execute a legacy agent during migration.
 
 There is intentionally no Bash fallback. This prevents security fixes, recovery semantics, quiescence checks, and attestation handling from diverging across two implementations.
 
