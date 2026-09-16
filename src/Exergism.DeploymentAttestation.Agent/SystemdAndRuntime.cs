@@ -19,6 +19,20 @@ internal static class ServiceQuiescence
            && activeState is SYSTEMD_STATE_INACTIVE or SYSTEMD_STATE_FAILED
            && mainPid == "0"
            && (!cgroupExists || !cgroupHasProcesses);
+
+    internal static bool ResampledSnapshotRemainsQuiescent(
+        string initialControlGroup,
+        string resampledControlGroup,
+        string loadState,
+        string activeState,
+        string mainPid)
+        => string.Equals(initialControlGroup, resampledControlGroup, StringComparison.Ordinal)
+           && IsQuiescentSnapshot(
+               loadState,
+               activeState,
+               mainPid,
+               cgroupExists: false,
+               cgroupHasProcesses: false);
 }
 
 internal static class SmokeScriptValidation
@@ -129,11 +143,11 @@ internal sealed class SystemdController(AgentConfig config)
             return false;
 
         if (string.IsNullOrWhiteSpace(controlGroup))
-            return true;
+            return await ResampleQuiescentTerminalStateAsync(controlGroup);
 
         var root = Path.Combine("/sys/fs/cgroup", controlGroup.TrimStart('/'));
         if (!Directory.Exists(root))
-            return true;
+            return await ResampleQuiescentTerminalStateAsync(controlGroup);
 
         try
         {
@@ -146,20 +160,38 @@ internal sealed class SystemdController(AgentConfig config)
         catch (DirectoryNotFoundException)
         {
             // A nested cgroup can disappear while a sibling still contains processes.
-            // Accept the race only when the sampled service cgroup root itself is gone.
-            return ServiceQuiescence.TraversalFailureIsQuiescent(Directory.Exists(root));
+            // Accept the traversal race only when the sampled service cgroup root itself
+            // is gone, then resample systemd terminal state before declaring quiescence.
+            if (!ServiceQuiescence.TraversalFailureIsQuiescent(Directory.Exists(root)))
+                return false;
         }
         catch
         {
             return false;
         }
 
-        return ServiceQuiescence.IsQuiescentSnapshot(
-            loadState,
-            activeState,
-            mainPid,
-            cgroupExists: true,
-            cgroupHasProcesses: false);
+        return await ResampleQuiescentTerminalStateAsync(controlGroup);
+    }
+
+    private async Task<bool> ResampleQuiescentTerminalStateAsync(string initialControlGroup)
+    {
+        try
+        {
+            var loadState = await ShowAsync(SYSTEMD_LOAD_STATE);
+            var activeState = await ShowAsync(SYSTEMD_ACTIVE_STATE);
+            var mainPid = await ShowAsync(SYSTEMD_MAIN_PID);
+            var controlGroup = await ShowAsync(SYSTEMD_CONTROL_GROUP);
+            return ServiceQuiescence.ResampledSnapshotRemainsQuiescent(
+                initialControlGroup,
+                controlGroup,
+                loadState,
+                activeState,
+                mainPid);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public async Task StopQuiescentAsync()
