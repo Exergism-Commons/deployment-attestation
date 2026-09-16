@@ -498,9 +498,18 @@ internal sealed class DeploymentAgent
         var observedAt = DateTimeOffset.UtcNow.ToString(
             RFC3339_UTC_FORMAT,
             System.Globalization.CultureInfo.InvariantCulture);
+        if (snapshot.ObservedSourceCommit is null)
+        {
+            Warn("Could not determine the checkout's observed HEAD for attestation");
+            _health.RecordRemoteAttestation(
+                delivered: false,
+                AttestationReceiverIdentity.FromConfiguredEndpoint(_config.AttestationEndpoint));
+            return AttestationResult.FAILED;
+        }
+
         var body = Protocol.BuildAttestation(
             _config,
-            state.SourceCommit,
+            snapshot.ObservedSourceCommit,
             release.SourceCommit,
             status,
             snapshot.Checks,
@@ -560,15 +569,24 @@ internal sealed class DeploymentAgent
                 "Runtime binary").Snapshot.Sha256);
         checks[CHECK_RUNTIME_PRESENT] = IsDigest(actual);
 
+        string? observedSourceCommit = null;
         try
         {
-            if (await _git.HeadAsync() == state.SourceCommit)
+            observedSourceCommit = await _git.HeadAsync();
+            if (IsCommit(observedSourceCommit) && observedSourceCommit == state.SourceCommit)
             {
                 await _git.VerifySourceTreeExactAsync(state.SourceCommit);
                 checks[CHECK_SOURCE_TREE] = true;
             }
+            else if (!IsCommit(observedSourceCommit))
+            {
+                observedSourceCommit = null;
+            }
         }
-        catch { }
+        catch
+        {
+            observedSourceCommit = null;
+        }
 
         checks[CHECK_STATE_INTEGRITY] =
             checks[CHECK_RUNTIME_PROCESS] &&
@@ -594,7 +612,31 @@ internal sealed class DeploymentAgent
             }
         }
 
-        return new CheckSnapshot(actual, checks);
+        try
+        {
+            var finalObservedSourceCommit = await _git.HeadAsync();
+            if (!IsCommit(finalObservedSourceCommit))
+            {
+                observedSourceCommit = null;
+                checks[CHECK_SOURCE_TREE] = false;
+            }
+            else
+            {
+                if (!string.Equals(
+                        observedSourceCommit,
+                        finalObservedSourceCommit,
+                        StringComparison.Ordinal))
+                    checks[CHECK_SOURCE_TREE] = false;
+                observedSourceCommit = finalObservedSourceCommit;
+            }
+        }
+        catch
+        {
+            observedSourceCommit = null;
+            checks[CHECK_SOURCE_TREE] = false;
+        }
+
+        return new CheckSnapshot(observedSourceCommit, actual, checks);
     }
 
     internal static bool CommittedTransactionMatchesState(
@@ -875,6 +917,9 @@ internal sealed class DeploymentAgent
         return child == parent || child.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
+    private static bool IsCommit(string? value)
+        => value is { Length: 40 } && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
     private static bool IsDigest(string? value)
         => value is { Length: 64 } && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
 
@@ -893,7 +938,10 @@ internal sealed class DeploymentAgent
     private static void Log(string message) => Console.WriteLine($"\n==> {message}");
     private static void Warn(string message) => Console.Error.WriteLine($"WARN: {message}");
 
-    private sealed record CheckSnapshot(string? RuntimeSha256, Dictionary<string, bool> Checks);
+    private sealed record CheckSnapshot(
+        string? ObservedSourceCommit,
+        string? RuntimeSha256,
+        Dictionary<string, bool> Checks);
 }
 
 internal sealed class TempDirectory : IDisposable
