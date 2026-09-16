@@ -492,14 +492,10 @@ fi
 
 # Reconcile the updater's own durable transaction before measuring target state.
 if [[ -r "$ENV_FILE" ]]; then
-  # Prefer the installed generation so a transaction is reconciled by the agent
-  # that created it. On a first Native AOT installation there is no installed
-  # generation, so the already-pinned candidate performs the no-op/compatible
-  # recovery check.
+  # Reconcile any supported historical updater journal with the already-pinned
+  # Native AOT candidate. The installer never executes a legacy agent as part of
+  # migration; unsupported journal formats fail closed.
   recovery_agent="$AGENT_INSTALL_SOURCE"
-  if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then
-    recovery_agent="$AGENT"
-  fi
   if ! EC_AGENT_COORDINATION_LOCK_HELD=1 EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover; then
     pretransaction_restore_timer=0
     echo "Deployment updater transaction could not be recovered; leaving updater/timer quiesced." >&2
