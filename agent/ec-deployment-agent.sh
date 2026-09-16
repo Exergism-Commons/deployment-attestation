@@ -899,23 +899,30 @@ if not parts:
 
 def option_values(name):
     values = []
+    spellings = (f"-{name}", f"--{name}")
+    prefixes = tuple(f"{spelling}=" for spelling in spellings)
     index = 1
     while index < len(parts):
         arg = parts[index]
-        if arg == name:
+        if arg == "--":
+            break
+        if arg in spellings:
             if index + 1 >= len(parts):
                 raise SystemExit(1)
             values.append(parts[index + 1])
             index += 2
             continue
-        prefix = name + "="
-        if arg.startswith(prefix):
-            values.append(arg[len(prefix):])
+        matched = False
+        for prefix in prefixes:
+            if arg.startswith(prefix):
+                values.append(arg[len(prefix):])
+                matched = True
+                break
         index += 1
     return values
 
-roots = option_values("-root")
-registries = option_values("-registry")
+roots = option_values("root")
+registries = option_values("registry")
 if roots != [expected_root] or registries != [expected_registry]:
     raise SystemExit(1)
 PY
