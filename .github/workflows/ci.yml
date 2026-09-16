@@ -158,8 +158,7 @@ jobs:
           grep -Fq 'install -o root -g root -m 0600' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config' install/install-id-exergism.sh
           grep -Fq 'recovery_agent="$AGENT_INSTALL_SOURCE"' install/install-id-exergism.sh
-          grep -Fq 'if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then' install/install-id-exergism.sh
-          grep -Fq 'recovery_agent="$AGENT"' install/install-id-exergism.sh
+          ! grep -Fq 'recovery_agent="$AGENT"' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
           grep -Fq 'install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"' install/install-id-exergism.sh
           grep -Fq '"$AGENT_INSTALL_SOURCE" self-test' install/install-id-exergism.sh
@@ -363,11 +362,10 @@ jobs:
           updater_stop = text.index('stop_and_wait_quiescent "$AGENT_RUN_UNIT"', timer_stop)
           agent_lock = text.index('if ! flock -n 8; then', updater_stop)
           recovery_candidate = text.index('recovery_agent="$AGENT_INSTALL_SOURCE"', agent_lock)
-          recovery_installed = text.index('recovery_agent="$AGENT"', recovery_candidate)
-          updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover', recovery_installed)
+          updater_recover = text.index('EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover', recovery_candidate)
           target_baseline = text.index('target_was_active="$(capture_active_baseline "$TARGET_UNIT")"')
           journal_publish = text.index('create_install_transaction')
-          assert timer_baseline < pretxn_guard < timer_stop < updater_stop < agent_lock < recovery_candidate < recovery_installed < updater_recover < target_baseline < journal_publish
+          assert timer_baseline < pretxn_guard < timer_stop < updater_stop < agent_lock < recovery_candidate < updater_recover < target_baseline < journal_publish
 
           select_recovered = recovery.index('recovered) path="$INSTALL_RECOVERED_DIR" ;;')
           recovered_completion = recovery.index('if [[ "$TXN_PHASE" == "recovered" ]]; then')
