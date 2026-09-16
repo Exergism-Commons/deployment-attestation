@@ -288,7 +288,8 @@ if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
 
   native_preflight_config="$ENV_FILE"
   if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
-    native_preflight_config="$ROOT/examples/id.exergism.org.env.example"
+    native_preflight_config="$NATIVE_AGENT_STAGE/preflight.env"
+    install -o root -g root -m 0600       "$ROOT/examples/id.exergism.org.env.example"       "$native_preflight_config"
   fi
   EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config
   "$AGENT_INSTALL_SOURCE" self-test
