@@ -32,6 +32,13 @@ public sealed class CodexRegressionTests
                 $"{RESOLVER_ARG_REGISTRY}={registry}"),
             APP_DIR));
 
+        Assert.IsTrue(RuntimeInspector.CommandLineUsesConfiguredSource(
+            CommandLine(
+                "/usr/local/bin/idresolver",
+                $"--root={APP_DIR}",
+                "--registry", registry),
+            APP_DIR));
+
         Assert.IsFalse(RuntimeInspector.CommandLineUsesConfiguredSource(
             CommandLine(
                 "/usr/local/bin/idresolver",
@@ -44,6 +51,14 @@ public sealed class CodexRegressionTests
                 "/usr/local/bin/idresolver",
                 RESOLVER_ARG_ROOT, APP_DIR,
                 RESOLVER_ARG_ROOT, APP_DIR,
+                RESOLVER_ARG_REGISTRY, registry),
+            APP_DIR));
+
+        Assert.IsFalse(RuntimeInspector.CommandLineUsesConfiguredSource(
+            CommandLine(
+                "/usr/local/bin/idresolver",
+                RESOLVER_ARG_ROOT, APP_DIR,
+                $"--root=/srv/unrelated",
                 RESOLVER_ARG_REGISTRY, registry),
             APP_DIR));
 
@@ -68,6 +83,50 @@ public sealed class CodexRegressionTests
     public void ExistingCgroupWithProcessesIsNotQuiescent()
         => Assert.IsFalse(ServiceQuiescence.IsQuiescentSnapshot(
             SYSTEMD_STATE_LOADED, SYSTEMD_STATE_INACTIVE, "0", true, true));
+
+    [TestMethod]
+    public void ResampledQuiescenceRejectsRestartedOrMovedService()
+    {
+        const string CONTROL_GROUP = "/system.slice/id-exergism.service";
+
+        Assert.IsTrue(ServiceQuiescence.ResampledSnapshotRemainsQuiescent(
+            CONTROL_GROUP,
+            CONTROL_GROUP,
+            SYSTEMD_STATE_LOADED,
+            SYSTEMD_STATE_INACTIVE,
+            "0"));
+
+        Assert.IsFalse(ServiceQuiescence.ResampledSnapshotRemainsQuiescent(
+            CONTROL_GROUP,
+            CONTROL_GROUP,
+            SYSTEMD_STATE_LOADED,
+            SYSTEMD_STATE_ACTIVE,
+            "1234"));
+
+        Assert.IsFalse(ServiceQuiescence.ResampledSnapshotRemainsQuiescent(
+            CONTROL_GROUP,
+            "/system.slice/restarted.service",
+            SYSTEMD_STATE_LOADED,
+            SYSTEMD_STATE_INACTIVE,
+            "0"));
+    }
+
+    [TestMethod]
+    public void PathExistsNoFollowDetectsFilesAndDanglingSymlinks()
+    {
+        using var environment = TestEnvironment.Create();
+        var regular = Path.Combine(environment.Root, "phase-file");
+        var dangling = Path.Combine(environment.Root, "phase-link");
+        var missingTarget = Path.Combine(environment.Root, "missing-target");
+        var absent = Path.Combine(environment.Root, "absent");
+
+        File.WriteAllText(regular, "x");
+        File.CreateSymbolicLink(dangling, missingTarget);
+
+        Assert.IsTrue(Durability.PathExistsNoFollow(regular));
+        Assert.IsTrue(Durability.PathExistsNoFollow(dangling));
+        Assert.IsFalse(Durability.PathExistsNoFollow(absent));
+    }
 
     [TestMethod]
     public void NestedCgroupTraversalFailureFailsClosedWhileRootStillExists()
