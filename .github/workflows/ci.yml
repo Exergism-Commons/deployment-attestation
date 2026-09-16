@@ -187,6 +187,12 @@ jobs:
           grep -Fq -- '--max-time "$EC_DOWNLOAD_TIMEOUT"' agent/ec-deployment-agent.sh
           grep -Fq 'EC_RELEASE_MANIFEST_VALIDATOR=' agent/ec-deployment-agent.sh
           grep -Fq 'EC_RELEASE_MANIFEST_SCHEMA=' agent/ec-deployment-agent.sh
+          grep -Fq 'EC_HMAC_SECRET_FILE must be owned by root' agent/ec-deployment-agent.sh
+          grep -Fq 'EC_HMAC_SECRET_FILE must not be writable by group or others' agent/ec-deployment-agent.sh
+          grep -Fq 'getattr(os, "O_NOFOLLOW", 0)' agent/ec-deployment-agent.sh
+          grep -Fq 'before.st_uid != 0' agent/ec-deployment-agent.sh
+          grep -Fq 'stat.S_IMODE(before.st_mode) & 0o022' agent/ec-deployment-agent.sh
+          grep -Fq 'HMAC secret failed trusted-file validation' agent/ec-deployment-agent.sh
           grep -Fq '"$EC_RELEASE_MANIFEST_VALIDATOR" "$EC_RELEASE_MANIFEST_SCHEMA" "$1"' agent/ec-deployment-agent.sh
           grep -Fq 'unsupported schema keyword(s)' agent/validate-release-manifest.py
           grep -Fq 'additional property forbidden' agent/validate-release-manifest.py
@@ -216,6 +222,9 @@ jobs:
           grep -Fq -- '--config-env=' agent/ec-deployment-agent.sh
           grep -Fq 'stop_service_quiescent()' agent/ec-deployment-agent.sh
           grep -Fq 'service_cgroup_has_processes()' agent/ec-deployment-agent.sh
+          grep -Fq 'service_cgroup_has_processes "$control_group"' agent/ec-deployment-agent.sh
+          grep -Fq 'control_group_after="$(systemctl show "$EC_SERVICE_UNIT" -p ControlGroup --value' agent/ec-deployment-agent.sh
+          grep -Fq '[[ "$control_group_after" == "$control_group" ]]' agent/ec-deployment-agent.sh
           grep -Fq 'open("/proc/self/mountinfo"' agent/ec-deployment-agent.sh
           grep -Fq 'contains(app_dir, target)' agent/ec-deployment-agent.sh
           grep -Fq 'pid_after="$(service_main_pid)"' agent/ec-deployment-agent.sh
