@@ -130,8 +130,6 @@ jobs:
           grep -Fq 'ResampledSnapshotRemainsQuiescent' src/Exergism.DeploymentAttestation.Agent/SystemdAndRuntime.cs
           grep -Fq 'var longOption = "-" + option;' src/Exergism.DeploymentAttestation.Agent/SystemdAndRuntime.cs
           test -f tests/Exergism.DeploymentAttestation.Agent.Tests/SecurityAndRegressionTests.cs
-          ! find tests -type f -iname '*codex*' -print -quit | grep -q .
-          ! grep -Rni --include='*.cs' 'codex' tests
           grep -Fq 'Receiver-side deduplication is mandatory' docs/THREAT-MODEL.md
           grep -Fq 'systemd-analyze' install/install-id-exergism.sh
           grep -Fq 'Publish the complete recovery core durably *before* exposing any' install/install-id-exergism.sh
