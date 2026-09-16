@@ -20,6 +20,96 @@ internal sealed record RepositoryDurabilitySnapshot(
     Dictionary<string, FileSnapshot> Files,
     Dictionary<string, DirectorySnapshot> Directories);
 
+internal sealed record GitMetadataDurabilitySnapshot(
+    Dictionary<string, FileSnapshot> Files,
+    Dictionary<string, DirectorySnapshot> Directories);
+
+internal static class GitMetadataDurability
+{
+    internal static GitMetadataDurabilitySnapshot Capture(string root)
+    {
+        root = Path.GetFullPath(root);
+        var directories = new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal)
+        {
+            [root] = Durability.ReadDirectorySnapshotNoFollow(root, root)
+        };
+        foreach (var directory in GitMetadataEnumeration.EnumerateDirectories(root).Order(StringComparer.Ordinal))
+        {
+            var fullDirectory = Path.GetFullPath(directory);
+            directories[fullDirectory] =
+                Durability.ReadDirectorySnapshotNoFollow(fullDirectory, fullDirectory);
+        }
+
+        var files = new Dictionary<string, FileSnapshot>(StringComparer.Ordinal);
+        foreach (var file in GitMetadataEnumeration.EnumerateFiles(root).Order(StringComparer.Ordinal))
+        {
+            var fullFile = Path.GetFullPath(file);
+            files[fullFile] =
+                Durability.ReadRegularFileNoFollow(fullFile, fullFile).Snapshot;
+        }
+
+        return new GitMetadataDurabilitySnapshot(files, directories);
+    }
+
+    internal static void EnsureUnchanged(
+        GitMetadataDurabilitySnapshot expected,
+        GitMetadataDurabilitySnapshot actual)
+    {
+        EnsureMapUnchanged(expected.Files, actual.Files, "Git metadata file");
+        EnsureMapUnchanged(expected.Directories, actual.Directories, "Git metadata directory");
+    }
+
+    internal static void Fsync(string root, GitMetadataDurabilitySnapshot expected)
+    {
+        root = Path.GetFullPath(root);
+
+        // Bind the durability barrier to a stable metadata snapshot before the
+        // first fsync. A writer that changes and restores bytes still changes
+        // ctime and therefore cannot silently substitute an intermediate state.
+        EnsureUnchanged(expected, Capture(root));
+
+        foreach (var pair in expected.Files.OrderBy(x => x.Key, StringComparer.Ordinal))
+            Durability.FsyncRegularFileNoFollow(pair.Key, pair.Key, pair.Value);
+
+        foreach (var pair in expected.Directories
+                     .Where(x => !string.Equals(x.Key, root, StringComparison.Ordinal))
+                     .OrderByDescending(x => x.Key.Count(c => c == Path.DirectorySeparatorChar))
+                     .ThenBy(x => x.Key, StringComparer.Ordinal))
+        {
+            Durability.FsyncDirectorySnapshotNoFollow(pair.Key, pair.Key, pair.Value);
+        }
+
+        if (!expected.Directories.TryGetValue(root, out var rootSnapshot))
+            throw new AgentException($"Git metadata root was not snapshot-verified: {root}");
+        Durability.FsyncDirectorySnapshotNoFollow(root, root, rootSnapshot);
+
+        // Re-read the tree after all fsync calls so a concurrent writer cannot
+        // restore expected bytes after an intermediate state was made durable.
+        EnsureUnchanged(expected, Capture(root));
+
+        var parent = Path.GetDirectoryName(root)
+            ?? throw new AgentException($"Git metadata root has no parent: {root}");
+        Durability.FsyncRequiredDirectory(parent, parent);
+    }
+
+    private static void EnsureMapUnchanged<T>(
+        IReadOnlyDictionary<string, T> expected,
+        IReadOnlyDictionary<string, T> actual,
+        string kind)
+        where T : notnull
+    {
+        if (expected.Count != actual.Count)
+            throw new AgentException($"{kind} set changed during durability barrier");
+
+        foreach (var pair in expected)
+        {
+            if (!actual.TryGetValue(pair.Key, out var snapshot) ||
+                !EqualityComparer<T>.Default.Equals(pair.Value, snapshot))
+                throw new AgentException($"{kind} changed during durability barrier: {pair.Key}");
+        }
+    }
+}
+
 internal enum GitMetadataTraversalMode
 {
     StrictTargetCommit,
@@ -779,20 +869,8 @@ internal sealed class GitRepository(AgentConfig config)
 
     private static void FsyncDirectoryTree(string root)
     {
-        if (!Directory.Exists(root))
-            throw new AgentException($"Git metadata disappeared: {root}");
-
-        foreach (var file in GitMetadataEnumeration.EnumerateFiles(root))
-        {
-            Durability.FsyncRegularFileNoFollow(file, file);
-        }
-        foreach (var dir in GitMetadataEnumeration.EnumerateDirectories(root)
-                     .OrderByDescending(x => x.Count(c => c == Path.DirectorySeparatorChar)))
-            Durability.FsyncRequiredDirectory(dir, dir);
-        Durability.FsyncRequiredDirectory(root, root);
-        var parent = Path.GetDirectoryName(root)
-            ?? throw new AgentException($"Git metadata root has no parent: {root}");
-        Durability.FsyncRequiredDirectory(parent, parent);
+        var snapshot = GitMetadataDurability.Capture(root);
+        GitMetadataDurability.Fsync(root, snapshot);
     }
 
     private async Task<List<string>> GitMetadataRootsAsync(string repository)
