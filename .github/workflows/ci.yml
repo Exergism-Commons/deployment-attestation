@@ -139,8 +139,9 @@ jobs:
           grep -Fq 'bound_running_runtime_sha256()' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_process_binding()' agent/ec-deployment-agent.sh
           grep -Fq 'runtime_source_binding()' agent/ec-deployment-agent.sh
-          grep -Fq 'option_values("-root")' agent/ec-deployment-agent.sh
-          grep -Fq 'option_values("-registry")' agent/ec-deployment-agent.sh
+          grep -Fq 'spellings = (f"-{name}", f"--{name}")' agent/ec-deployment-agent.sh
+          grep -Fq 'roots = option_values("root")' agent/ec-deployment-agent.sh
+          grep -Fq 'registries = option_values("registry")' agent/ec-deployment-agent.sh
           grep -Fq 'live_runtime_snapshot_sha256()' agent/ec-deployment-agent.sh
           grep -Fq 'os.open(f"/proc/{pid}/exe", os.O_RDONLY)' agent/ec-deployment-agent.sh
           grep -Fq '(live.st_dev, live.st_ino) != (configured.st_dev, configured.st_ino)' agent/ec-deployment-agent.sh
@@ -223,6 +224,12 @@ jobs:
           grep -Fq 'ACTION="${1:-run}"' agent/ec-deployment-agent.sh
           grep -Fq 'recover)' agent/ec-deployment-agent.sh
           grep -Fq 'AGENT_COORDINATION_LOCK=' agent/ec-deployment-agent.sh
+          grep -Fq 'Durability.PathExistsNoFollow(path)' src/Exergism.DeploymentAttestation.Agent/Program.cs
+          grep -Fq 'AT_SYMLINK_NOFOLLOW' src/Exergism.DeploymentAttestation.Agent/Infrastructure.cs
+          grep -Fq 'PathExistsNoFollow' src/Exergism.DeploymentAttestation.Agent/Infrastructure.cs
+          grep -Fq 'ResampleQuiescentTerminalStateAsync' src/Exergism.DeploymentAttestation.Agent/SystemdAndRuntime.cs
+          grep -Fq 'ResampledSnapshotRemainsQuiescent' src/Exergism.DeploymentAttestation.Agent/SystemdAndRuntime.cs
+          grep -Fq 'var longOption = "-" + option;' src/Exergism.DeploymentAttestation.Agent/SystemdAndRuntime.cs
           grep -Fq 'INSTALL_TRANSACTION_ROOT=' agent/ec-deployment-agent.sh
           grep -Fq 'for phase in pending validated recovering recovered' agent/ec-deployment-agent.sh
           grep -Fq "Installer transaction phase '" agent/ec-deployment-agent.sh
@@ -251,6 +258,8 @@ jobs:
           grep -Fq 'AGENT_INSTALL_SOURCE="$AGENT_SOURCE"' install/install-id-exergism.sh
           grep -Fq 'NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"' install/install-id-exergism.sh
           grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"' install/install-id-exergism.sh
+          grep -Fq 'native_preflight_config="$NATIVE_AGENT_STAGE/preflight.env"' install/install-id-exergism.sh
+          grep -Fq 'install -o root -g root -m 0600' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config' install/install-id-exergism.sh
           grep -Fq 'recovery_agent="$ROOT/agent/ec-deployment-agent.sh"' install/install-id-exergism.sh
           grep -Fq 'if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then' install/install-id-exergism.sh
@@ -303,8 +312,9 @@ jobs:
           grep -Fq 'Production resolver changed PID during artifact-fence audit' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'verify_runtime_process_binding()' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'verify_source_process_binding()' install/verify-id-exergism-artifact-fence.sh
-          grep -Fq 'option_values("-root")' install/verify-id-exergism-artifact-fence.sh
-          grep -Fq 'option_values("-registry")' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'spellings = (f"-{name}", f"--{name}")' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'option_values("root")' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq 'option_values("registry")' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'Production resolver MainPID is not executing the configured runtime object.' install/verify-id-exergism-artifact-fence.sh
           grep -Fq 'Production resolver MainPID is not using the configured source/registry paths.' install/verify-id-exergism-artifact-fence.sh
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/install-id-exergism.sh
@@ -329,8 +339,9 @@ jobs:
           grep -Fq 'Before=id-exergism.service ec-deployment-attestation@id.exergism.org.service' packaging/id-exergism-install-recovery.service
           grep -Fq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-install-recovery-interlock.conf
           grep -Fxq 'Requires=id-exergism-install-recovery.service' packaging/id-exergism-agent-recovery-interlock.conf
+          grep -Fxq 'Wants=id-exergism-install-recovery-finalize.service' packaging/id-exergism-agent-recovery-interlock.conf
           ! grep -Fq 'Requires=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
-          grep -Fq 'After=id-exergism-install-recovery.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
+          grep -Fq 'After=id-exergism-install-recovery.service id-exergism-install-recovery-finalize.service id-exergism.service' packaging/id-exergism-agent-recovery-interlock.conf
           grep -Fq 'select_transaction()' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="$phase"' install/recover-id-exergism-install.sh
           grep -Fq 'TXN_PHASE="recovering"' install/recover-id-exergism-install.sh
