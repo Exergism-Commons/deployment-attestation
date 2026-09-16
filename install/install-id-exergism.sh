@@ -14,7 +14,11 @@ TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 RECOVERY_UNIT="id-exergism-install-recovery.service"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
-AGENT_SOURCE="${EC_NATIVE_AGENT_BINARY:-$ROOT/agent/ec-deployment-agent.sh}"
+if [[ -z "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
+  echo "EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary." >&2
+  exit 1
+fi
+AGENT_SOURCE="$EC_NATIVE_AGENT_BINARY"
 AGENT_INSTALL_SOURCE="$AGENT_SOURCE"
 NATIVE_AGENT_STAGE=""
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
@@ -82,12 +86,8 @@ for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze 
   }
 done
 
-if [[ ! -f "$AGENT_SOURCE" || -L "$AGENT_SOURCE" ]]; then
-  echo "Agent source must be a real file: $AGENT_SOURCE" >&2
-  exit 1
-fi
-if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" && ! -x "$AGENT_SOURCE" ]]; then
-  echo "EC_NATIVE_AGENT_BINARY must point to an executable Native AOT binary." >&2
+if [[ ! -f "$AGENT_SOURCE" || -L "$AGENT_SOURCE" || ! -x "$AGENT_SOURCE" ]]; then
+  echo "EC_NATIVE_AGENT_BINARY must point to a real executable Native AOT binary." >&2
   exit 1
 fi
 
@@ -276,24 +276,22 @@ cleanup_native_stage() {
   fi
 }
 
-if [[ -n "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
-  # Pin the exact candidate into a root-owned, process-private staging directory.
-  # All preflight checks and the eventual installation consume this same copy,
-  # so later mutation/replacement of EC_NATIVE_AGENT_BINARY cannot change what
-  # gets published.
-  NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
-  trap cleanup_native_stage EXIT
-  AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
-  install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"
+# Pin the exact Native AOT candidate into a root-owned, process-private staging
+# directory. All preflight checks and installation consume this same copy, so a
+# later mutation/replacement of EC_NATIVE_AGENT_BINARY cannot change what gets
+# published.
+NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
+trap cleanup_native_stage EXIT
+AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
+install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"
 
-  native_preflight_config="$ENV_FILE"
-  if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
-    native_preflight_config="$NATIVE_AGENT_STAGE/preflight.env"
-    install -o root -g root -m 0600       "$ROOT/examples/id.exergism.org.env.example"       "$native_preflight_config"
-  fi
-  EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config
-  "$AGENT_INSTALL_SOURCE" self-test
+native_preflight_config="$ENV_FILE"
+if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
+  native_preflight_config="$NATIVE_AGENT_STAGE/preflight.env"
+  install -o root -g root -m 0600     "$ROOT/examples/id.exergism.org.env.example"     "$native_preflight_config"
 fi
+EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config
+"$AGENT_INSTALL_SOURCE" self-test
 
 current_boot_id="$(cat "$BOOT_ID_FILE")"
 [[ "$current_boot_id" =~ ^[0-9a-fA-F-]{36}$ ]] || {
@@ -494,10 +492,11 @@ fi
 
 # Reconcile the updater's own durable transaction before measuring target state.
 if [[ -r "$ENV_FILE" ]]; then
-  recovery_agent="$ROOT/agent/ec-deployment-agent.sh"
-  # Recover an existing transaction with the implementation that created it
-  # whenever possible. This keeps future journal evolution tied to the installed
-  # generation while preserving the Bash implementation for first install.
+  # Prefer the installed generation so a transaction is reconciled by the agent
+  # that created it. On a first Native AOT installation there is no installed
+  # generation, so the already-pinned candidate performs the no-op/compatible
+  # recovery check.
+  recovery_agent="$AGENT_INSTALL_SOURCE"
   if [[ -f "$AGENT" && ! -L "$AGENT" && -x "$AGENT" ]]; then
     recovery_agent="$AGENT"
   fi
