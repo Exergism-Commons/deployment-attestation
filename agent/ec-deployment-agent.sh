@@ -181,18 +181,30 @@ if attestation_endpoint:
         fail("EC_ATTESTATION_ENDPOINT must use HTTPS unless loopback")
     if hmac is None:
         fail("EC_HMAC_SECRET_FILE is required when EC_ATTESTATION_ENDPOINT is configured")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        st = os.lstat(hmac)
+        fd = os.open(hmac, flags)
     except OSError as exc:
-        raise RuntimeError("EC_HMAC_SECRET_FILE is not readable") from exc
-    if not stat.S_ISREG(st.st_mode):
-        fail("EC_HMAC_SECRET_FILE must be a real regular file")
+        raise RuntimeError("EC_HMAC_SECRET_FILE is not readable as a real file") from exc
     try:
-        secret = hmac.read_bytes()
-    except OSError as exc:
-        raise RuntimeError("EC_HMAC_SECRET_FILE is not readable") from exc
-    if not secret.strip():
-        fail("EC_HMAC_SECRET_FILE must not be empty")
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            fail("EC_HMAC_SECRET_FILE must be a real regular file")
+        if before.st_uid != 0:
+            fail("EC_HMAC_SECRET_FILE must be owned by root")
+        if stat.S_IMODE(before.st_mode) & 0o022:
+            fail("EC_HMAC_SECRET_FILE must not be writable by group or others")
+        with os.fdopen(os.dup(fd), "rb", closefd=True) as stream:
+            secret = stream.read()
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid, before.st_size) != (
+            after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid, after.st_size
+        ):
+            fail("EC_HMAC_SECRET_FILE changed while being validated")
+        if not secret.strip():
+            fail("EC_HMAC_SECRET_FILE must not be empty")
+    finally:
+        os.close(fd)
 PY
 
 CURRENT_STATE_FILE="$EC_STATE_DIR/current-state.json"
@@ -931,10 +943,7 @@ PY
 }
 
 service_cgroup_has_processes() {
-  local cgroup
-  if ! cgroup="$(systemctl show "$EC_SERVICE_UNIT" -p ControlGroup --value 2>/dev/null)"; then
-    return 2
-  fi
+  local cgroup="$1"
   [[ -n "$cgroup" ]] || return 1
   python3 - "$cgroup" <<'PY'
 import pathlib
@@ -956,22 +965,33 @@ PY
 }
 
 service_is_quiescent() {
-  local load active main_pid cgroup_rc
-  if ! load="$(systemctl show "$EC_SERVICE_UNIT" -p LoadState --value 2>/dev/null)"; then
+  local load active main_pid control_group cgroup_rc
+  local load_after active_after main_pid_after control_group_after
+
+  if ! load="$(systemctl show "$EC_SERVICE_UNIT" -p LoadState --value 2>/dev/null)"      || ! active="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value 2>/dev/null)"      || ! main_pid="$(systemctl show "$EC_SERVICE_UNIT" -p MainPID --value 2>/dev/null)"      || ! control_group="$(systemctl show "$EC_SERVICE_UNIT" -p ControlGroup --value 2>/dev/null)"; then
     return 1
   fi
   [[ "$load" == "loaded" ]] || return 1
-  if ! active="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value 2>/dev/null)"      || ! main_pid="$(systemctl show "$EC_SERVICE_UNIT" -p MainPID --value 2>/dev/null)"; then
-    return 1
-  fi
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
   [[ "$main_pid" == 0 ]] || return 1
-  if service_cgroup_has_processes; then
+
+  if service_cgroup_has_processes "$control_group"; then
     return 1
   else
     cgroup_rc=$?
     (( cgroup_rc == 1 )) || return 1
   fi
+
+  # The service can be started again after the first systemd snapshot and the
+  # cgroup traversal. Re-sample every terminal-state field before declaring the
+  # write boundary quiescent, and require the cgroup identity to be unchanged.
+  if ! load_after="$(systemctl show "$EC_SERVICE_UNIT" -p LoadState --value 2>/dev/null)"      || ! active_after="$(systemctl show "$EC_SERVICE_UNIT" -p ActiveState --value 2>/dev/null)"      || ! main_pid_after="$(systemctl show "$EC_SERVICE_UNIT" -p MainPID --value 2>/dev/null)"      || ! control_group_after="$(systemctl show "$EC_SERVICE_UNIT" -p ControlGroup --value 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$load_after" == "loaded" ]] || return 1
+  [[ "$active_after" == "inactive" || "$active_after" == "failed" ]] || return 1
+  [[ "$main_pid_after" == 0 ]] || return 1
+  [[ "$control_group_after" == "$control_group" ]] || return 1
   return 0
 }
 
@@ -1874,16 +1894,42 @@ PY
 send_attestation() {
   local body="$1"
   [[ -z "$EC_ATTESTATION_ENDPOINT" ]] && { printf '%s\n' "$body"; return 0; }
-  [[ -r "$EC_HMAC_SECRET_FILE" ]] || die "HMAC secret not readable"
   local ts sig oid
   ts="$(date +%s)"
   oid="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["observation_id"])' <<<"$body")"
   sig="$(python3 - "$EC_HMAC_SECRET_FILE" "$ts" "$body" <<'PY'
-import hashlib,hmac,pathlib,sys
-p,t,b=sys.argv[1:]; key=pathlib.Path(p).read_bytes().strip()
-print(hmac.new(key,(t+"."+b).encode(),hashlib.sha256).hexdigest())
+import hashlib
+import hmac
+import os
+import stat
+import sys
+
+path, timestamp, body = sys.argv[1:]
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(path, flags)
+except OSError:
+    raise SystemExit(1)
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit(1)
+    if before.st_uid != 0 or stat.S_IMODE(before.st_mode) & 0o022:
+        raise SystemExit(1)
+    with os.fdopen(os.dup(fd), "rb", closefd=True) as stream:
+        key = stream.read().strip()
+    after = os.fstat(fd)
+    if not key:
+        raise SystemExit(1)
+    if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid, before.st_size) != (
+        after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid, after.st_size
+    ):
+        raise SystemExit(1)
+    print(hmac.new(key, (timestamp + "." + body).encode(), hashlib.sha256).hexdigest())
+finally:
+    os.close(fd)
 PY
-)"
+)" || die "HMAC secret failed trusted-file validation"
   curl --retry 3 --retry-all-errors --connect-timeout 10 -fsS \
     -H 'Content-Type: application/json' -H "X-EC-Timestamp: $ts" \
     -H "X-EC-Signature: sha256=$sig" -H "Idempotency-Key: $oid" \
