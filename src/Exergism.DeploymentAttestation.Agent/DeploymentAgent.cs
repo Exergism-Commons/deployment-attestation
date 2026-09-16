@@ -624,7 +624,9 @@ internal sealed class DeploymentAgent
             if (!IsCommit(finalObservedSourceCommit))
             {
                 observedSourceCommit = null;
+                checks[CHECK_RELEASE_REVISION] = false;
                 checks[CHECK_SOURCE_TREE] = false;
+                checks[CHECK_STATE_INTEGRITY] = false;
             }
             else
             {
