@@ -797,7 +797,7 @@ internal sealed class GitRepository(AgentConfig config)
         await EnsureSnapshotHeadsCurrentAsync(verified);
     }
 
-    private static void EnsureSnapshotObjectsCurrent(
+    internal static void EnsureSnapshotObjectsCurrent(
         RepositoryDurabilitySnapshot verified)
     {
         foreach (var pair in verified.Files)
@@ -829,7 +829,7 @@ internal sealed class GitRepository(AgentConfig config)
         }
     }
 
-    private static void EnsureSnapshotFileSetsCurrent(
+    internal static void EnsureSnapshotFileSetsCurrent(
         RepositoryDurabilitySnapshot verified)
     {
         foreach (var pair in verified.FileSets)
