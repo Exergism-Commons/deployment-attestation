@@ -6,6 +6,28 @@ using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
 
+internal static class AttestationSourceValidation
+{
+    internal static async Task<bool> VerifyFinalExactAsync(
+        string observedCommit,
+        string stateCommit,
+        Func<string, Task> verifyExactAsync)
+    {
+        if (!string.Equals(observedCommit, stateCommit, StringComparison.Ordinal))
+            return false;
+
+        try
+        {
+            await verifyExactAsync(stateCommit);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
 internal sealed class DeploymentAgent
 {
     private readonly AgentConfig _config;
@@ -634,20 +656,11 @@ internal sealed class DeploymentAgent
                 checks[CHECK_RELEASE_REVISION] =
                     observedSourceCommit == release.SourceCommit;
 
-                var finalSourceTreeExact = false;
-                if (observedSourceCommit == state.SourceCommit)
-                {
-                    try
-                    {
-                        await _git.VerifySourceTreeExactAsync(state.SourceCommit);
-                        finalSourceTreeExact = true;
-                    }
-                    catch
-                    {
-                        // Preserve the observed HEAD while failing the exact-tree
-                        // and state-integrity claims closed.
-                    }
-                }
+                var finalSourceTreeExact =
+                    await AttestationSourceValidation.VerifyFinalExactAsync(
+                        observedSourceCommit,
+                        state.SourceCommit,
+                        _git.VerifySourceTreeExactAsync);
 
                 checks[CHECK_SOURCE_TREE] = finalSourceTreeExact;
                 if (!finalSourceTreeExact)
