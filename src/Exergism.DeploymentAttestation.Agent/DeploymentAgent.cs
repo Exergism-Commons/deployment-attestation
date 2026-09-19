@@ -630,16 +630,27 @@ internal sealed class DeploymentAgent
             }
             else
             {
-                if (!string.Equals(
-                        observedSourceCommit,
-                        finalObservedSourceCommit,
-                        StringComparison.Ordinal))
-                    checks[CHECK_SOURCE_TREE] = false;
-
                 observedSourceCommit = finalObservedSourceCommit;
                 checks[CHECK_RELEASE_REVISION] =
                     observedSourceCommit == release.SourceCommit;
-                if (observedSourceCommit != state.SourceCommit)
+
+                var finalSourceTreeExact = false;
+                if (observedSourceCommit == state.SourceCommit)
+                {
+                    try
+                    {
+                        await _git.VerifySourceTreeExactAsync(state.SourceCommit);
+                        finalSourceTreeExact = true;
+                    }
+                    catch
+                    {
+                        // Preserve the observed HEAD while failing the exact-tree
+                        // and state-integrity claims closed.
+                    }
+                }
+
+                checks[CHECK_SOURCE_TREE] = finalSourceTreeExact;
+                if (!finalSourceTreeExact)
                     checks[CHECK_STATE_INTEGRITY] = false;
             }
         }
