@@ -650,6 +650,29 @@ internal sealed class GitRepository(AgentConfig config)
             {
                 if (!Directory.Exists(fullPath) || new DirectoryInfo(fullPath).LinkTarget is not null)
                     throw new AgentException($"gitlink is not a real directory: {entry.RelativePath}");
+
+                var gitMarker = Path.GetFullPath(Path.Combine(fullPath, GIT_METADATA_NAME));
+                if (File.Exists(gitMarker))
+                {
+                    verified.Files[gitMarker] =
+                        Durability.ReadRegularFileNoFollow(
+                            gitMarker,
+                            $"submodule gitfile {entry.RelativePath}").Snapshot;
+                }
+                else if (Directory.Exists(gitMarker) &&
+                         new DirectoryInfo(gitMarker).LinkTarget is null)
+                {
+                    verified.Directories[gitMarker] =
+                        Durability.ReadDirectorySnapshotNoFollow(
+                            gitMarker,
+                            $"submodule git metadata {entry.RelativePath}");
+                }
+                else
+                {
+                    throw new AgentException(
+                        $"Submodule Git metadata marker is missing or unsafe: {entry.RelativePath}");
+                }
+
                 submodules[entry.RelativePath] = entry.ObjectId;
                 continue;
             }
@@ -769,15 +792,26 @@ internal sealed class GitRepository(AgentConfig config)
             if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
             {
                 submodules.Add((path, entry.ObjectId));
-                var gitMarker = Path.Combine(path, GIT_METADATA_NAME);
-                if (!File.Exists(gitMarker) && !Directory.Exists(gitMarker))
-                    throw new AgentException($"Submodule gitfile missing during fsync: {entry.RelativePath}");
-                if (File.Exists(gitMarker))
+                var gitMarker = Path.GetFullPath(Path.Combine(path, GIT_METADATA_NAME));
+                if (verified.Files.TryGetValue(gitMarker, out var expectedGitfile))
+                {
                     Durability.FsyncRegularFileNoFollow(
                         gitMarker,
-                        $"submodule gitfile {entry.RelativePath}");
+                        $"submodule gitfile {entry.RelativePath}",
+                        expectedGitfile);
+                }
+                else if (verified.Directories.TryGetValue(gitMarker, out var expectedGitDirectory))
+                {
+                    Durability.FsyncDirectorySnapshotNoFollow(
+                        gitMarker,
+                        $"submodule git metadata {entry.RelativePath}",
+                        expectedGitDirectory);
+                }
                 else
-                    Durability.FsyncRequiredDirectory(gitMarker, $"submodule git metadata {entry.RelativePath}");
+                {
+                    throw new AgentException(
+                        $"Submodule Git metadata marker was not snapshot-verified: {entry.RelativePath}");
+                }
                 continue;
             }
 
