@@ -659,6 +659,7 @@ internal sealed class GitRepository(AgentConfig config)
             verified,
             metadataHierarchy);
         var final = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        await RevalidateRepositorySnapshotAsync(final);
         EnsureSnapshotsUnchanged(verified, final);
     }
 
