@@ -18,7 +18,21 @@ internal static class TrackedFileDurability
 
 internal sealed record RepositoryDurabilitySnapshot(
     Dictionary<string, FileSnapshot> Files,
-    Dictionary<string, DirectorySnapshot> Directories);
+    Dictionary<string, DirectorySnapshot> Directories)
+{
+    internal Dictionary<string, string> Symlinks { get; } =
+        new(StringComparer.Ordinal);
+
+    internal Dictionary<string, RepositoryFileSetSnapshot> FileSets { get; } =
+        new(StringComparer.Ordinal);
+
+    internal Dictionary<string, string> Heads { get; } =
+        new(StringComparer.Ordinal);
+}
+
+internal sealed record RepositoryFileSetSnapshot(
+    IReadOnlySet<string> Files,
+    IReadOnlySet<string> Submodules);
 
 internal sealed record GitMetadataDurabilitySnapshot(
     Dictionary<string, FileSnapshot> Files,
@@ -608,7 +622,10 @@ internal sealed class GitRepository(AgentConfig config)
         => (await GitAsync([GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
 
     public async Task VerifySourceTreeExactAsync(string commit)
-        => _ = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+    {
+        var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        await RevalidateRepositorySnapshotAsync(verified);
+    }
 
     public async Task SwitchSourceAsync(string commit, bool fetchFirst)
     {
@@ -679,6 +696,7 @@ internal sealed class GitRepository(AgentConfig config)
         var head = (await GitAtAsync(repository, [GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
         if (head != commit)
             throw new AgentException($"HEAD mismatch in {repository}: {head} != {commit}");
+        verified.Heads[repository] = commit;
 
         var algorithm = (await GitAtAsync(repository, [GIT_SUBCOMMAND_REV_PARSE, "--show-object-format"])).StdOut.Trim();
         if (algorithm is not (GIT_OBJECT_FORMAT_SHA1 or GIT_OBJECT_FORMAT_SHA256))
@@ -719,6 +737,7 @@ internal sealed class GitRepository(AgentConfig config)
                 var target = info.LinkTarget;
                 if (target is null)
                     throw new AgentException($"Expected symlink: {entry.RelativePath}");
+                verified.Symlinks[Path.GetFullPath(fullPath)] = target;
                 data = StrictUtf8.GetBytes(target);
             }
             else if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
@@ -748,6 +767,10 @@ internal sealed class GitRepository(AgentConfig config)
             throw new AgentException($"Worktree file set differs; extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
         }
 
+        verified.FileSets[repository] = new RepositoryFileSetSnapshot(
+            expectedFiles.ToHashSet(StringComparer.Ordinal),
+            submodules.Keys.ToHashSet(StringComparer.Ordinal));
+
         foreach (var directory in expectedDirectories)
         {
             var fullDirectory = Path.GetFullPath(directory);
@@ -762,6 +785,81 @@ internal sealed class GitRepository(AgentConfig config)
         }
 
         return verified;
+    }
+
+    private async Task RevalidateRepositorySnapshotAsync(
+        RepositoryDurabilitySnapshot verified)
+    {
+        await EnsureSnapshotHeadsCurrentAsync(verified);
+        EnsureSnapshotObjectsCurrent(verified);
+        EnsureSnapshotFileSetsCurrent(verified);
+        EnsureSnapshotObjectsCurrent(verified);
+        await EnsureSnapshotHeadsCurrentAsync(verified);
+    }
+
+    private static void EnsureSnapshotObjectsCurrent(
+        RepositoryDurabilitySnapshot verified)
+    {
+        foreach (var pair in verified.Files)
+        {
+            var actual = Durability.ReadRegularFileNoFollow(
+                pair.Key,
+                pair.Key).Snapshot;
+            if (actual != pair.Value)
+                throw new AgentException(
+                    $"Tracked regular file changed after exact-tree traversal: {pair.Key}");
+        }
+
+        foreach (var pair in verified.Symlinks)
+        {
+            var actual = new FileInfo(pair.Key).LinkTarget;
+            if (!string.Equals(actual, pair.Value, StringComparison.Ordinal))
+                throw new AgentException(
+                    $"Tracked symlink changed after exact-tree traversal: {pair.Key}");
+        }
+
+        foreach (var pair in verified.Directories)
+        {
+            var actual = Durability.ReadDirectorySnapshotNoFollow(
+                pair.Key,
+                pair.Key);
+            if (actual != pair.Value)
+                throw new AgentException(
+                    $"Checkout directory changed after exact-tree traversal: {pair.Key}");
+        }
+    }
+
+    private static void EnsureSnapshotFileSetsCurrent(
+        RepositoryDurabilitySnapshot verified)
+    {
+        foreach (var pair in verified.FileSets)
+        {
+            var actual = EnumerateDiskFiles(
+                pair.Key,
+                pair.Value.Submodules);
+            if (!actual.SetEquals(pair.Value.Files))
+            {
+                var extra = actual.Except(pair.Value.Files).Order(StringComparer.Ordinal);
+                var missing = pair.Value.Files.Except(actual).Order(StringComparer.Ordinal);
+                throw new AgentException(
+                    $"Worktree file set changed after exact-tree traversal in {pair.Key}; " +
+                    $"extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
+            }
+        }
+    }
+
+    private static async Task EnsureSnapshotHeadsCurrentAsync(
+        RepositoryDurabilitySnapshot verified)
+    {
+        foreach (var pair in verified.Heads)
+        {
+            var head = (await GitAtAsync(
+                pair.Key,
+                [GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
+            if (!string.Equals(head, pair.Value, StringComparison.Ordinal))
+                throw new AgentException(
+                    $"Repository HEAD changed after exact-tree traversal: {pair.Key}");
+        }
     }
 
     private async Task SyncSubmodulesAsync(string commit)
