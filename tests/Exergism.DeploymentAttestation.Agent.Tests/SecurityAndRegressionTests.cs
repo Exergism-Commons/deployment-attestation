@@ -1383,6 +1383,7 @@ public sealed class SecurityAndRegressionTests
             new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal));
         snapshot.FileSets[Path.GetFullPath(root)] = new RepositoryFileSetSnapshot(
             new HashSet<string>(StringComparer.Ordinal) { "tracked.txt" },
+            new HashSet<string>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal));
 
         File.WriteAllText(Path.Combine(root, "late-untracked.txt"), "late");
@@ -1410,6 +1411,51 @@ public sealed class SecurityAndRegressionTests
 
         TestAssert.Throws<AgentException>(
             () => GitRepository.EnsureSnapshotObjectsCurrent(snapshot));
+    }
+
+
+    [TestMethod]
+    public void ExactTreeRejectsUntrackedEmptyDirectory()
+    {
+        var expectedFiles = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "tracked.txt"
+        };
+        var expectedDirectories = new HashSet<string>(StringComparer.Ordinal);
+        var actual = new RepositoryDiskTreeSnapshot(
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "tracked.txt"
+            },
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "late-empty-directory"
+            });
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureDiskTreeMatches(
+                "/checkout",
+                expectedFiles,
+                expectedDirectories,
+                actual));
+    }
+
+    [TestMethod]
+    public void CheckoutMetadataBarrierRejectsMutationAfterInitialSnapshot()
+    {
+        using var environment = TestEnvironment.Create();
+        var metadataRoot = Path.Combine(environment.Root, "git-metadata");
+        Directory.CreateDirectory(metadataRoot);
+        var head = Path.Combine(metadataRoot, "HEAD");
+        File.WriteAllText(head, "ref: refs/heads/main\n");
+
+        var snapshots = GitRepository.CaptureGitMetadataSnapshots(
+            new[] { metadataRoot });
+
+        File.WriteAllText(head, "ref: refs/heads/intermediate\n");
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureGitMetadataSnapshotsUnchanged(snapshots));
     }
 
 }
