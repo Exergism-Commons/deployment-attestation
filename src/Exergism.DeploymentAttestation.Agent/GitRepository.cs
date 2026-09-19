@@ -32,7 +32,12 @@ internal sealed record RepositoryDurabilitySnapshot(
 
 internal sealed record RepositoryFileSetSnapshot(
     IReadOnlySet<string> Files,
+    IReadOnlySet<string> Directories,
     IReadOnlySet<string> Submodules);
+
+internal sealed record RepositoryDiskTreeSnapshot(
+    HashSet<string> Files,
+    HashSet<string> Directories);
 
 internal sealed record GitMetadataDurabilitySnapshot(
     Dictionary<string, FileSnapshot> Files,
@@ -647,20 +652,30 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task FsyncCheckoutAsync(string commit)
     {
-        var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
         var metadataHierarchy = await VerifiedGitMetadataRootsAsync(
             _config.AppDirectory,
             commit,
             parentMetadataHierarchy: null,
             GitMetadataTraversalMode.StrictTargetCommit);
+        var metadataSnapshots = CaptureGitMetadataSnapshots(metadataHierarchy);
+
+        var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        await RevalidateRepositorySnapshotAsync(verified);
+        EnsureGitMetadataSnapshotsUnchanged(metadataSnapshots);
+
         await FsyncRepositoryAsync(
             _config.AppDirectory,
             commit,
             verified,
-            metadataHierarchy);
+            metadataHierarchy,
+            metadataSnapshots);
+
+        EnsureGitMetadataSnapshotsUnchanged(metadataSnapshots);
+
         var final = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
         await RevalidateRepositorySnapshotAsync(final);
         EnsureSnapshotsUnchanged(verified, final);
+        EnsureGitMetadataSnapshotsUnchanged(metadataSnapshots);
     }
 
     public async Task ReconcileStaleGitLocksAsync(string? rollbackCommit = null)
@@ -760,16 +775,25 @@ internal sealed class GitRepository(AgentConfig config)
                 throw new AgentException($"Tracked bytes differ: {entry.RelativePath}");
         }
 
-        var actualFiles = EnumerateDiskFiles(repository, submodules.Keys);
-        if (!actualFiles.SetEquals(expectedFiles))
-        {
-            var extra = actualFiles.Except(expectedFiles).Order(StringComparer.Ordinal);
-            var missing = expectedFiles.Except(actualFiles).Order(StringComparer.Ordinal);
-            throw new AgentException($"Worktree file set differs; extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
-        }
+        var expectedRelativeDirectories = expectedDirectories
+            .Where(directory => !string.Equals(
+                Path.GetFullPath(directory),
+                repository,
+                StringComparison.Ordinal))
+            .Select(directory => Path.GetRelativePath(repository, directory)
+                .Replace(Path.DirectorySeparatorChar, '/'))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var actualTree = EnumerateDiskTree(repository, submodules.Keys);
+        EnsureDiskTreeMatches(
+            repository,
+            expectedFiles,
+            expectedRelativeDirectories,
+            actualTree);
 
         verified.FileSets[repository] = new RepositoryFileSetSnapshot(
             expectedFiles.ToHashSet(StringComparer.Ordinal),
+            expectedRelativeDirectories,
             submodules.Keys.ToHashSet(StringComparer.Ordinal));
 
         foreach (var directory in expectedDirectories)
@@ -835,17 +859,15 @@ internal sealed class GitRepository(AgentConfig config)
     {
         foreach (var pair in verified.FileSets)
         {
-            var actual = EnumerateDiskFiles(
+            var actual = EnumerateDiskTree(
                 pair.Key,
                 pair.Value.Submodules);
-            if (!actual.SetEquals(pair.Value.Files))
-            {
-                var extra = actual.Except(pair.Value.Files).Order(StringComparer.Ordinal);
-                var missing = pair.Value.Files.Except(actual).Order(StringComparer.Ordinal);
-                throw new AgentException(
-                    $"Worktree file set changed after exact-tree traversal in {pair.Key}; " +
-                    $"extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
-            }
+            EnsureDiskTreeMatches(
+                pair.Key,
+                pair.Value.Files,
+                pair.Value.Directories,
+                actual,
+                " changed after exact-tree traversal");
         }
     }
 
@@ -908,7 +930,8 @@ internal sealed class GitRepository(AgentConfig config)
         string repository,
         string commit,
         RepositoryDurabilitySnapshot verified,
-        IReadOnlyCollection<string> metadataHierarchy)
+        IReadOnlyCollection<string> metadataHierarchy,
+        IReadOnlyDictionary<string, GitMetadataDurabilitySnapshot> metadataSnapshots)
     {
         var entries = await ReadTreeAsync(repository, commit);
         var directories = new HashSet<string>(StringComparer.Ordinal) { repository };
@@ -975,14 +998,15 @@ internal sealed class GitRepository(AgentConfig config)
                 Path.GetFullPath(_config.AppDirectory),
                 StringComparison.Ordinal));
         foreach (var root in repositoryMetadataRoots)
-            FsyncDirectoryTree(root);
+            FsyncDirectoryTree(root, metadataSnapshots);
 
         foreach (var submodule in submodules)
             await FsyncRepositoryAsync(
                 submodule.Path,
                 submodule.Commit,
                 verified,
-                metadataHierarchy);
+                metadataHierarchy,
+                metadataSnapshots);
     }
 
     private static void EnsureSnapshotsUnchanged(
@@ -1016,9 +1040,37 @@ internal sealed class GitRepository(AgentConfig config)
         }
     }
 
-    private static void FsyncDirectoryTree(string root)
+    internal static Dictionary<string, GitMetadataDurabilitySnapshot> CaptureGitMetadataSnapshots(
+        IEnumerable<string> roots)
     {
-        var snapshot = GitMetadataDurability.Capture(root);
+        var snapshots = new Dictionary<string, GitMetadataDurabilitySnapshot>(
+            StringComparer.Ordinal);
+        foreach (var root in roots.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+        {
+            var fullRoot = Path.GetFullPath(root);
+            snapshots[fullRoot] = GitMetadataDurability.Capture(fullRoot);
+        }
+
+        return snapshots;
+    }
+
+    internal static void EnsureGitMetadataSnapshotsUnchanged(
+        IReadOnlyDictionary<string, GitMetadataDurabilitySnapshot> snapshots)
+    {
+        foreach (var pair in snapshots.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            GitMetadataDurability.EnsureUnchanged(
+                pair.Value,
+                GitMetadataDurability.Capture(pair.Key));
+    }
+
+    private static void FsyncDirectoryTree(
+        string root,
+        IReadOnlyDictionary<string, GitMetadataDurabilitySnapshot> metadataSnapshots)
+    {
+        root = Path.GetFullPath(root);
+        if (!metadataSnapshots.TryGetValue(root, out var snapshot))
+            throw new AgentException(
+                $"Git metadata root was not snapshot-verified before checkout fsync: {root}");
         GitMetadataDurability.Fsync(root, snapshot);
     }
 
@@ -1459,19 +1511,24 @@ internal sealed class GitRepository(AgentConfig config)
         return result;
     }
 
-    private static HashSet<string> EnumerateDiskFiles(string repository, IEnumerable<string> submodules)
+    private static RepositoryDiskTreeSnapshot EnumerateDiskTree(
+        string repository,
+        IEnumerable<string> submodules)
     {
         var submoduleSet = submodules.ToHashSet(StringComparer.Ordinal);
-        var found = new HashSet<string>(StringComparer.Ordinal);
+        var files = new HashSet<string>(StringComparer.Ordinal);
+        var directories = new HashSet<string>(StringComparer.Ordinal);
         Walk(repository, "");
-        return found;
+        return new RepositoryDiskTreeSnapshot(files, directories);
 
         void Walk(string directory, string relativeDirectory)
         {
             foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
             {
                 var name = Path.GetFileName(entry);
-                var relative = string.IsNullOrEmpty(relativeDirectory) ? name : $"{relativeDirectory}/{name}";
+                var relative = string.IsNullOrEmpty(relativeDirectory)
+                    ? name
+                    : $"{relativeDirectory}/{name}";
                 if (relativeDirectory.Length == 0 && name == GIT_METADATA_NAME)
                     continue;
                 if (submoduleSet.Contains(relative))
@@ -1480,16 +1537,45 @@ internal sealed class GitRepository(AgentConfig config)
                 var fileInfo = new FileInfo(entry);
                 if (fileInfo.LinkTarget is not null)
                 {
-                    found.Add(relative);
+                    files.Add(relative);
                     continue;
                 }
+
                 if (Directory.Exists(entry))
                 {
+                    directories.Add(relative);
                     Walk(entry, relative);
                     continue;
                 }
-                found.Add(relative);
+
+                files.Add(relative);
             }
+        }
+    }
+
+    internal static void EnsureDiskTreeMatches(
+        string repository,
+        IReadOnlySet<string> expectedFiles,
+        IReadOnlySet<string> expectedDirectories,
+        RepositoryDiskTreeSnapshot actual,
+        string context = "")
+    {
+        if (!actual.Files.SetEquals(expectedFiles))
+        {
+            var extra = actual.Files.Except(expectedFiles).Order(StringComparer.Ordinal);
+            var missing = expectedFiles.Except(actual.Files).Order(StringComparer.Ordinal);
+            throw new AgentException(
+                $"Worktree file set{context} in {repository}; " +
+                $"extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
+        }
+
+        if (!actual.Directories.SetEquals(expectedDirectories))
+        {
+            var extra = actual.Directories.Except(expectedDirectories).Order(StringComparer.Ordinal);
+            var missing = expectedDirectories.Except(actual.Directories).Order(StringComparer.Ordinal);
+            throw new AgentException(
+                $"Worktree directory set{context} in {repository}; " +
+                $"extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
         }
     }
 
