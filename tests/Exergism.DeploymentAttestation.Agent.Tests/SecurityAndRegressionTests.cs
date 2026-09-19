@@ -1258,4 +1258,88 @@ public sealed class SecurityAndRegressionTests
         Assert.IsNull(digest);
     }
 
+
+    [TestMethod]
+    public void SubmoduleGitfileFsyncRejectsRestoredMutationAfterSnapshot()
+    {
+        using var environment = TestEnvironment.Create();
+        var marker = Path.Combine(environment.Root, "submodule.git");
+        const string ORIGINAL = "gitdir: ../.git/modules/child\n";
+
+        File.WriteAllText(marker, ORIGINAL);
+        var verified = new RepositoryDurabilitySnapshot(
+            new Dictionary<string, FileSnapshot>(StringComparer.Ordinal),
+            new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal));
+        SubmoduleGitMarkerDurability.Capture(marker, "submodule gitfile", verified);
+
+        Thread.Sleep(5);
+        File.WriteAllText(marker, "gitdir: /tmp/intermediate\n");
+        File.WriteAllText(marker, ORIGINAL);
+
+        TestAssert.Throws<AgentException>(
+            () => SubmoduleGitMarkerDurability.Fsync(
+                marker,
+                "submodule gitfile",
+                verified));
+    }
+
+    [TestMethod]
+    public void SubmoduleGitfileSnapshotRejectsFileToDirectoryReplacement()
+    {
+        using var environment = TestEnvironment.Create();
+        var marker = Path.Combine(environment.Root, "submodule.git");
+
+        File.WriteAllText(marker, "gitdir: ../.git/modules/child\n");
+        var verified = new RepositoryDurabilitySnapshot(
+            new Dictionary<string, FileSnapshot>(StringComparer.Ordinal),
+            new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal));
+        SubmoduleGitMarkerDurability.Capture(marker, "submodule gitfile", verified);
+
+        File.Delete(marker);
+        Directory.CreateDirectory(marker);
+
+        TestAssert.Throws<AgentException>(
+            () => SubmoduleGitMarkerDurability.Fsync(
+                marker,
+                "submodule gitfile",
+                verified));
+    }
+
+    [TestMethod]
+    public async Task FinalAttestationSourceValidationRechecksBytesAtStableHead()
+    {
+        var commit = new string('a', 40);
+        var calls = 0;
+
+        var exact = await AttestationSourceValidation.VerifyFinalExactAsync(
+            commit,
+            commit,
+            _ =>
+            {
+                calls++;
+                throw new AgentException("tracked bytes changed");
+            });
+
+        Assert.IsFalse(exact);
+        Assert.AreEqual(1, calls);
+
+        var skipped = await AttestationSourceValidation.VerifyFinalExactAsync(
+            new string('b', 40),
+            commit,
+            _ =>
+            {
+                calls++;
+                return Task.CompletedTask;
+            });
+
+        Assert.IsFalse(skipped);
+        Assert.AreEqual(1, calls);
+
+        var healthy = await AttestationSourceValidation.VerifyFinalExactAsync(
+            commit,
+            commit,
+            _ => Task.CompletedTask);
+        Assert.IsTrue(healthy);
+    }
+
 }
