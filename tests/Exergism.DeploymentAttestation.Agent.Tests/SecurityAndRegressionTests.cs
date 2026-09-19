@@ -1342,4 +1342,74 @@ public sealed class SecurityAndRegressionTests
         Assert.IsTrue(healthy);
     }
 
+
+    [TestMethod]
+    public void ExactTreeSnapshotRejectsTrackedMutationAfterTraversal()
+    {
+        using var environment = TestEnvironment.Create();
+        var root = Path.Combine(environment.Root, "snapshot-root");
+        Directory.CreateDirectory(root);
+        var tracked = Path.Combine(root, "tracked.txt");
+        File.WriteAllText(tracked, "before");
+
+        var snapshot = new RepositoryDurabilitySnapshot(
+            new Dictionary<string, FileSnapshot>(StringComparer.Ordinal)
+            {
+                [Path.GetFullPath(tracked)] =
+                    Durability.ReadRegularFileNoFollow(tracked, tracked).Snapshot
+            },
+            new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal)
+            {
+                [Path.GetFullPath(root)] =
+                    Durability.ReadDirectorySnapshotNoFollow(root, root)
+            });
+
+        File.WriteAllText(tracked, "after");
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureSnapshotObjectsCurrent(snapshot));
+    }
+
+    [TestMethod]
+    public void ExactTreeSnapshotRejectsFileSetGrowthAfterTraversal()
+    {
+        using var environment = TestEnvironment.Create();
+        var root = Path.Combine(environment.Root, "fileset-root");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "tracked.txt"), "tracked");
+
+        var snapshot = new RepositoryDurabilitySnapshot(
+            new Dictionary<string, FileSnapshot>(StringComparer.Ordinal),
+            new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal));
+        snapshot.FileSets[Path.GetFullPath(root)] = new RepositoryFileSetSnapshot(
+            new HashSet<string>(StringComparer.Ordinal) { "tracked.txt" },
+            new HashSet<string>(StringComparer.Ordinal));
+
+        File.WriteAllText(Path.Combine(root, "late-untracked.txt"), "late");
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureSnapshotFileSetsCurrent(snapshot));
+    }
+
+    [TestMethod]
+    public void ExactTreeSnapshotRejectsSymlinkRetargetAfterTraversal()
+    {
+        using var environment = TestEnvironment.Create();
+        var root = Path.Combine(environment.Root, "symlink-root");
+        Directory.CreateDirectory(root);
+        var link = Path.Combine(root, "tracked-link");
+        File.CreateSymbolicLink(link, "first-target");
+
+        var snapshot = new RepositoryDurabilitySnapshot(
+            new Dictionary<string, FileSnapshot>(StringComparer.Ordinal),
+            new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal));
+        snapshot.Symlinks[Path.GetFullPath(link)] = "first-target";
+
+        File.Delete(link);
+        File.CreateSymbolicLink(link, "second-target");
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureSnapshotObjectsCurrent(snapshot));
+    }
+
 }
