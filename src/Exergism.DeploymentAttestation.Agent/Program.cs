@@ -22,6 +22,7 @@ static async Task<int> RunAsync(string[] args)
 
         if (action is AgentAction.Health or AgentAction.Status)
         {
+            Durability.ValidateExistingTrustedDirectoryChain(config.StateDirectory);
             var health = new AgentSelfHealthService(config);
             var report = await health.EvaluateAsync();
             Console.WriteLine(Encoding.UTF8.GetString(health.WriteJson(report)));
