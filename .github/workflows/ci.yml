@@ -212,7 +212,7 @@ jobs:
           grep -Fq 'Timer did not remain provably quiescent after enablement.' install/install-id-exergism.sh
           grep -Fq 'Could not determine exact timer enablement state' install/install-id-exergism.sh
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
-          grep -Fq 'EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary.' install/install-id-exergism.sh
+          grep -Fq 'EC_NATIVE_AGENT_BINARY must point to the reviewed Native AOT binary.' install/install-id-exergism.sh
           grep -Fq 'AGENT_SOURCE="$INSTALLER_TRUSTED_STAGE/native-agent"' install/install-id-exergism.sh
           test ! -e agent/ec-deployment-agent.sh
           ! grep -Fq 'ROOT/agent/ec-deployment-agent.sh' install/install-id-exergism.sh
@@ -234,7 +234,7 @@ jobs:
           grep -Fq 'cleanup_installer_temporaries()' install/install-id-exergism.sh
           ! grep -Fq 'cleanup_native_stage' install/install-id-exergism.sh
           grep -Fq 'agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)' install/install-id-exergism.sh
-          grep -Fq 'EC_NATIVE_AGENT_SHA256 is required and must be the reviewed lowercase SHA-256' install/install-id-exergism.sh
+          grep -Fq 'EC_NATIVE_AGENT_SHA256 must be the reviewed lowercase SHA-256' install/install-id-exergism.sh
           grep -Fq 'actual_agent_sha256 != expected_agent_sha256' install/install-id-exergism.sh
           grep -Fq 'actual_sha256 != expected_sha256' install/install-id-exergism.sh
           grep -Fq 'O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)' install/install-id-exergism.sh
