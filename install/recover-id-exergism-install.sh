@@ -503,6 +503,13 @@ path_exists_any "$INSTALL_RECOVERED_DIR" && {
 mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
+restored_smoke_healthy() {
+  if [[ ! -x "$SMOKE" ]]; then
+    return 0
+  fi
+  EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
+}
+
 if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
   if [[ "$MODE" == "normal" ]]; then
     # Direct installer recovery is not executing as the target's prerequisite,
@@ -511,7 +518,7 @@ if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
     if ! systemctl start "$TARGET_UNIT" \
        || ! systemctl is-active --quiet "$TARGET_UNIT" \
        || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null \
-       || { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; } \
+       || ! restored_smoke_healthy \
        || ! "$ARTIFACT_FENCE_AUDITOR"; then
       if ! quiesce_unit "$TARGET_UNIT"; then
         echo "CRITICAL: failed restored resolver could not be proven quiescent; recovered marker retained." >&2
