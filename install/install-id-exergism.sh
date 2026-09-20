@@ -15,8 +15,10 @@ fi
 
 # This file is a privileged second-stage installer. Never execute it directly
 # from a user-writable checkout. The documented bootstrap first copies these
-# exact reviewed bytes into a root-owned private /run directory and verifies
+# exact reviewed bytes into a root-owned private executable stage below
+# /var/lib/ec-deployment-attestation/bootstrap and verifies
 # EC_INSTALLER_SHA256 before Bash parses this body as root.
+TRUSTED_STAGE_PARENT="/var/lib/ec-deployment-attestation/bootstrap"
 INSTALLER_TRUSTED_STAGE="${EC_INSTALLER_TRUSTED_STAGE:-}"
 INSTALLER_SOURCE_ROOT="${EC_INSTALLER_SOURCE_ROOT:-}"
 EXPECTED_INSTALLER_SHA256="${EC_INSTALLER_SHA256:-}"
@@ -24,12 +26,20 @@ EXPECTED_AGENT_SHA256="${EC_NATIVE_AGENT_SHA256:-}"
 AGENT_SOURCE_PATH="${EC_NATIVE_AGENT_BINARY:-}"
 
 case "$INSTALLER_TRUSTED_STAGE" in
-  /run/ec-deployment-attestation-installer.*) ;;
+  "$TRUSTED_STAGE_PARENT"/installer.*) ;;
   *)
     echo "Refusing privileged execution without a trusted root-owned installer stage." >&2
     exit 1
     ;;
 esac
+[[ -d "$TRUSTED_STAGE_PARENT" && ! -L "$TRUSTED_STAGE_PARENT" ]] || {
+  echo "Trusted installer stage parent is invalid." >&2
+  exit 1
+}
+[[ "$(stat -c '%u:%a' -- "$TRUSTED_STAGE_PARENT")" == "0:700" ]] || {
+  echo "Trusted installer stage parent must be root-owned mode 0700." >&2
+  exit 1
+}
 [[ -d "$INSTALLER_TRUSTED_STAGE" && ! -L "$INSTALLER_TRUSTED_STAGE" ]] || {
   echo "Trusted installer staging directory is invalid." >&2
   exit 1
@@ -38,6 +48,20 @@ esac
   echo "Trusted installer staging directory must be root-owned mode 0700." >&2
   exit 1
 }
+command -v findmnt >/dev/null 2>&1 || {
+  echo "Required dependency not found: findmnt" >&2
+  exit 1
+}
+stage_mount_options="$(findmnt -n -o OPTIONS -T "$INSTALLER_TRUSTED_STAGE")" || {
+  echo "Could not determine trusted installer stage mount options." >&2
+  exit 1
+}
+case ",$stage_mount_options," in
+  *,noexec,*)
+    echo "Trusted installer stage filesystem is mounted noexec." >&2
+    exit 1
+    ;;
+esac
 
 cleanup_trusted_stage_early() {
   local rc=$?
