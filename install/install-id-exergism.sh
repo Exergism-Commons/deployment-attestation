@@ -208,9 +208,9 @@ repo_inputs = (
     ("install/verify-id-exergism-artifact-fence.sh", 0o500, "6001cc876a7e2a9d390f7aa62ed86d5a355af005798faee8de9d6744c515e3a9"),
     ("agent/validate-release-manifest.py", 0o500, "1d9c3f889e89b8ff5acb8659504655e7237ad32f5e3e4c4bd29fb719150ab481"),
     ("spec/release-manifest-v0.1.schema.json", 0o400, "53338bbdbb822c8a94bfbc45246af56017165a0af14d1fea818c6fc9d23120b2"),
-    ("install/finalize-id-exergism-recovery.sh", 0o500, "3961e563a006921fcf25a170e0fff5520cb3f6833495c50220f6facbe6bb2120"),
+    ("install/finalize-id-exergism-recovery.sh", 0o500, "2667cc94cf281f94ba91e2910ef6da760c05bf70bd36a58332496f5c9a4326f9"),
     ("packaging/id-exergism-install-recovery-finalize.service", 0o400, "758f1921d2f344d071a141fdd7611ba72f44dcaa71288e1fe07c7868278552b0"),
-    ("install/recover-id-exergism-install.sh", 0o500, "eb19fb7c47ecaa2d891e5c7ef9f1c2b93f99ab2b4522118f2d080d9fac587d52"),
+    ("install/recover-id-exergism-install.sh", 0o500, "79890531158810456562c374cc1fe0ebb5a35505f2014e750cca764a9dbdfe1a"),
     ("packaging/id-exergism-install-recovery.service", 0o400, "6b4590d37a30c8f8567b07ee69e2f9f74454f9f7e39e5fd102ff4dbe9a732d6c"),
     ("packaging/id-exergism-install-recovery-interlock.conf", 0o400, "fed104865dbd437dbb9397f5e9982942ab691ec8befc6a2d693dd2e6f73001fd"),
     ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400, "9a132fe45b037d2082ebec87948743180ffc19d1588a1d128937ddda912440d9"),
@@ -834,8 +834,8 @@ wait_target_healthy() {
     state="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)" || return 1
     case "$state" in
       active)
-        if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1; then
-          EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || return 1
+        if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1 \
+           && EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; then
           verify_production_artifact_fence || return 1
           return 0
         fi
