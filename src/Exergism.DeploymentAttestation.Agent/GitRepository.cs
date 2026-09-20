@@ -336,16 +336,61 @@ internal static class CheckoutWriteExclusion
             rejectSymlinks: false,
             rejectSpecial: false);
 
-        if (immutable)
-            EnsureNoMultiplyLinkedFiles(files);
+        if (!immutable)
+        {
+            foreach (var file in files.Order(StringComparer.Ordinal))
+                _ = SetImmutableNoFollow(file, immutable: false);
 
-        foreach (var file in files.Order(StringComparer.Ordinal))
-            SetImmutableNoFollow(file, immutable);
+            foreach (var directory in directories
+                         .OrderByDescending(PathDepth)
+                         .ThenBy(path => path, StringComparer.Ordinal))
+                _ = SetImmutableNoFollow(directory, immutable: false);
+            return;
+        }
 
-        foreach (var directory in directories
-                     .OrderByDescending(PathDepth)
-                     .ThenBy(path => path, StringComparer.Ordinal))
-            SetImmutableNoFollow(directory, immutable);
+        EnsureNoMultiplyLinkedFiles(files);
+        var orderedDirectories = directories
+            .OrderBy(PathDepth)
+            .ThenBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        var orderedFiles = files.Order(StringComparer.Ordinal).ToArray();
+        var newlySealed = new List<string>();
+
+        try
+        {
+            foreach (var directory in orderedDirectories)
+            {
+                if (SetImmutableNoFollow(directory, immutable: true))
+                    newlySealed.Add(directory);
+            }
+
+            foreach (var file in orderedFiles)
+            {
+                if (SetImmutableNoFollow(file, immutable: true))
+                    newlySealed.Add(file);
+            }
+        }
+        catch (Exception sealFailure)
+        {
+            var rollbackFailures = new List<Exception>();
+            foreach (var path in newlySealed.AsEnumerable().Reverse())
+            {
+                try
+                {
+                    _ = SetImmutableNoFollow(path, immutable: false);
+                }
+                catch (Exception rollbackFailure)
+                {
+                    rollbackFailures.Add(rollbackFailure);
+                }
+            }
+
+            if (rollbackFailures.Count > 0)
+                throw new AgentException(
+                    "Tree reseal failed and partial reseal rollback also failed",
+                    new AggregateException(new[] { sealFailure }.Concat(rollbackFailures)));
+            throw;
+        }
     }
 
     internal static CheckoutSealState InspectTreeSealState(string root)
@@ -1404,6 +1449,8 @@ internal sealed class GitRepository(AgentConfig config)
             CheckoutWriteExclusion.InspectTreeSealState,
             StringComparer.Ordinal);
 
+        await AssertNoRelatedGitAsync(protectedRoots);
+
         foreach (var root in roots.Where(root =>
                      sealState[root] is not CheckoutSealState.Unsealed))
             CheckoutWriteExclusion.SetTreeImmutable(root, immutable: false);
@@ -1455,9 +1502,20 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var root in metadataRoots)
             _ = GitMetadataDurability.Capture(root);
 
+        var protectedRoots = new HashSet<string>(
+            metadataRoots.Select(Path.GetFullPath),
+            StringComparer.Ordinal)
+        {
+            Path.GetFullPath(_config.AppDirectory)
+        };
+
+        await AssertNoRelatedGitAsync(protectedRoots);
+
         CheckoutWriteExclusion.SetTreeImmutable(_config.AppDirectory, immutable: false);
         foreach (var root in metadataRoots)
             CheckoutWriteExclusion.SetTreeImmutable(root, immutable: false);
+
+        await AssertNoRelatedGitAsync(protectedRoots);
     }
 
     private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
