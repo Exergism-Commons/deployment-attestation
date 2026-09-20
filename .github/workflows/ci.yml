@@ -23,6 +23,64 @@ jobs:
           bash -n install/verify-id-exergism-artifact-fence.sh
           python3 -m py_compile agent/validate-release-manifest.py
 
+      - name: Validate timer-aware quiescence helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          exercise_helper() {
+            local source_file="$1"
+            local helper_file
+
+            helper_file="$(mktemp)"
+            {
+              sed -n '/^unit_has_processes() {/,/^}$/p' "$source_file"
+              sed -n '/^unit_is_quiescent() {/,/^}$/p' "$source_file"
+            } > "$helper_file"
+
+            # shellcheck disable=SC1090
+            source "$helper_file"
+            rm -f -- "$helper_file"
+
+            MOCK_ACTIVE_STATE=inactive
+            systemctl() {
+              [[ "$1" == show ]] || return 90
+              local unit="$2"
+              case "$3" in
+                --property=LoadState)
+                  printf 'loaded\n'
+                  ;;
+                --property=ActiveState)
+                  printf '%s\n' "$MOCK_ACTIVE_STATE"
+                  ;;
+                --property=ControlGroup)
+                  printf '\n'
+                  ;;
+                --property=MainPID)
+                  # A timer must never rely on the service-only MainPID
+                  # property for its quiescence proof.
+                  [[ "$unit" == *.timer ]] && return 91
+                  printf '0\n'
+                  ;;
+                *)
+                  return 92
+                  ;;
+              esac
+            }
+
+            unit_is_quiescent ec-deployment-attestation@id.exergism.org.timer
+            unit_is_quiescent id-exergism.service
+
+            MOCK_ACTIVE_STATE=active
+            if unit_is_quiescent ec-deployment-attestation@id.exergism.org.timer; then
+              echo "Active timer was incorrectly accepted as quiescent in $source_file." >&2
+              exit 1
+            fi
+          }
+
+          exercise_helper install/install-id-exergism.sh
+          exercise_helper install/recover-id-exergism-install.sh
+
       - name: Validate restored resolver smoke predicate
         run: |
           set -euo pipefail
