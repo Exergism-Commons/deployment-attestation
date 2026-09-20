@@ -1493,4 +1493,46 @@ public sealed class SecurityAndRegressionTests
             () => CheckoutWriteExclusion.IsWritableDescriptor("flags:\tnot-octal"));
     }
 
+
+    [TestMethod]
+    public async Task CheckoutSealRejectsMultiplyLinkedRegularFile()
+    {
+        using var environment = TestEnvironment.Create();
+        var original = Path.Combine(environment.Root, "tracked-hardlink-source");
+        var alias = Path.Combine(environment.Root, "external-hardlink-alias");
+        File.WriteAllText(original, "verified");
+
+        var link = await ProcessRunner.RunAsync(
+            "ln",
+            new[] { original, alias },
+            TimeSpan.FromSeconds(10));
+        Assert.IsTrue(link.Success, link.StdErr);
+
+        TestAssert.Throws<AgentException>(
+            () => CheckoutWriteExclusion.EnsureSingleLinkNoFollow(original));
+    }
+
+    [TestMethod]
+    public void CheckoutSealStateDetectsPartialCrashState()
+    {
+        Assert.AreEqual(
+            CheckoutSealState.Unsealed,
+            CheckoutWriteExclusion.ClassifySealState(new[] { false, false, false }));
+        Assert.AreEqual(
+            CheckoutSealState.FullySealed,
+            CheckoutWriteExclusion.ClassifySealState(new[] { true, true, true }));
+        Assert.AreEqual(
+            CheckoutSealState.PartiallySealed,
+            CheckoutWriteExclusion.ClassifySealState(new[] { true, false, true }));
+    }
+
+    [TestMethod]
+    public void CheckoutSealRejectsUnexpectedLinkCountBeforeMutation()
+    {
+        TestAssert.Throws<AgentException>(
+            () => CheckoutWriteExclusion.EnsureSingleLinkCount(
+                2,
+                "/checkout/tracked.txt"));
+    }
+
 }
