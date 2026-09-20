@@ -1244,14 +1244,20 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task VerifySourceTreeExactAsync(string commit)
     {
+        var metadataBindings = new Dictionary<string, HashSet<string>>(
+            StringComparer.Ordinal);
         var metadataHierarchy = await VerifiedGitMetadataRootsAsync(
             _config.AppDirectory,
             commit,
             parentMetadataHierarchy: null,
-            GitMetadataTraversalMode.StrictTargetCommit);
+            GitMetadataTraversalMode.StrictTargetCommit,
+            metadataBindings);
         var metadataBeforeSeal = CaptureGitMetadataSnapshots(metadataHierarchy);
 
-        var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        var verified = await VerifyRepositoryExactAsync(
+            _config.AppDirectory,
+            commit,
+            expectedMetadataBindings: metadataBindings);
         await RevalidateRepositorySnapshotAsync(verified);
 
         CheckoutWriteExclusion.SealVerifiedState(verified, metadataBeforeSeal);
@@ -1271,7 +1277,10 @@ internal sealed class GitRepository(AgentConfig config)
         // active, then prove exact bytes/structure while no unprivileged writer
         // can open a new writable handle.
         var sealedMetadata = CaptureGitMetadataSnapshots(metadataHierarchy);
-        var sealedVerified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        var sealedVerified = await VerifyRepositoryExactAsync(
+            _config.AppDirectory,
+            commit,
+            expectedMetadataBindings: metadataBindings);
         await RevalidateRepositorySnapshotAsync(sealedVerified);
         EnsureGitMetadataSnapshotsUnchanged(sealedMetadata);
         CheckoutWriteExclusion.EnsureVerifiedStateSealed(sealedVerified, sealedMetadata);
@@ -1304,14 +1313,20 @@ internal sealed class GitRepository(AgentConfig config)
         // merely moving the final TOCTOU window to another read.
         await VerifySourceTreeExactAsync(commit);
 
+        var metadataBindings = new Dictionary<string, HashSet<string>>(
+            StringComparer.Ordinal);
         var metadataHierarchy = await VerifiedGitMetadataRootsAsync(
             _config.AppDirectory,
             commit,
             parentMetadataHierarchy: null,
-            GitMetadataTraversalMode.StrictTargetCommit);
+            GitMetadataTraversalMode.StrictTargetCommit,
+            metadataBindings);
         var metadataSnapshots = CaptureGitMetadataSnapshots(metadataHierarchy);
 
-        var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        var verified = await VerifyRepositoryExactAsync(
+            _config.AppDirectory,
+            commit,
+            expectedMetadataBindings: metadataBindings);
         await RevalidateRepositorySnapshotAsync(verified);
         EnsureGitMetadataSnapshotsUnchanged(metadataSnapshots);
 
@@ -1324,7 +1339,10 @@ internal sealed class GitRepository(AgentConfig config)
 
         EnsureGitMetadataSnapshotsUnchanged(metadataSnapshots);
 
-        var final = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        var final = await VerifyRepositoryExactAsync(
+            _config.AppDirectory,
+            commit,
+            expectedMetadataBindings: metadataBindings);
         await RevalidateRepositorySnapshotAsync(final);
         EnsureSnapshotsUnchanged(verified, final);
         EnsureGitMetadataSnapshotsUnchanged(metadataSnapshots);
@@ -1404,7 +1422,8 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
         string repository,
         string commit,
-        RepositoryDurabilitySnapshot? verified = null)
+        RepositoryDurabilitySnapshot? verified = null,
+        IReadOnlyDictionary<string, HashSet<string>>? expectedMetadataBindings = null)
     {
         verified ??= new RepositoryDurabilitySnapshot(
             new Dictionary<string, FileSnapshot>(StringComparer.Ordinal),
@@ -1412,6 +1431,10 @@ internal sealed class GitRepository(AgentConfig config)
         repository = Path.GetFullPath(repository);
         if (!Directory.Exists(repository) || new DirectoryInfo(repository).LinkTarget is not null)
             throw new AgentException($"Repository path is not a real directory: {repository}");
+
+        await EnsureRepositoryMetadataBindingAsync(
+            repository,
+            expectedMetadataBindings);
 
         var head = (await GitAtAsync(repository, [GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
         if (head != commit)
@@ -1510,10 +1533,49 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var submodule in submodules)
         {
             var subPath = GitTreePath.Resolve(repository, submodule.Key);
-            await VerifyRepositoryExactAsync(subPath, submodule.Value, verified);
+            await VerifyRepositoryExactAsync(
+                subPath,
+                submodule.Value,
+                verified,
+                expectedMetadataBindings);
         }
 
+        await EnsureRepositoryMetadataBindingAsync(
+            repository,
+            expectedMetadataBindings);
         return verified;
+    }
+
+    private async Task EnsureRepositoryMetadataBindingAsync(
+        string repository,
+        IReadOnlyDictionary<string, HashSet<string>>? expectedMetadataBindings)
+    {
+        if (expectedMetadataBindings is null)
+            return;
+
+        repository = Path.GetFullPath(repository);
+        if (!expectedMetadataBindings.TryGetValue(repository, out var expectedRoots))
+            throw new AgentException(
+                $"Repository metadata binding was not captured: {repository}");
+
+        var actualRoots = (await GitMetadataRootsAsync(repository))
+            .ToHashSet(StringComparer.Ordinal);
+        EnsureMetadataBindingUnchanged(repository, expectedRoots, actualRoots);
+    }
+
+    internal static void EnsureMetadataBindingUnchanged(
+        string repository,
+        IReadOnlySet<string> expectedRoots,
+        IReadOnlySet<string> actualRoots)
+    {
+        if (!expectedRoots.SetEquals(actualRoots))
+        {
+            var extra = actualRoots.Except(expectedRoots).Order(StringComparer.Ordinal);
+            var missing = expectedRoots.Except(actualRoots).Order(StringComparer.Ordinal);
+            throw new AgentException(
+                $"Git metadata binding changed for {repository}; " +
+                $"extra=[{string.Join(",", extra)}] missing=[{string.Join(",", missing)}]");
+        }
     }
 
     private async Task RevalidateRepositorySnapshotAsync(
@@ -1821,7 +1883,8 @@ internal sealed class GitRepository(AgentConfig config)
         string repository,
         string commit,
         IReadOnlyCollection<string>? parentMetadataHierarchy,
-        GitMetadataTraversalMode traversalMode)
+        GitMetadataTraversalMode traversalMode,
+        Dictionary<string, HashSet<string>>? repositoryBindings = null)
     {
         repository = Path.GetFullPath(repository);
         var ownRoots = await GitMetadataRootsAsync(repository);
@@ -1830,6 +1893,15 @@ internal sealed class GitRepository(AgentConfig config)
             ownRoots,
             parentMetadataHierarchy,
             isTopLevel: parentMetadataHierarchy is null);
+
+        if (repositoryBindings is not null)
+        {
+            if (!repositoryBindings.TryAdd(
+                    repository,
+                    ownRoots.ToHashSet(StringComparer.Ordinal)))
+                throw new AgentException(
+                    $"Duplicate repository metadata binding: {repository}");
+        }
 
         var hierarchy = new HashSet<string>(
             parentMetadataHierarchy ?? Array.Empty<string>(),
@@ -1920,7 +1992,8 @@ internal sealed class GitRepository(AgentConfig config)
                 submodulePath,
                 childCommit,
                 hierarchy,
-                traversalMode);
+                traversalMode,
+                repositoryBindings);
             hierarchy.UnionWith(childRoots);
         }
 
