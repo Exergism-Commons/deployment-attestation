@@ -311,14 +311,22 @@ target_active_state() {
 }
 
 quiesce_target_after_failed_validation() {
-  local i
-  systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
-  for i in {1..30}; do
-    target_quiescent && return 0
+  local attempts=0
+  while true; do
+    # A failed/partial stop is not a terminal outcome here. Recovery owns this
+    # target activation, so keep the recovery/finalizer locks held and retry
+    # until quiescence is actually proven.
+    systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+    if target_quiescent; then
+      return 0
+    fi
+
+    attempts=$((attempts + 1))
+    if (( attempts % 30 == 0 )); then
+      echo "CRITICAL: target is still not provably quiescent after failed recovery validation; retrying while locks remain held." >&2
+    fi
     sleep 1
   done
-  echo "CRITICAL: target could not be proven quiescent after failed recovery validation." >&2
-  return 1
 }
 
 wait_target_healthy_active() {
@@ -391,13 +399,13 @@ finalize_restored_active_target() {
   # active. Any failed/partial start or health validation must fail closed by
   # proving the target quiescent before finalization returns an error.
   if ! systemctl start "$TARGET_UNIT"; then
-    quiesce_target_after_failed_validation || true
+    quiesce_target_after_failed_validation
     echo "CRITICAL: restored active target failed to start during recovery finalization; recovered marker retained." >&2
     return 1
   fi
 
   if ! wait_target_healthy_active; then
-    quiesce_target_after_failed_validation || true
+    quiesce_target_after_failed_validation
     echo "CRITICAL: restored active target failed recovery finalization health validation; recovered marker retained." >&2
     return 1
   fi
