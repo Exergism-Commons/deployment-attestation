@@ -1671,4 +1671,34 @@ public sealed class SecurityAndRegressionTests
                 "/checkout/.git/refs/heads/config"));
     }
 
+
+    [TestMethod]
+    public void TrustedStateDirectoryRejectsWrongOwner()
+    {
+        TestAssert.Throws<AgentException>(
+            () => Durability.EnsureTrustedDirectoryAttributes(
+                ownerUid: 1000,
+                mode: UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                effectiveUid: 0,
+                path: "/var/lib/ec-deployment-attestation"));
+    }
+
+    [TestMethod]
+    public void TrustedStateDirectoryRejectsGroupOrOtherWrite()
+    {
+        TestAssert.Throws<AgentException>(
+            () => Durability.EnsureTrustedDirectoryAttributes(
+                ownerUid: 0,
+                mode: UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                      UnixFileMode.GroupWrite,
+                effectiveUid: 0,
+                path: "/var/lib/ec-deployment-attestation"));
+
+        Durability.EnsureTrustedDirectoryAttributes(
+            ownerUid: 0,
+            mode: UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+            effectiveUid: 0,
+            path: "/var/lib/ec-deployment-attestation");
+    }
+
 }
