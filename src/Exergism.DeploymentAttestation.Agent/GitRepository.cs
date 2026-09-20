@@ -693,50 +693,64 @@ internal static class CheckoutWriteExclusion
                 ? flags | FS_IMMUTABLE_FL
                 : flags & ~FS_IMMUTABLE_FL;
             var changed = desired != flags;
-            if (changed)
+            if (!changed)
             {
-                EnsureDescriptorSingleLink(fd, path);
-                if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref desired) != 0)
+                var unchanged = 0;
+                if (Native.ioctl(fd, FS_IOC_GETFLAGS, ref unchanged) != 0 ||
+                    ((unchanged & FS_IMMUTABLE_FL) != 0) != immutable)
                     throw new AgentException(
-                        $"Could not {(immutable ? "seal" : "unseal")} checkout path {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+                        $"Checkout write-exclusion state did not persist for {path}");
+                return false;
+            }
 
+            EnsureDescriptorSingleLink(fd, path);
+            if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref desired) != 0)
+                throw new AgentException(
+                    $"Could not {(immutable ? "seal" : "unseal")} checkout path {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+            try
+            {
                 if (immutable)
                 {
-                    try
-                    {
-                        // Once immutable is active Linux rejects new hardlinks.
-                        // Rechecking nlink here closes the link(2) race between
-                        // the precheck and FS_IOC_SETFLAGS.
-                        EnsureDescriptorSingleLink(fd, path);
-                    }
-                    catch (Exception linkRace)
-                    {
-                        var restore = flags;
-                        if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref restore) != 0)
-                        {
-                            var rollback = new AgentException(
-                                $"Could not roll back unsafe checkout seal for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
-                            throw new AgentException(
-                                $"A hardlink appeared while sealing checkout path {path}",
-                                new AggregateException(linkRace, rollback));
-                        }
-
-                        _ = Native.fsync(fd);
-                        throw;
-                    }
+                    // Once immutable is active Linux rejects new hardlinks.
+                    // Rechecking nlink here closes the link(2) race between
+                    // the precheck and FS_IOC_SETFLAGS.
+                    EnsureDescriptorSingleLink(fd, path);
                 }
 
                 if (Native.fsync(fd) != 0)
                     throw new AgentException(
                         $"Could not fsync checkout inode flags for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
-            }
 
-            var after = 0;
-            if (Native.ioctl(fd, FS_IOC_GETFLAGS, ref after) != 0 ||
-                ((after & FS_IMMUTABLE_FL) != 0) != immutable)
-                throw new AgentException(
-                    $"Checkout write-exclusion state did not persist for {path}");
-            return changed;
+                var after = 0;
+                if (Native.ioctl(fd, FS_IOC_GETFLAGS, ref after) != 0 ||
+                    ((after & FS_IMMUTABLE_FL) != 0) != immutable)
+                    throw new AgentException(
+                        $"Checkout write-exclusion state did not persist for {path}");
+
+                return true;
+            }
+            catch (Exception mutationFailure)
+            {
+                var restore = flags;
+                Exception? rollbackFailure = null;
+                if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref restore) != 0)
+                {
+                    rollbackFailure = new AgentException(
+                        $"Could not restore checkout inode flags for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+                }
+                else if (Native.fsync(fd) != 0)
+                {
+                    rollbackFailure = new AgentException(
+                        $"Could not fsync restored checkout inode flags for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+                }
+
+                if (rollbackFailure is not null)
+                    throw new AgentException(
+                        $"Checkout write-exclusion transition failed and rollback was incomplete for {path}",
+                        new AggregateException(mutationFailure, rollbackFailure));
+                throw;
+            }
         }
         finally
         {
