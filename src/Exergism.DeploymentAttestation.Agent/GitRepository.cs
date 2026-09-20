@@ -232,6 +232,7 @@ internal static class CheckoutWriteExclusion
     private const int AT_SYMLINK_NOFOLLOW = 0x100;
     private const uint STATX_TYPE = 0x00000001;
     private const uint STATX_NLINK = 0x00000004;
+    private const uint STATX_BASIC_STATS = 0x000007ff;
     private const ushort S_IFMT = 0xF000;
     private const ushort S_IFDIR = 0x4000;
     private const ushort S_IFREG = 0x8000;
@@ -265,23 +266,26 @@ internal static class CheckoutWriteExclusion
 
         var orderedFiles = files.Order(StringComparer.Ordinal).ToArray();
         var orderedDirectories = directories
-            .OrderByDescending(PathDepth)
+            .OrderBy(PathDepth)
             .ThenBy(path => path, StringComparer.Ordinal)
             .ToArray();
         var newlySealed = new List<string>();
 
         try
         {
-            foreach (var file in orderedFiles)
-            {
-                if (SetImmutableNoFollow(file, immutable: true))
-                    newlySealed.Add(file);
-            }
-
+            // Freeze the namespace from the repository roots downward before
+            // opening regular files. This prevents rename/unlink substitution
+            // while individual file inodes are being sealed.
             foreach (var directory in orderedDirectories)
             {
                 if (SetImmutableNoFollow(directory, immutable: true))
                     newlySealed.Add(directory);
+            }
+
+            foreach (var file in orderedFiles)
+            {
+                if (SetImmutableNoFollow(file, immutable: true))
+                    newlySealed.Add(file);
             }
         }
         catch (Exception sealFailure)
@@ -494,7 +498,6 @@ internal static class CheckoutWriteExclusion
 
     private static FileIdentity? TryReadDescriptorIdentity(string fdPath)
     {
-        const uint STATX_BASIC_STATS = 0x000007ff;
         if (Native.statx(
                 AT_FDCWD,
                 fdPath,
@@ -712,10 +715,12 @@ internal static class CheckoutWriteExclusion
             {
                 if (immutable)
                 {
-                    // Once immutable is active Linux rejects new hardlinks.
-                    // Rechecking nlink here closes the link(2) race between
-                    // the precheck and FS_IOC_SETFLAGS.
+                    // Once immutable is active Linux rejects new hardlinks and
+                    // renames of this inode. Recheck both the link count and
+                    // the pathname binding to close races between open() and
+                    // FS_IOC_SETFLAGS.
                     EnsureDescriptorSingleLink(fd, path);
+                    EnsurePathStillReferencesDescriptor(fd, path);
                 }
 
                 if (Native.fsync(fd) != 0)
@@ -756,6 +761,42 @@ internal static class CheckoutWriteExclusion
         {
             _ = Native.close(fd);
         }
+    }
+
+    private static void EnsurePathStillReferencesDescriptor(int fd, string path)
+    {
+        if (Native.statx(
+                fd,
+                "",
+                AT_EMPTY_PATH,
+                STATX_BASIC_STATS,
+                out var opened) != 0)
+            throw new AgentException(
+                $"Could not inspect sealed descriptor identity for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        if (Native.statx(
+                AT_FDCWD,
+                path,
+                AT_SYMLINK_NOFOLLOW,
+                STATX_BASIC_STATS,
+                out var named) != 0)
+            throw new AgentException(
+                $"Sealed checkout pathname disappeared or changed: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        EnsureSameIdentity(
+            FileIdentity.From(opened),
+            FileIdentity.From(named),
+            path);
+    }
+
+    internal static void EnsureSameIdentity(
+        FileIdentity opened,
+        FileIdentity named,
+        string path)
+    {
+        if (opened != named)
+            throw new AgentException(
+                $"Checkout pathname changed while being write-excluded: {path}");
     }
 
     internal static bool IsImmutableNoFollow(string path)
