@@ -450,8 +450,18 @@ PY
 
 unit_is_quiescent() {
   local unit="$1"
-  local load active main_pid cgroup cgroup_rc
-  local load_after active_after main_pid_after cgroup_after
+  local load active cgroup cgroup_rc
+  local load_after active_after cgroup_after
+  local check_main_pid=0 main_pid="" main_pid_after=""
+
+  case "$unit" in
+    *.service) check_main_pid=1 ;;
+    *.timer) ;;
+    *)
+      echo "Unsupported unit type for quiescence check: $unit" >&2
+      return 1
+      ;;
+  esac
 
   if ! load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
     echo "Could not determine LoadState for $unit" >&2
@@ -468,10 +478,13 @@ unit_is_quiescent() {
   }
 
   active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || return 1
-  main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
   cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)" || return 1
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
-  [[ "$main_pid" == 0 ]] || return 1
+
+  if (( check_main_pid == 1 )); then
+    main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
+    [[ "$main_pid" == 0 ]] || return 1
+  fi
 
   if unit_has_processes "$cgroup"; then
     return 1
@@ -482,16 +495,18 @@ unit_is_quiescent() {
 
   load_after="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)" || return 1
   active_after="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || return 1
-  main_pid_after="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
   cgroup_after="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)" || return 1
 
   [[ "$load_after" == "$load" ]] || return 1
   [[ "$active_after" == "inactive" || "$active_after" == "failed" ]] || return 1
-  [[ "$main_pid_after" == 0 ]] || return 1
   [[ "$cgroup_after" == "$cgroup" ]] || return 1
+
+  if (( check_main_pid == 1 )); then
+    main_pid_after="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
+    [[ "$main_pid_after" == 0 ]] || return 1
+  fi
   return 0
 }
-
 fence_and_quiesce_target_after_failure() {
   local attempts=0
   while ! establish_target_start_fence; do
