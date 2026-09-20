@@ -38,6 +38,17 @@ if [[ -z "${EC_INSTALLER_TRUSTED_STAGE:-}" ]]; then
   }
 
   bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"
+  cleanup_failed_bootstrap() {
+    local rc=$?
+    trap - EXIT
+    if [[ -n "${bootstrap_stage:-}" ]]; then
+      rm -rf -- "$bootstrap_stage" || true
+      bootstrap_stage=""
+    fi
+    exit "$rc"
+  }
+  trap cleanup_failed_bootstrap EXIT
+
   chmod 0700 "$bootstrap_stage"
   chown root:root "$bootstrap_stage"
 
@@ -248,6 +259,7 @@ for directory, _, _ in os.walk(stage, topdown=False):
 PY
 
   bootstrap_script="$bootstrap_stage/repo/install/install-id-exergism.sh"
+  trap - EXIT
   EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"
 fi
 
