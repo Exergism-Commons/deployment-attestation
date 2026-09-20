@@ -38,6 +38,15 @@ esac
   echo "Trusted installer staging directory must be root-owned mode 0700." >&2
   exit 1
 }
+
+cleanup_trusted_stage_early() {
+  local rc=$?
+  trap - EXIT
+  rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true
+  exit "$rc"
+}
+trap cleanup_trusted_stage_early EXIT
+
 [[ "${BASH_SOURCE[0]}" == "$INSTALLER_TRUSTED_STAGE/install-id-exergism.sh" ]] || {
   echo "Installer must execute from the verified root-owned staging pathname." >&2
   exit 1
@@ -71,14 +80,6 @@ actual_installer_sha256="$(sha256sum -- "${BASH_SOURCE[0]}" | awk '{print $1}')"
   echo "EC_NATIVE_AGENT_BINARY must point to the reviewed Native AOT binary." >&2
   exit 1
 }
-
-cleanup_trusted_stage_early() {
-  local rc=$?
-  trap - EXIT
-  rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true
-  exit "$rc"
-}
-trap cleanup_trusted_stage_early EXIT
 
 [[ -x /usr/bin/python3 ]] || {
   echo "Required dependency not found: /usr/bin/python3" >&2
