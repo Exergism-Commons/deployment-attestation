@@ -1535,4 +1535,24 @@ public sealed class SecurityAndRegressionTests
                 "/checkout/tracked.txt"));
     }
 
+
+    [TestMethod]
+    public void MetadataBindingRejectsRepositoryRootSubstitution()
+    {
+        var expected = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "/checkout/.git/modules/one"
+        };
+        var actual = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "/checkout/.git/modules/two"
+        };
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureMetadataBindingUnchanged(
+                "/checkout/submodule",
+                expected,
+                actual));
+    }
+
 }
