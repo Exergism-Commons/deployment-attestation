@@ -23,6 +23,47 @@ jobs:
           bash -n install/verify-id-exergism-artifact-fence.sh
           python3 -m py_compile agent/validate-release-manifest.py
 
+      - name: Validate restored resolver smoke predicate
+        run: |
+          set -euo pipefail
+
+          awk '
+            /^restored_smoke_healthy\(\) \{$/ { capture=1 }
+            capture { print }
+            capture && /^}$/ { exit }
+          ' install/recover-id-exergism-install.sh > /tmp/restored-smoke-helper.sh
+
+          # shellcheck disable=SC1091
+          source /tmp/restored-smoke-helper.sh
+
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+
+          SMOKE="$tmpdir/absent-smoke"
+          restored_smoke_healthy
+
+          SMOKE="$tmpdir/passing-smoke"
+          cat > "$SMOKE" <<'SH'
+          #!/bin/sh
+          test "$EC_LOCAL_URL" = "http://127.0.0.1:8080"
+          SH
+          chmod +x "$SMOKE"
+          restored_smoke_healthy
+
+          SMOKE="$tmpdir/failing-smoke"
+          cat > "$SMOKE" <<'SH'
+          #!/bin/sh
+          exit 1
+          SH
+          chmod +x "$SMOKE"
+          if restored_smoke_healthy; then
+            echo "Failing restored smoke check was accepted." >&2
+            exit 1
+          fi
+
+          grep -Fq '|| ! restored_smoke_healthy \' install/recover-id-exergism-install.sh
+          ! grep -Fq '|| { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; } \' install/recover-id-exergism-install.sh
+
       - name: Exercise trusted installer bootstrap
         run: |
           set -euo pipefail
@@ -417,6 +458,8 @@ jobs:
           grep -Fq 'Agent coordination lock is busy' install/recover-id-exergism-install.sh
           grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
           grep -Fq 'previously active resolver could not be restored healthy after direct recovery' install/recover-id-exergism-install.sh
+          grep -Fq 'restored_smoke_healthy()' install/recover-id-exergism-install.sh
+          grep -Fq '|| ! restored_smoke_healthy \' install/recover-id-exergism-install.sh
           grep -Fq '|| ! "$ARTIFACT_FENCE_AUDITOR"; then' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_unit "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Restore timer activation only after the old generation is fully restored' install/recover-id-exergism-install.sh
