@@ -210,7 +210,7 @@ repo_inputs = (
     ("spec/release-manifest-v0.1.schema.json", 0o400, "53338bbdbb822c8a94bfbc45246af56017165a0af14d1fea818c6fc9d23120b2"),
     ("install/finalize-id-exergism-recovery.sh", 0o500, "c3703f2b6b9c5eb053a17776b2e25b6e67d877476eef691411686c555ef59531"),
     ("packaging/id-exergism-install-recovery-finalize.service", 0o400, "758f1921d2f344d071a141fdd7611ba72f44dcaa71288e1fe07c7868278552b0"),
-    ("install/recover-id-exergism-install.sh", 0o500, "22c0c5edef2d9e79d273efe7388ffe1160d57712f09ef8eef88e187fc30b950e"),
+    ("install/recover-id-exergism-install.sh", 0o500, "7e871e095a20d14516b309d212b403bc766dc2382d93f399fe11972b77a5a966"),
     ("packaging/id-exergism-install-recovery.service", 0o400, "6b4590d37a30c8f8567b07ee69e2f9f74454f9f7e39e5fd102ff4dbe9a732d6c"),
     ("packaging/id-exergism-install-recovery-interlock.conf", 0o400, "fed104865dbd437dbb9397f5e9982942ab691ec8befc6a2d693dd2e6f73001fd"),
     ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400, "9a132fe45b037d2082ebec87948743180ffc19d1588a1d128937ddda912440d9"),
@@ -662,8 +662,18 @@ PY
 
 unit_is_quiescent() {
   local unit="$1"
-  local load active main_pid cgroup cgroup_rc
-  local load_after active_after main_pid_after cgroup_after
+  local load active cgroup cgroup_rc
+  local load_after active_after cgroup_after
+  local check_main_pid=0 main_pid="" main_pid_after=""
+
+  case "$unit" in
+    *.service) check_main_pid=1 ;;
+    *.timer) ;;
+    *)
+      echo "Unsupported unit type for quiescence check: $unit" >&2
+      return 1
+      ;;
+  esac
 
   if ! load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
     echo "Could not determine LoadState for $unit" >&2
@@ -680,10 +690,13 @@ unit_is_quiescent() {
   }
 
   active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || return 1
-  main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
   cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)" || return 1
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
-  [[ "$main_pid" == 0 ]] || return 1
+
+  if (( check_main_pid == 1 )); then
+    main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
+    [[ "$main_pid" == 0 ]] || return 1
+  fi
 
   if unit_has_processes "$cgroup"; then
     return 1
@@ -694,19 +707,23 @@ unit_is_quiescent() {
 
   # The cgroup walk is not an atomic systemd snapshot. Re-sample every
   # state component after it so a concurrent queued/manual start cannot be
-  # accepted from the stale inactive/MainPID=0 observation.
+  # accepted from the stale inactive observation. MainPID is service-specific:
+  # timers have no process identity of their own and are fenced by ActiveState
+  # plus the cgroup check instead.
   load_after="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)" || return 1
   active_after="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || return 1
-  main_pid_after="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
   cgroup_after="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)" || return 1
 
   [[ "$load_after" == "$load" ]] || return 1
   [[ "$active_after" == "inactive" || "$active_after" == "failed" ]] || return 1
-  [[ "$main_pid_after" == 0 ]] || return 1
   [[ "$cgroup_after" == "$cgroup" ]] || return 1
+
+  if (( check_main_pid == 1 )); then
+    main_pid_after="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
+    [[ "$main_pid_after" == 0 ]] || return 1
+  fi
   return 0
 }
-
 stop_and_wait_quiescent() {
   local unit="$1" i
   systemctl stop "$unit" >/dev/null 2>&1 || true
