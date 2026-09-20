@@ -23,6 +23,18 @@ jobs:
           bash -n install/verify-id-exergism-artifact-fence.sh
           python3 -m py_compile agent/validate-release-manifest.py
 
+      - name: Exercise trusted installer bootstrap
+        run: |
+          set -euo pipefail
+          sudo env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            EC_NATIVE_AGENT_BINARY=/bin/true \
+            "$PWD/install/install-id-exergism.sh" --bootstrap-self-test
+          if sudo find /run -maxdepth 1 -type d -name 'ec-deployment-attestation-installer.*' -print -quit | grep -q .; then
+            echo "Installer bootstrap staging leaked after self-test." >&2
+            exit 1
+          fi
+
       - name: Validate JSON schema documents
         run: |
           python3 -m json.tool spec/attestation-v0.1.schema.json >/dev/null
@@ -151,9 +163,12 @@ jobs:
           grep -Fq 'AGENT_SOURCE="$EC_NATIVE_AGENT_BINARY"' install/install-id-exergism.sh
           test ! -e agent/ec-deployment-agent.sh
           ! grep -Fq 'ROOT/agent/ec-deployment-agent.sh' install/install-id-exergism.sh
+          grep -Fq '#!/bin/bash' install/install-id-exergism.sh
+          grep -Fq 'export PATH="/usr/sbin:/usr/bin:/sbin:/bin"' install/install-id-exergism.sh
+          grep -Fq 'unset LD_PRELOAD LD_LIBRARY_PATH' install/install-id-exergism.sh
           grep -Fq 'bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"' install/install-id-exergism.sh
-          grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script"' install/install-id-exergism.sh
-          grep -Fq 'python3 - "/proc/$/fd/255" "$bootstrap_script" "$bootstrap_digest"' install/install-id-exergism.sh
+          grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"' install/install-id-exergism.sh
+          grep -Fq '/usr/bin/python3 -I - "/proc/${BASHPID}/fd/255" "$bootstrap_script" "$bootstrap_digest"' install/install-id-exergism.sh
           grep -Fq 'os.pread(fd, 1024 * 1024, offset)' install/install-id-exergism.sh
           grep -Fq 'NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"' install/install-id-exergism.sh
           grep -Fq 'AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"' install/install-id-exergism.sh
