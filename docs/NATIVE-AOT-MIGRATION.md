@@ -39,14 +39,39 @@ CI runs a dedicated MSTest unit-test project first, then publishes a real `linux
 
 The repository has one deployment-agent implementation: the Native AOT executable.
 
-A reviewed architecture-specific binary is mandatory:
+A reviewed architecture-specific binary is mandatory, and the privileged installer must itself be staged and verified before execution. Do **not** run the installer directly from a user-writable checkout.
+
+Obtain the reviewed SHA-256 values for both the installer and Native AOT binary through a channel independent of the local checkout, then use the same trusted staging boundary as the main README:
 
 ```sh
-sudo EC_NATIVE_AGENT_BINARY=/path/to/ec-deployment-agent \
-  ./install/install-id-exergism.sh
+SOURCE_ROOT="$PWD"
+INSTALLER_SHA256="<reviewed lowercase SHA-256 of install/install-id-exergism.sh>"
+AGENT="/path/to/reviewed/ec-deployment-agent"
+AGENT_SHA256="<reviewed lowercase SHA-256 of the Native AOT agent>"
+
+STAGE="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
+sudo chmod 0700 "$STAGE"
+sudo chown root:root "$STAGE"
+sudo install -o root -g root -m 0500 \
+  "$SOURCE_ROOT/install/install-id-exergism.sh" \
+  "$STAGE/install-id-exergism.sh"
+
+if ! printf '%s  %s\n' "$INSTALLER_SHA256" "$STAGE/install-id-exergism.sh" | sudo sha256sum -c -; then
+  sudo rm -rf -- "$STAGE"
+  exit 1
+fi
+
+sudo env -i \
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  EC_INSTALLER_TRUSTED_STAGE="$STAGE" \
+  EC_INSTALLER_SOURCE_ROOT="$SOURCE_ROOT" \
+  EC_INSTALLER_SHA256="$INSTALLER_SHA256" \
+  EC_NATIVE_AGENT_BINARY="$AGENT" \
+  EC_NATIVE_AGENT_SHA256="$AGENT_SHA256" \
+  "$STAGE/install-id-exergism.sh"
 ```
 
-The installer requires the supplied path to be a real executable file, pins the exact candidate into root-owned process-private staging, validates its configuration, runs its dependency-free `self-test`, and installs that pinned object through the durable generation transaction.
+The root-owned staged installer re-verifies its own digest, treats the checkout as untrusted input, authenticates every repository-sourced helper/configuration file against the SHA-256 table embedded in the reviewed installer, pins the exact Native AOT candidate matching `EC_NATIVE_AGENT_SHA256`, validates its configuration, runs its dependency-free `self-test`, and installs that pinned object through the durable generation transaction.
 
 Pre-install transaction recovery is always executed by the already-pinned Native AOT candidate. Supported historical journal formats are migrated/reconciled there; unsupported formats fail closed. The installer does not execute a legacy agent during migration.
 
