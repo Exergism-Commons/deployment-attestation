@@ -1555,4 +1555,18 @@ public sealed class SecurityAndRegressionTests
                 actual));
     }
 
+
+    [TestMethod]
+    public void CheckoutSealRejectsPathIdentitySubstitution()
+    {
+        var opened = new FileIdentity(8, 1, 100);
+        var named = new FileIdentity(8, 1, 101);
+
+        TestAssert.Throws<AgentException>(
+            () => CheckoutWriteExclusion.EnsureSameIdentity(
+                opened,
+                named,
+                "/checkout/tracked.txt"));
+    }
+
 }
