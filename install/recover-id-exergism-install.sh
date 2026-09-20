@@ -354,10 +354,14 @@ ensure_target_start_fence_root() {
   install -d -o root -g root -m 0700 "$TARGET_START_FENCE_ROOT"
 }
 
+runtime_target_mask_present() {
+  [[ -L "$TARGET_RUNTIME_MASK" ]] || return 1
+  [[ "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]]
+}
+
 target_start_fence_active() {
   local load
-  [[ -L "$TARGET_RUNTIME_MASK" ]] || return 1
-  [[ "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]] || return 1
+  runtime_target_mask_present || return 1
   load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)" || return 1
   [[ "$load" == "masked" ]]
 }
@@ -380,7 +384,7 @@ release_owned_target_start_fence() {
   }
 
   if path_exists_any "$TARGET_RUNTIME_MASK"; then
-    [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]] || {
+    runtime_target_mask_present || {
       echo "CRITICAL: recovery start-fence marker exists but runtime unit override is not our /dev/null mask." >&2
       return 1
     }
@@ -403,16 +407,27 @@ release_owned_target_start_fence() {
 establish_target_start_fence() {
   local marker_tmp
   ensure_target_start_fence_root || return 1
-  target_start_fence_active && return 0
 
+  # A pre-existing /dev/null runtime mask is already an effective future-start
+  # fence. It may be administrative (no marker) or ours from an earlier partial
+  # attempt (valid marker). Do not remove or overwrite either case.
   if path_exists_any "$TARGET_RUNTIME_MASK"; then
-    echo "CRITICAL: unexpected runtime unit override prevents installing target start fence: $TARGET_RUNTIME_MASK" >&2
-    return 1
+    runtime_target_mask_present || {
+      echo "CRITICAL: unexpected runtime unit override prevents installing target start fence: $TARGET_RUNTIME_MASK" >&2
+      return 1
+    }
+    if path_exists_any "$TARGET_START_FENCE_MARKER"; then
+      owned_target_start_fence_marker_valid || {
+        echo "CRITICAL: runtime target mask exists with an invalid recovery ownership marker." >&2
+        return 1
+      }
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || return 1
+    return 0
   fi
 
   if path_exists_any "$TARGET_START_FENCE_MARKER"; then
-    [[ -f "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]] || return 1
-    [[ "$(stat -c '%u:%a' -- "$TARGET_START_FENCE_MARKER")" == "0:600" ]] || return 1
+    owned_target_start_fence_marker_valid || return 1
   else
     marker_tmp="$(mktemp "$TARGET_START_FENCE_ROOT/.target-start-fence.XXXXXX")" || return 1
     chown root:root "$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
@@ -423,9 +438,8 @@ establish_target_start_fence() {
 
   systemctl mask --runtime "$TARGET_UNIT" >/dev/null 2>&1 || return 1
   systemctl daemon-reload >/dev/null 2>&1 || return 1
-  target_start_fence_active
+  runtime_target_mask_present
 }
-
 unit_has_processes() {
   local cgroup="$1"
   [[ -n "$cgroup" ]] || return 1
@@ -520,6 +534,9 @@ fence_and_quiesce_target_after_failure() {
 
   while true; do
     systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+    # A unit that was already loaded when the runtime mask was created may not
+    # report LoadState=masked until after it is stopped and the manager reloads.
+    systemctl daemon-reload >/dev/null 2>&1 || true
     if target_start_fence_active && unit_is_quiescent "$TARGET_UNIT" && target_start_fence_active; then
       return 0
     fi
@@ -645,16 +662,41 @@ restored_smoke_healthy() {
   EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
 }
 
+wait_restored_target_healthy() {
+  local i state
+  for i in {1..30}; do
+    state="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)" || return 1
+    case "$state" in
+      active)
+        if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1 \
+           && restored_smoke_healthy; then
+          "$ARTIFACT_FENCE_AUDITOR" || return 1
+          return 0
+        fi
+        ;;
+      activating|reloading) ;;
+      inactive|failed|deactivating|not-found)
+        echo "Previously active resolver entered terminal state before becoming healthy: $state" >&2
+        return 1
+        ;;
+      *)
+        echo "Unexpected resolver ActiveState while waiting for recovery health: $state" >&2
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  echo "Previously active resolver did not become healthy within recovery readiness window." >&2
+  return 1
+}
+
 if [[ "$RECOVERY_MODE" == "normal" && "$target_was_active" == 1 ]]; then
   if [[ "$MODE" == "normal" ]]; then
     # Direct installer recovery is not executing as the target's prerequisite,
     # so restore the previously-active production resolver synchronously before
     # returning to preflight/network work.
     if ! systemctl start "$TARGET_UNIT" \
-       || ! systemctl is-active --quiet "$TARGET_UNIT" \
-       || ! curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null \
-       || ! restored_smoke_healthy \
-       || ! "$ARTIFACT_FENCE_AUDITOR"; then
+       || ! wait_restored_target_healthy; then
       fence_and_quiesce_target_after_failure
       echo "CRITICAL: previously active resolver could not be restored healthy after direct recovery; target is fenced+quiescent and recovered marker retained." >&2
       exit 1

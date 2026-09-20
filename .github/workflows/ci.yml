@@ -119,8 +119,80 @@ jobs:
             exit 1
           fi
 
-          grep -Fq '|| ! restored_smoke_healthy \' install/recover-id-exergism-install.sh
-          ! grep -Fq '|| { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; } \' install/recover-id-exergism-install.sh
+          grep -Fq 'wait_restored_target_healthy()' install/recover-id-exergism-install.sh
+          grep -Fq '|| ! wait_restored_target_healthy; then' install/recover-id-exergism-install.sh
+          ! grep -Fq '|| ! curl -fsS --max-time 15 http://127.0.0.1:8080/' install/recover-id-exergism-install.sh
+
+      - name: Validate resolver readiness tolerates active-before-listening race
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          exercise_installer_readiness() (
+            sed -n '/^wait_target_healthy() {/,/^}$/p' install/install-id-exergism.sh > /tmp/installer-readiness.sh
+            # shellcheck disable=SC1091
+            source /tmp/installer-readiness.sh
+            TARGET_UNIT=id-exergism.service
+            SMOKE=smoke_mock
+            CURL_CALLS=0
+            systemctl() {
+              [[ "$1" == show && "$2" == "$TARGET_UNIT" ]] || return 99
+              printf 'active\n'
+            }
+            curl() {
+              CURL_CALLS=$((CURL_CALLS + 1))
+              (( CURL_CALLS >= 2 ))
+            }
+            smoke_mock() { return 0; }
+            verify_production_artifact_fence() { return 0; }
+            sleep() { :; }
+            wait_target_healthy
+            [[ "$CURL_CALLS" == 2 ]]
+          )
+
+          exercise_recovery_readiness() (
+            sed -n '/^wait_restored_target_healthy() {/,/^}$/p' install/recover-id-exergism-install.sh > /tmp/recovery-readiness.sh
+            # shellcheck disable=SC1091
+            source /tmp/recovery-readiness.sh
+            TARGET_UNIT=id-exergism.service
+            ARTIFACT_FENCE_AUDITOR=artifact_fence_mock
+            CURL_CALLS=0
+            systemctl() {
+              [[ "$1" == show && "$2" == "$TARGET_UNIT" ]] || return 99
+              printf 'active\n'
+            }
+            curl() {
+              CURL_CALLS=$((CURL_CALLS + 1))
+              (( CURL_CALLS >= 2 ))
+            }
+            restored_smoke_healthy() { return 0; }
+            artifact_fence_mock() { return 0; }
+            sleep() { :; }
+            wait_restored_target_healthy
+            [[ "$CURL_CALLS" == 2 ]]
+          )
+
+          exercise_finalizer_readiness() (
+            sed -n '/^wait_target_healthy_active() {/,/^}$/p' install/finalize-id-exergism-recovery.sh > /tmp/finalizer-readiness.sh
+            # shellcheck disable=SC1091
+            source /tmp/finalizer-readiness.sh
+            SMOKE=/definitely/absent
+            ARTIFACT_FENCE_AUDITOR=artifact_fence_mock
+            CURL_CALLS=0
+            target_active_state() { printf 'active\n'; }
+            curl() {
+              CURL_CALLS=$((CURL_CALLS + 1))
+              (( CURL_CALLS >= 2 ))
+            }
+            artifact_fence_mock() { return 0; }
+            sleep() { :; }
+            wait_target_healthy_active
+            [[ "$CURL_CALLS" == 2 ]]
+          )
+
+          exercise_installer_readiness
+          exercise_recovery_readiness
+          exercise_finalizer_readiness
 
       - name: Validate finalizer fail-closed target policy
         run: |
@@ -129,6 +201,7 @@ jobs:
           : > /tmp/quiesce-restored-target.sh
           for fn in \
             ensure_target_start_fence_root \
+            runtime_target_mask_present \
             target_start_fence_active \
             owned_target_start_fence_marker_valid \
             release_owned_target_start_fence \
@@ -232,7 +305,20 @@ jobs:
           [[ "$UNMASK_CALLS" == 0 ]]
           [[ "$DAEMON_RELOAD_CALLS" == 0 ]]
           [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink "$TARGET_RUNTIME_MASK")" == /dev/null ]]
+
+          # A /dev/null mask can exist while systemd still reports the already-loaded
+          # active unit as loaded. Establishment must accept the mask itself and let
+          # the stop+reload loop converge instead of treating its own override as foreign.
+          target_start_fence_active() { return 1; }
+          establish_target_start_fence
+          [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink "$TARGET_RUNTIME_MASK")" == /dev/null ]]
           rm -f -- "$TARGET_RUNTIME_MASK"
+
+          # Restore the real helper for subsequent ownership/release checks.
+          unset -f target_start_fence_active
+          sed -n '/^target_start_fence_active() {/,/^}$/p' install/finalize-id-exergism-recovery.sh > /tmp/target-start-fence-active.sh
+          # shellcheck disable=SC1091
+          source /tmp/target-start-fence-active.sh
 
           # A crash after unmask but before marker cleanup is idempotently recoverable.
           printf '%s\n' "$TARGET_UNIT" > "$TARGET_START_FENCE_MARKER"
@@ -736,8 +822,9 @@ jobs:
           grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
           grep -Fq 'previously active resolver could not be restored healthy after direct recovery' install/recover-id-exergism-install.sh
           grep -Fq 'restored_smoke_healthy()' install/recover-id-exergism-install.sh
-          grep -Fq '|| ! restored_smoke_healthy \' install/recover-id-exergism-install.sh
-          grep -Fq '|| ! "$ARTIFACT_FENCE_AUDITOR"; then' install/recover-id-exergism-install.sh
+          grep -Fq 'wait_restored_target_healthy()' install/recover-id-exergism-install.sh
+          grep -Fq '|| ! wait_restored_target_healthy; then' install/recover-id-exergism-install.sh
+          grep -Fq '"$ARTIFACT_FENCE_AUDITOR" || return 1' install/recover-id-exergism-install.sh
           grep -Fq 'Restore timer activation only after the old generation is fully restored' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl --no-block start "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'Timer enablement restore mismatch' install/recover-id-exergism-install.sh
@@ -766,8 +853,12 @@ jobs:
           grep -Fq 'finalize_restored_active_target()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'restored active target failed to start during recovery finalization' install/finalize-id-exergism-recovery.sh
           grep -Fq 'restored active target failed recovery finalization health validation' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'runtime_target_mask_present()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'target_start_fence_active()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'release_owned_target_start_fence()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'runtime_target_mask_present()' install/recover-id-exergism-install.sh
+          grep -Fq 'wait_target_healthy()' install/install-id-exergism.sh
+          grep -Fq 'wait_target_healthy_active()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'systemctl unmask --runtime "$TARGET_UNIT"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'release_owned_target_start_fence()' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl unmask --runtime "$TARGET_UNIT"' install/recover-id-exergism-install.sh
@@ -836,15 +927,17 @@ jobs:
           first_restore = recovery.index('restore_artifact "$key"')
           validate = recovery.index('"$VALIDATOR" || restore_rc=1')
           retire = recovery.index('mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
+          direct_health_helper = recovery.index('wait_restored_target_healthy()')
+          direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR" || return 1', direct_health_helper)
           direct_start = recovery.index('if ! systemctl start "$TARGET_UNIT"')
-          direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR"', direct_start)
+          direct_health_call = recovery.index('|| ! wait_restored_target_healthy; then', direct_start)
           owned_fence_release = recovery.index('release_owned_target_start_fence || {', validate)
-          direct_fence_quiesce = recovery.index('fence_and_quiesce_target_after_failure', direct_fence)
+          direct_fence_quiesce = recovery.index('fence_and_quiesce_target_after_failure', direct_health_call)
           direct_restart = recovery.index('previously active resolver could not be restored healthy after direct recovery')
           timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
           assert dependent_quiesce_helper < preserve_boot_start < updater_quiesce_call < target_quiesce_call < hard_quiesce
           assert hard_quiesce < first_restore
-          assert validate < owned_fence_release < retire < direct_start < direct_fence < direct_fence_quiesce < direct_restart < timer_restore
+          assert validate < owned_fence_release < retire < direct_health_helper < direct_fence < direct_start < direct_health_call < direct_fence_quiesce < direct_restart < timer_restore
 
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
@@ -862,10 +955,13 @@ jobs:
           phase_to_recovering = recovery.index('mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
           assert select_recovered < recovered_completion < phase_to_recovering
 
-          live_fence = text.index('verify_production_artifact_fence', text.index('systemctl start "$TARGET_UNIT"'))
-          timer_start = text.index('systemctl start "$TIMER_UNIT"', live_fence)
+          install_health_helper = text.index('wait_target_healthy()')
+          live_fence = text.index('verify_production_artifact_fence || return 1', install_health_helper)
+          target_start = text.index('systemctl start "$TARGET_UNIT"')
+          install_health_call = text.index('wait_target_healthy', target_start)
+          timer_start = text.index('systemctl start "$TIMER_UNIT"', install_health_call)
           final_commit = text.index('finalize_install_transaction', timer_start)
-          assert live_fence < timer_start < final_commit
+          assert install_health_helper < live_fence < target_start < install_health_call < timer_start < final_commit
 
           finalizer_text = Path('install/finalize-id-exergism-recovery.sh').read_text()
           finalizer_health = finalizer_text.index('wait_target_healthy_active()')

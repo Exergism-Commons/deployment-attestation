@@ -208,9 +208,9 @@ repo_inputs = (
     ("install/verify-id-exergism-artifact-fence.sh", 0o500, "6001cc876a7e2a9d390f7aa62ed86d5a355af005798faee8de9d6744c515e3a9"),
     ("agent/validate-release-manifest.py", 0o500, "1d9c3f889e89b8ff5acb8659504655e7237ad32f5e3e4c4bd29fb719150ab481"),
     ("spec/release-manifest-v0.1.schema.json", 0o400, "53338bbdbb822c8a94bfbc45246af56017165a0af14d1fea818c6fc9d23120b2"),
-    ("install/finalize-id-exergism-recovery.sh", 0o500, "c3703f2b6b9c5eb053a17776b2e25b6e67d877476eef691411686c555ef59531"),
+    ("install/finalize-id-exergism-recovery.sh", 0o500, "2667cc94cf281f94ba91e2910ef6da760c05bf70bd36a58332496f5c9a4326f9"),
     ("packaging/id-exergism-install-recovery-finalize.service", 0o400, "758f1921d2f344d071a141fdd7611ba72f44dcaa71288e1fe07c7868278552b0"),
-    ("install/recover-id-exergism-install.sh", 0o500, "7e871e095a20d14516b309d212b403bc766dc2382d93f399fe11972b77a5a966"),
+    ("install/recover-id-exergism-install.sh", 0o500, "79890531158810456562c374cc1fe0ebb5a35505f2014e750cca764a9dbdfe1a"),
     ("packaging/id-exergism-install-recovery.service", 0o400, "6b4590d37a30c8f8567b07ee69e2f9f74454f9f7e39e5fd102ff4dbe9a732d6c"),
     ("packaging/id-exergism-install-recovery-interlock.conf", 0o400, "fed104865dbd437dbb9397f5e9982942ab691ec8befc6a2d693dd2e6f73001fd"),
     ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400, "9a132fe45b037d2082ebec87948743180ffc19d1588a1d128937ddda912440d9"),
@@ -828,6 +828,34 @@ verify_production_artifact_fence() {
   "$ARTIFACT_FENCE_AUDITOR"
 }
 
+wait_target_healthy() {
+  local i state
+  for i in {1..30}; do
+    state="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)" || return 1
+    case "$state" in
+      active)
+        if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1 \
+           && EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; then
+          verify_production_artifact_fence || return 1
+          return 0
+        fi
+        ;;
+      activating|reloading) ;;
+      inactive|failed|deactivating|not-found)
+        echo "Production resolver entered terminal state before becoming healthy: $state" >&2
+        return 1
+        ;;
+      *)
+        echo "Unexpected production resolver ActiveState while waiting for health: $state" >&2
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  echo "Production resolver did not become healthy within installation readiness window." >&2
+  return 1
+}
+
 artifact_path() {
   case "$1" in
     agent) printf '%s\n' "$AGENT" ;;
@@ -986,10 +1014,7 @@ persist_installed_generation
 mark_generation_validated
 
 systemctl start "$TARGET_UNIT"
-systemctl is-active --quiet "$TARGET_UNIT"
-curl -q -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
-EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
-verify_production_artifact_fence
+wait_target_healthy
 
 systemctl start "$TIMER_UNIT"
 systemctl is-active --quiet "$TIMER_UNIT"
