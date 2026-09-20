@@ -18,8 +18,12 @@ fi
 # CWD is deliberately preserved across exec; the trusted second stage pins "."
 # as the repository root, so a parent rename/replacement cannot redirect it.
 if [[ -z "${EC_INSTALLER_TRUSTED_STAGE:-}" ]]; then
-  command -v python3 >/dev/null 2>&1 || {
-    echo "Required dependency not found: python3" >&2
+  if [[ -z "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
+    echo "EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary." >&2
+    exit 1
+  fi
+  [[ -x /usr/bin/python3 ]] || {
+    echo "Required dependency not found: /usr/bin/python3" >&2
     exit 1
   }
   command -v mktemp >/dev/null 2>&1 || {
@@ -30,90 +34,201 @@ if [[ -z "${EC_INSTALLER_TRUSTED_STAGE:-}" ]]; then
   bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"
   chmod 0700 "$bootstrap_stage"
   chown root:root "$bootstrap_stage"
-  bootstrap_script="$bootstrap_stage/install-id-exergism.sh"
-  bootstrap_digest="$bootstrap_stage/original-installer.sha256"
 
-  /usr/bin/python3 -I - "/proc/${BASHPID}/fd/255" "$bootstrap_script" "$bootstrap_digest" <<'PY'
+  /usr/bin/python3 -I - \
+    "/proc/${BASHPID}/fd/255" \
+    "$bootstrap_stage" \
+    "$EC_NATIVE_AGENT_BINARY" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-source_procfd, destination, digest_path = sys.argv[1:4]
-fd = os.open(source_procfd, os.O_RDONLY | os.O_CLOEXEC)
-try:
-    before = os.fstat(fd)
-    if not stat.S_ISREG(before.st_mode):
-        raise SystemExit("installer source descriptor is not a regular file")
+script_procfd, stage, agent_source = sys.argv[1:4]
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC = os.O_CLOEXEC
 
+def identity(st):
+    return (
+        st.st_dev,
+        st.st_ino,
+        st.st_mode,
+        st.st_size,
+        st.st_mtime_ns,
+        st.st_ctime_ns,
+    )
+
+def copy_fd_verified(source_fd, destination, mode, label, require_executable=False):
+    before = os.fstat(source_fd)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit(f"{label} must be a regular file")
+    if require_executable and before.st_mode & 0o111 == 0:
+        raise SystemExit(f"{label} must be executable")
+
+    os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+    dest_fd = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+        mode,
+    )
     digest = hashlib.sha256()
     offset = 0
-    out_fd = os.open(
-        destination,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-        0o500,
-    )
     try:
         while True:
-            chunk = os.pread(fd, 1024 * 1024, offset)
+            chunk = os.pread(source_fd, 1024 * 1024, offset)
             if not chunk:
                 break
             offset += len(chunk)
             digest.update(chunk)
             view = memoryview(chunk)
             while view:
-                written = os.write(out_fd, view)
+                written = os.write(dest_fd, view)
                 view = view[written:]
-        os.fchmod(out_fd, 0o500)
-        os.fchown(out_fd, 0, 0)
-        os.fsync(out_fd)
+        os.fchmod(dest_fd, mode)
+        os.fchown(dest_fd, 0, 0)
+        os.fsync(dest_fd)
     finally:
-        os.close(out_fd)
+        os.close(dest_fd)
 
-    after = os.fstat(fd)
-    identity = lambda st: (
-        st.st_dev, st.st_ino, st.st_mode, st.st_size,
-        st.st_mtime_ns, st.st_ctime_ns,
-    )
-    if identity(after) != identity(before):
-        raise SystemExit("installer changed while being snapshotted")
+    if identity(os.fstat(source_fd)) != identity(before):
+        raise SystemExit(f"{label} changed while being snapshotted")
 
     verify = hashlib.sha256()
     offset = 0
     while True:
-        chunk = os.pread(fd, 1024 * 1024, offset)
+        chunk = os.pread(source_fd, 1024 * 1024, offset)
         if not chunk:
             break
         offset += len(chunk)
         verify.update(chunk)
-    if verify.digest() != digest.digest() or identity(os.fstat(fd)) != identity(before):
-        raise SystemExit("installer changed during snapshot verification")
-finally:
-    os.close(fd)
+    if verify.digest() != digest.digest() or identity(os.fstat(source_fd)) != identity(before):
+        raise SystemExit(f"{label} changed during snapshot verification")
+    return digest.hexdigest()
 
+def open_repo_file_no_symlinks(root_fd, relative):
+    parts = relative.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise SystemExit(f"unsafe repository input path: {relative}")
+    current = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = next_fd
+        return os.open(
+            parts[-1],
+            os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
+            dir_fd=current,
+        )
+    finally:
+        os.close(current)
+
+repo_inputs = (
+    ("install/validate-id-exergism-generation.sh", 0o500),
+    ("install/verify-id-exergism-artifact-fence.sh", 0o500),
+    ("agent/validate-release-manifest.py", 0o500),
+    ("spec/release-manifest-v0.1.schema.json", 0o400),
+    ("install/finalize-id-exergism-recovery.sh", 0o500),
+    ("packaging/id-exergism-install-recovery-finalize.service", 0o400),
+    ("install/recover-id-exergism-install.sh", 0o500),
+    ("packaging/id-exergism-install-recovery.service", 0o400),
+    ("packaging/id-exergism-install-recovery-interlock.conf", 0o400),
+    ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400),
+    ("examples/id.exergism.org.env.example", 0o400),
+    ("examples/id.exergism.org-smoke.sh", 0o500),
+    ("packaging/ec-deployment-attestation@.service", 0o400),
+    ("packaging/ec-deployment-attestation@.timer", 0o400),
+    ("packaging/id-exergism-artifact-fence.conf", 0o400),
+)
+
+repo_stage = os.path.join(stage, "repo")
+os.makedirs(repo_stage, mode=0o700, exist_ok=False)
+os.chmod(repo_stage, 0o700)
+os.chown(repo_stage, 0, 0)
+
+script_fd = os.open(script_procfd, os.O_RDONLY | O_CLOEXEC)
+root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)
+try:
+    repo_installer_fd = open_repo_file_no_symlinks(
+        root_fd,
+        "install/install-id-exergism.sh",
+    )
+    try:
+        running = os.fstat(script_fd)
+        repository = os.fstat(repo_installer_fd)
+        if (running.st_dev, running.st_ino) != (repository.st_dev, repository.st_ino):
+            raise SystemExit(
+                "installer must be invoked from the repository root as ./install/install-id-exergism.sh"
+            )
+    finally:
+        os.close(repo_installer_fd)
+
+    installer_destination = os.path.join(
+        repo_stage,
+        "install/install-id-exergism.sh",
+    )
+    installer_digest = copy_fd_verified(
+        script_fd,
+        installer_destination,
+        0o500,
+        "installer",
+        require_executable=True,
+    )
+
+    for relative, mode in repo_inputs:
+        source_fd = open_repo_file_no_symlinks(root_fd, relative)
+        try:
+            copy_fd_verified(
+                source_fd,
+                os.path.join(repo_stage, relative),
+                mode,
+                f"repository input {relative}",
+            )
+        finally:
+            os.close(source_fd)
+finally:
+    os.close(root_fd)
+    os.close(script_fd)
+
+agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+try:
+    copy_fd_verified(
+        agent_fd,
+        os.path.join(stage, "native-agent"),
+        0o500,
+        "EC_NATIVE_AGENT_BINARY",
+        require_executable=True,
+    )
+finally:
+    os.close(agent_fd)
+
+digest_path = os.path.join(stage, "original-installer.sha256")
 digest_fd = os.open(
     digest_path,
-    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW,
     0o400,
 )
 try:
-    os.write(digest_fd, digest.hexdigest().encode("ascii") + b"\n")
+    os.write(digest_fd, installer_digest.encode("ascii") + b"\n")
     os.fchmod(digest_fd, 0o400)
     os.fchown(digest_fd, 0, 0)
     os.fsync(digest_fd)
 finally:
     os.close(digest_fd)
 
-dir_fd = os.open(
-    os.path.dirname(destination),
-    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
-)
-try:
-    os.fsync(dir_fd)
-finally:
-    os.close(dir_fd)
+for directory, _, _ in os.walk(stage, topdown=False):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 PY
 
+  bootstrap_script="$bootstrap_stage/repo/install/install-id-exergism.sh"
   EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"
 fi
 
@@ -133,7 +248,7 @@ esac
   echo "Trusted installer staging directory must be root-owned mode 0700." >&2
   exit 1
 }
-[[ "${BASH_SOURCE[0]}" == "$INSTALLER_TRUSTED_STAGE/install-id-exergism.sh" ]] || {
+[[ "${BASH_SOURCE[0]}" == "$INSTALLER_TRUSTED_STAGE/repo/install/install-id-exergism.sh" ]] || {
   echo "Trusted installer did not re-execute from its staged pathname." >&2
   exit 1
 }
@@ -145,14 +260,22 @@ esac
   echo "Trusted installer snapshot must be root-owned mode 0500." >&2
   exit 1
 }
-[[ -f "$INSTALLER_TRUSTED_STAGE/original-installer.sha256" &&
-   ! -L "$INSTALLER_TRUSTED_STAGE/original-installer.sha256" ]] || {
-  echo "Trusted installer digest is missing." >&2
+[[ -d "$INSTALLER_TRUSTED_STAGE/repo" &&
+   ! -L "$INSTALLER_TRUSTED_STAGE/repo" ]] || {
+  echo "Trusted repository snapshot is missing." >&2
   exit 1
 }
-EXPECTED_INSTALLER_SHA256="$(cat "$INSTALLER_TRUSTED_STAGE/original-installer.sha256")"
-[[ "$EXPECTED_INSTALLER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-  echo "Trusted installer digest is malformed." >&2
+[[ "$(stat -c '%u:%a' -- "$INSTALLER_TRUSTED_STAGE/repo")" == "0:700" ]] || {
+  echo "Trusted repository snapshot must be root-owned mode 0700." >&2
+  exit 1
+}
+[[ -f "$INSTALLER_TRUSTED_STAGE/native-agent" &&
+   ! -L "$INSTALLER_TRUSTED_STAGE/native-agent" ]] || {
+  echo "Trusted Native AOT snapshot is missing." >&2
+  exit 1
+}
+[[ "$(stat -c '%u:%a' -- "$INSTALLER_TRUSTED_STAGE/native-agent")" == "0:500" ]] || {
+  echo "Trusted Native AOT snapshot must be root-owned mode 0500." >&2
   exit 1
 }
 
@@ -163,14 +286,10 @@ TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 RECOVERY_UNIT="id-exergism-install-recovery.service"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
-if [[ -z "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
-  echo "EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary." >&2
-  exit 1
-fi
-AGENT_SOURCE="$EC_NATIVE_AGENT_BINARY"
-AGENT_INSTALL_SOURCE=""
-NATIVE_AGENT_STAGE=""
-REPO_INPUT_STAGE=""
+AGENT_SOURCE="$INSTALLER_TRUSTED_STAGE/native-agent"
+AGENT_INSTALL_SOURCE="$AGENT_SOURCE"
+NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"
+REPO_INPUT_STAGE="$INSTALLER_TRUSTED_STAGE/repo"
 TMP_MANIFEST=""
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
@@ -257,194 +376,10 @@ cleanup_installer_temporaries() {
 }
 trap cleanup_installer_temporaries EXIT
 
-# The trusted second stage inherits the caller's original CWD. Open "." itself
-# to bind the repository directory inode; unlike reopening a pathname, this
-# remains the same directory even if its parent renames/replaces the checkout.
-# Verify that its installer bytes are exactly the script snapshot that is now
-# executing, then snapshot every remaining repository input relative to that FD.
-NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"
+# All executable/configuration inputs were pinned by the first-stage bootstrap.
+# The trusted stage never reopens the original checkout or AOT source.
 mkdir -m 0700 "$NATIVE_AGENT_STAGE"
 chown root:root "$NATIVE_AGENT_STAGE"
-AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
-REPO_INPUT_STAGE="$NATIVE_AGENT_STAGE/repo"
-
-/usr/bin/python3 -I - "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE" "$EXPECTED_INSTALLER_SHA256" "$REPO_INPUT_STAGE" <<'PY'
-import hashlib
-import os
-import stat
-import sys
-
-agent_source, agent_destination, expected_installer_sha256, repo_stage = sys.argv[1:5]
-O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-O_CLOEXEC = os.O_CLOEXEC
-
-def identity(st):
-    return (
-        st.st_dev,
-        st.st_ino,
-        st.st_mode,
-        st.st_size,
-        st.st_mtime_ns,
-        st.st_ctime_ns,
-    )
-
-def copy_fd_verified(source_fd, destination, mode, label, require_executable=False):
-    before = os.fstat(source_fd)
-    if not stat.S_ISREG(before.st_mode):
-        raise SystemExit(f"{label} must be a regular file")
-    if require_executable and before.st_mode & 0o111 == 0:
-        raise SystemExit(f"{label} must be executable")
-
-    os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-    dest_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW
-    dest_fd = os.open(destination, dest_flags, mode)
-    digest = hashlib.sha256()
-    try:
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            view = memoryview(chunk)
-            while view:
-                written = os.write(dest_fd, view)
-                view = view[written:]
-        os.fchmod(dest_fd, mode)
-        os.fchown(dest_fd, 0, 0)
-        os.fsync(dest_fd)
-    finally:
-        os.close(dest_fd)
-
-    after_copy = os.fstat(source_fd)
-    if identity(after_copy) != identity(before):
-        raise SystemExit(f"{label} changed while being snapshotted")
-
-    os.lseek(source_fd, 0, os.SEEK_SET)
-    verify = hashlib.sha256()
-    while True:
-        chunk = os.read(source_fd, 1024 * 1024)
-        if not chunk:
-            break
-        verify.update(chunk)
-    after_verify = os.fstat(source_fd)
-    if identity(after_verify) != identity(before) or verify.digest() != digest.digest():
-        raise SystemExit(f"{label} changed during snapshot verification")
-
-def open_repo_file_no_symlinks(root_fd, relative):
-    parts = relative.split("/")
-    if not parts or any(part in ("", ".", "..") for part in parts):
-        raise SystemExit(f"unsafe repository input path: {relative}")
-
-    current = os.dup(root_fd)
-    try:
-        for part in parts[:-1]:
-            next_fd = os.open(
-                part,
-                os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
-                dir_fd=current,
-            )
-            os.close(current)
-            current = next_fd
-        return os.open(
-            parts[-1],
-            os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
-            dir_fd=current,
-        )
-    finally:
-        os.close(current)
-
-agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-try:
-    copy_fd_verified(
-        agent_fd,
-        agent_destination,
-        0o500,
-        "EC_NATIVE_AGENT_BINARY",
-        require_executable=True,
-    )
-finally:
-    os.close(agent_fd)
-
-os.makedirs(repo_stage, mode=0o700, exist_ok=False)
-os.chmod(repo_stage, 0o700)
-os.chown(repo_stage, 0, 0)
-
-repo_inputs = (
-    ("install/install-id-exergism.sh", 0o500),
-    ("install/validate-id-exergism-generation.sh", 0o500),
-    ("install/verify-id-exergism-artifact-fence.sh", 0o500),
-    ("agent/validate-release-manifest.py", 0o500),
-    ("spec/release-manifest-v0.1.schema.json", 0o400),
-    ("install/finalize-id-exergism-recovery.sh", 0o500),
-    ("packaging/id-exergism-install-recovery-finalize.service", 0o400),
-    ("install/recover-id-exergism-install.sh", 0o500),
-    ("packaging/id-exergism-install-recovery.service", 0o400),
-    ("packaging/id-exergism-install-recovery-interlock.conf", 0o400),
-    ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400),
-    ("examples/id.exergism.org.env.example", 0o400),
-    ("examples/id.exergism.org-smoke.sh", 0o500),
-    ("packaging/ec-deployment-attestation@.service", 0o400),
-    ("packaging/ec-deployment-attestation@.timer", 0o400),
-    ("packaging/id-exergism-artifact-fence.conf", 0o400),
-)
-
-root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)
-try:
-    installer_fd = open_repo_file_no_symlinks(
-        root_fd,
-        "install/install-id-exergism.sh",
-    )
-    try:
-        installer_hash = hashlib.sha256()
-        offset = 0
-        before = os.fstat(installer_fd)
-        while True:
-            chunk = os.pread(installer_fd, 1024 * 1024, offset)
-            if not chunk:
-                break
-            offset += len(chunk)
-            installer_hash.update(chunk)
-        after = os.fstat(installer_fd)
-        if identity(after) != identity(before):
-            raise SystemExit("repository installer changed during root binding")
-        if installer_hash.hexdigest() != expected_installer_sha256:
-            raise SystemExit(
-                "current working directory is not the repository that launched the trusted installer"
-            )
-    finally:
-        os.close(installer_fd)
-
-    for relative, mode in repo_inputs:
-        source_fd = open_repo_file_no_symlinks(root_fd, relative)
-        try:
-            destination = os.path.join(repo_stage, relative)
-            copy_fd_verified(
-                source_fd,
-                destination,
-                mode,
-                f"repository input {relative}",
-            )
-        finally:
-            os.close(source_fd)
-finally:
-    os.close(root_fd)
-
-for directory, _, _ in os.walk(repo_stage, topdown=False):
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-stage_dir_fd = os.open(
-    os.path.dirname(agent_destination),
-    os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
-)
-try:
-    os.fsync(stage_dir_fd)
-finally:
-    os.close(stage_dir_fd)
-PY
 
 if [[ "${1:-}" == "--bootstrap-self-test" ]]; then
   cleanup_installer_temporaries
