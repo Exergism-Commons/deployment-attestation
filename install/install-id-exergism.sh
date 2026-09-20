@@ -561,7 +561,7 @@ restore_pretransaction_timer_on_exit() {
       stop_and_wait_quiescent "$TIMER_UNIT" || rc=1
     fi
   fi
-  cleanup_native_stage
+  cleanup_installer_temporaries
   exit "$rc"
 }
 trap restore_pretransaction_timer_on_exit EXIT
@@ -715,7 +715,7 @@ rollback_install_on_exit() {
       rc=1
     fi
   fi
-  cleanup_native_stage
+  cleanup_installer_temporaries
   exit "$rc"
 }
 
@@ -775,7 +775,7 @@ systemctl is-active --quiet "$TIMER_UNIT"
 
 finalize_install_transaction
 install_complete=1
-cleanup_native_stage
+cleanup_installer_temporaries
 trap - EXIT
 
 printf '\nInstalled Deployment Attestation agent for %s.\n' "$SERVICE"
