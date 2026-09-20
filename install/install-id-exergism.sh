@@ -259,7 +259,6 @@ for directory, _, _ in os.walk(stage, topdown=False):
 PY
 
   bootstrap_script="$bootstrap_stage/repo/install/install-id-exergism.sh"
-  trap - EXIT
   EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"
 fi
 
@@ -279,6 +278,15 @@ esac
   echo "Trusted installer staging directory must be root-owned mode 0700." >&2
   exit 1
 }
+
+cleanup_trusted_stage_early() {
+  local rc=$?
+  trap - EXIT
+  rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true
+  exit "$rc"
+}
+trap cleanup_trusted_stage_early EXIT
+
 [[ "${BASH_SOURCE[0]}" == "$INSTALLER_TRUSTED_STAGE/repo/install/install-id-exergism.sh" ]] || {
   echo "Trusted installer did not re-execute from its staged pathname." >&2
   exit 1
