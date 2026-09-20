@@ -230,15 +230,14 @@ internal sealed class DeploymentAgent
         await _git.SwitchSourceAsync(tx.OldSourceCommit, fetchFirst: false);
 
         var rollbackPath = _config.AppBinary + ".rollback";
-        await File.WriteAllBytesAsync(rollbackPath, backupBytes);
-        File.SetUnixFileMode(
+        Durability.AtomicWrite(
             rollbackPath,
+            backupBytes,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
             UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
             UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         if (Durability.Sha256(rollbackPath) != tx.OldBinarySha256)
             throw new AgentException("Rollback staging digest mismatch");
-        Durability.FsyncFileAndParent(rollbackPath);
         File.Move(rollbackPath, _config.AppBinary, overwrite: true);
         Durability.FsyncDirectory(Path.GetDirectoryName(_config.AppBinary)!);
         VerifyRuntimeExact(tx.OldBinarySha256);
