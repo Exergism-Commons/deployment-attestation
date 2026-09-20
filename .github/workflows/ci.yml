@@ -27,6 +27,21 @@ jobs:
         run: |
           set -euo pipefail
           agent_sha256="$(sha256sum /bin/true | awk '{print $1}')"
+          bad_sha256="$(printf '0%.0s' {1..64})"
+
+          if sudo env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            EC_NATIVE_AGENT_BINARY=/bin/true \
+            EC_NATIVE_AGENT_SHA256="$bad_sha256" \
+            "$PWD/install/install-id-exergism.sh" --bootstrap-self-test; then
+            echo "Installer bootstrap unexpectedly accepted a bad Native AOT digest." >&2
+            exit 1
+          fi
+          if sudo find /run -maxdepth 1 -type d -name 'ec-deployment-attestation-installer.*' -print -quit | grep -q .; then
+            echo "Installer bootstrap staging leaked after failed admission." >&2
+            exit 1
+          fi
+
           sudo env -i \
             PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             EC_NATIVE_AGENT_BINARY=/bin/true \
@@ -169,6 +184,9 @@ jobs:
           grep -Fq 'export PATH="/usr/sbin:/usr/bin:/sbin:/bin"' install/install-id-exergism.sh
           grep -Fq 'PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH' install/install-id-exergism.sh
           grep -Fq 'bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"' install/install-id-exergism.sh
+          grep -Fq 'trap cleanup_failed_bootstrap EXIT' install/install-id-exergism.sh
+          grep -Fq 'rm -rf -- "$bootstrap_stage" || true' install/install-id-exergism.sh
+          grep -Fq 'trap - EXIT' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"' install/install-id-exergism.sh
           grep -Fq '"/proc/${BASHPID}/fd/255" \' install/install-id-exergism.sh
           grep -Fq 'os.pread(source_fd, 1024 * 1024, offset)' install/install-id-exergism.sh
