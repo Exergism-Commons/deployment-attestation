@@ -24,6 +24,10 @@ if [[ -z "${EC_INSTALLER_TRUSTED_STAGE:-}" ]]; then
     echo "EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary." >&2
     exit 1
   fi
+  if [[ ! "${EC_NATIVE_AGENT_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "EC_NATIVE_AGENT_SHA256 is required and must be the reviewed lowercase SHA-256 of the Native AOT binary." >&2
+    exit 1
+  fi
   [[ -x /usr/bin/python3 ]] || {
     echo "Required dependency not found: /usr/bin/python3" >&2
     exit 1
@@ -40,13 +44,14 @@ if [[ -z "${EC_INSTALLER_TRUSTED_STAGE:-}" ]]; then
   /usr/bin/python3 -I - \
     "/proc/${BASHPID}/fd/255" \
     "$bootstrap_stage" \
-    "$EC_NATIVE_AGENT_BINARY" <<'PY'
+    "$EC_NATIVE_AGENT_BINARY" \
+    "$EC_NATIVE_AGENT_SHA256" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-script_procfd, stage, agent_source = sys.argv[1:4]
+script_procfd, stage, agent_source, expected_agent_sha256 = sys.argv[1:5]
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 O_CLOEXEC = os.O_CLOEXEC
 
@@ -205,13 +210,18 @@ finally:
     os.close(script_fd)
 
 try:
-    copy_fd_verified(
+    actual_agent_sha256 = copy_fd_verified(
         agent_fd,
         os.path.join(stage, "native-agent"),
         0o500,
         "EC_NATIVE_AGENT_BINARY",
         require_executable=True,
     )
+    if actual_agent_sha256 != expected_agent_sha256:
+        raise SystemExit(
+            "EC_NATIVE_AGENT_BINARY SHA-256 mismatch: "
+            f"expected={expected_agent_sha256} actual={actual_agent_sha256}"
+        )
 finally:
     os.close(agent_fd)
 
