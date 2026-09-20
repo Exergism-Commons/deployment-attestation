@@ -165,11 +165,11 @@ jobs:
           ! grep -Fq 'ROOT/agent/ec-deployment-agent.sh' install/install-id-exergism.sh
           grep -Fq '#!/bin/bash' install/install-id-exergism.sh
           grep -Fq 'export PATH="/usr/sbin:/usr/bin:/sbin:/bin"' install/install-id-exergism.sh
-          grep -Fq 'unset LD_PRELOAD LD_LIBRARY_PATH' install/install-id-exergism.sh
+          grep -Fq 'PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH' install/install-id-exergism.sh
           grep -Fq 'bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"' install/install-id-exergism.sh
           grep -Fq '"/proc/${BASHPID}/fd/255" \' install/install-id-exergism.sh
-          grep -Fq 'os.pread(fd, 1024 * 1024, offset)' install/install-id-exergism.sh
+          grep -Fq 'os.pread(source_fd, 1024 * 1024, offset)' install/install-id-exergism.sh
           grep -Fq 'NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"' install/install-id-exergism.sh
           grep -Fq 'AGENT_INSTALL_SOURCE="$AGENT_SOURCE"' install/install-id-exergism.sh
           grep -Fq 'cleanup_installer_temporaries()' install/install-id-exergism.sh
@@ -185,7 +185,7 @@ jobs:
           grep -Fq 'root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)' install/install-id-exergism.sh
           grep -Fq 'installer_destination = os.path.join(' install/install-id-exergism.sh
           grep -Fq 'if (running.st_dev, running.st_ino) != (repository.st_dev, repository.st_ino):' install/install-id-exergism.sh
-          ! grep -Fq 'os.open(root,' install/install-id-exergism.sh
+          ! grep -Fq 'expected_installer_sha256' install/install-id-exergism.sh
           ! grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE"' install/install-id-exergism.sh
           python3 - <<'PY'
           from pathlib import Path
