@@ -155,8 +155,8 @@ jobs:
           grep -Fq 'AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"' install/install-id-exergism.sh
           grep -Fq 'cleanup_installer_temporaries()' install/install-id-exergism.sh
           ! grep -Fq 'cleanup_native_stage' install/install-id-exergism.sh
-          grep -Fq 'source_fd = os.open(source, flags)' install/install-id-exergism.sh
-          grep -Fq 'os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)' install/install-id-exergism.sh
+          grep -Fq 'agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)' install/install-id-exergism.sh
+          grep -Fq 'O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)' install/install-id-exergism.sh
           grep -Fq 'after_copy = os.fstat(source_fd)' install/install-id-exergism.sh
           grep -Fq 'verify.digest() != digest.digest()' install/install-id-exergism.sh
           grep -Fq 'os.fsync(stage_dir_fd)' install/install-id-exergism.sh
@@ -200,8 +200,9 @@ jobs:
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
           grep -Fq 'install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"' install/install-id-exergism.sh
           grep -Fq '"$AGENT_INSTALL_SOURCE" self-test' install/install-id-exergism.sh
-          grep -Fq 'EC_NATIVE_AGENT_BINARY must be a regular file' install/install-id-exergism.sh
-          grep -Fq 'EC_NATIVE_AGENT_BINARY must be executable' install/install-id-exergism.sh
+          grep -Fq 'f"{label} must be a regular file"' install/install-id-exergism.sh
+          grep -Fq 'f"{label} must be executable"' install/install-id-exergism.sh
+          grep -Fq '"EC_NATIVE_AGENT_BINARY",' install/install-id-exergism.sh
           grep -Fq 'Deployment updater transaction could not be recovered' install/install-id-exergism.sh
           grep -Fq 'pretransaction_journal_published=0' install/install-id-exergism.sh
           grep -Fq 'restore_pretransaction_timer_on_exit()' install/install-id-exergism.sh
@@ -356,7 +357,7 @@ jobs:
           from pathlib import Path
 
           text = Path('install/install-id-exergism.sh').read_text()
-          native_stage = text.index('source_fd = os.open(source, flags)')
+          native_stage = text.index('agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)')
           native_preflight = text.index('EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config')
           native_self_test = text.index('"$AGENT_INSTALL_SOURCE" self-test', native_preflight)
           agent_replace = text.index('install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"')
