@@ -1811,4 +1811,37 @@ public sealed class SecurityAndRegressionTests
                 path: "/untrusted-smoke-parent"));
     }
 
+
+    [TestMethod]
+    public void ArtifactFenceMountAuditAdoptsTargetRoot()
+    {
+        var args = RuntimeInspector.BuildMountInfoNsenterArguments(1234);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "--target", "1234",
+                "--mount",
+                "--root",
+                "--",
+                "cat", "/proc/self/mountinfo"
+            },
+            args);
+
+        TestAssert.Throws<AgentException>(
+            () => RuntimeInspector.BuildMountInfoNsenterArguments(0));
+    }
+
+    [TestMethod]
+    public void ArtifactFenceMountContainmentHandlesFilesystemRoot()
+    {
+        Assert.IsTrue(RuntimeInspector.Contains("/", "/"));
+        Assert.IsTrue(RuntimeInspector.Contains("/", "/srv/id.exergism.org"));
+        Assert.IsTrue(RuntimeInspector.Contains("/srv", "/srv/id.exergism.org"));
+        Assert.IsTrue(RuntimeInspector.Contains("/srv/id.exergism.org", "/srv/id.exergism.org"));
+
+        Assert.IsFalse(RuntimeInspector.Contains("/srv/id.exergism.org", "/srv/id.exergism.org-evil"));
+        Assert.IsFalse(RuntimeInspector.Contains("/srv/id.exergism.org", "/srv/id.exergism"));
+    }
+
 }
