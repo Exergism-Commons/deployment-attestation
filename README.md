@@ -36,6 +36,42 @@ Activation is a durable transaction. Before mutating source or runtime, the agen
 
 The Native AOT agent is the sole deployment/attestation agent implementation. The installer requires an explicit reviewed `EC_NATIVE_AGENT_BINARY` and its lowercase `EC_NATIVE_AGENT_SHA256`, pins the exact reviewed bytes into root-owned staging, validates them, and installs the snapshot as `/usr/local/libexec/ec-deployment-agent`. The agent maintains independent self-health in `agent-health.json`; `ec-deployment-agent health` evaluates freshness, the last completed cycle, timer state, transaction state and attestation delivery without recursively trusting the target-service attestation, while `ec-deployment-agent status` emits the same self-health document for observability without using health as an exit gate.
 
+### Privileged installer bootstrap
+
+Never run `sudo ./install/install-id-exergism.sh` from a user-writable checkout. Bash parses shell input incrementally, so a mutable script cannot safely establish its own privilege boundary.
+
+Obtain `INSTALLER_SHA256` from the reviewed release/commit metadata through a channel independent of the local checkout, then stage and verify the installer with trusted system tools before executing it:
+
+```bash
+SOURCE_ROOT="$PWD"
+INSTALLER_SHA256="<reviewed lowercase SHA-256 of install/install-id-exergism.sh>"
+AGENT="/path/to/reviewed/ec-deployment-agent"
+AGENT_SHA256="<reviewed lowercase SHA-256 of the Native AOT agent>"
+
+STAGE="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
+sudo chmod 0700 "$STAGE"
+sudo chown root:root "$STAGE"
+sudo install -o root -g root -m 0500 \
+  "$SOURCE_ROOT/install/install-id-exergism.sh" \
+  "$STAGE/install-id-exergism.sh"
+
+if ! printf '%s  %s\n' "$INSTALLER_SHA256" "$STAGE/install-id-exergism.sh" | sudo sha256sum -c -; then
+  sudo rm -rf -- "$STAGE"
+  exit 1
+fi
+
+sudo env -i \
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  EC_INSTALLER_TRUSTED_STAGE="$STAGE" \
+  EC_INSTALLER_SOURCE_ROOT="$SOURCE_ROOT" \
+  EC_INSTALLER_SHA256="$INSTALLER_SHA256" \
+  EC_NATIVE_AGENT_BINARY="$AGENT" \
+  EC_NATIVE_AGENT_SHA256="$AGENT_SHA256" \
+  "$STAGE/install-id-exergism.sh"
+```
+
+The privileged installer refuses to run unless it is executing from that root-owned private stage and its staged bytes match `EC_INSTALLER_SHA256`. It then authenticates every repository-sourced helper/configuration input against the SHA-256 table embedded in those reviewed installer bytes before installation.
+
 The host MUST NOT hold a GitHub token capable of mutating EC repositories. It signs an attestation with a service-specific HMAC key and sends it to a receiver. Every observation contains a signed `observation_id`; receiver-side deduplication is mandatory so transport retries cannot increment incident thresholds twice. The receiver owns the GitHub integration and can publish Deployment/Check status or open incidents.
 
 ## Initial status
