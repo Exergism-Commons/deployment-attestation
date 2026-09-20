@@ -329,7 +329,7 @@ internal static class CheckoutWriteExclusion
         root = Path.GetFullPath(root);
         var effectiveUid = Native.geteuid();
 
-        Validate(root);
+        ValidatePath(root);
         Walk(root);
 
         void Walk(string directory)
@@ -346,16 +346,16 @@ internal static class CheckoutWriteExclusion
                     throw new AgentException(
                         $"Checkout mutation tree contains unsupported special entry: {entry}");
 
-                Validate(entry, stat);
+                ValidateStat(entry, stat);
                 if (kind == S_IFDIR)
                     Walk(entry);
             }
         }
 
-        void Validate(string path)
-            => Validate(path, StatPathNoFollow(path));
+        void ValidatePath(string path)
+            => ValidateStat(path, StatPathNoFollow(path));
 
-        void Validate(string path, LinuxStatx stat)
+        void ValidateStat(string path, LinuxStatx stat)
         {
             if (stat.Uid != effectiveUid)
                 throw new AgentException(
