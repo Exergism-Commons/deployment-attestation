@@ -174,12 +174,13 @@ jobs:
           grep -Fq 'ActiveState' install/install-id-exergism.sh
           grep -Fq 'MainPID' install/install-id-exergism.sh
           grep -Fq 'ControlGroup' install/install-id-exergism.sh
-          grep -Fq 'Could not determine ControlGroup for $unit' install/install-id-exergism.sh
           grep -Fq 'cgroup_rc=$?' install/install-id-exergism.sh
+          grep -Fq 'load_after="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"' install/install-id-exergism.sh
+          grep -Fq 'cgroup_after="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)"' install/install-id-exergism.sh
+          grep -Fq '[[ "$cgroup_after" == "$cgroup" ]] || return 1' install/install-id-exergism.sh
           grep -Fq 'stop_and_wait_quiescent "$AGENT_RUN_UNIT"' install/install-id-exergism.sh
           grep -Fq 'AGENT_COORDINATION_LOCK=' install/install-id-exergism.sh
           grep -Fq 'A direct deployment agent invocation is still running' install/install-id-exergism.sh
-          grep -Fq '[[ "$unit" == *.timer ]]' install/install-id-exergism.sh
           grep -Fq 'quiesce_dependent_unit_for_recovery()' install/recover-id-exergism-install.sh
           grep -Fq 'if [[ "$MODE" == "boot" ]] && unit_is_quiescent "$unit"; then' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_dependent_unit_for_recovery "$AGENT_RUN_UNIT"' install/recover-id-exergism-install.sh
@@ -258,15 +259,16 @@ jobs:
           grep -Fq 'ActiveState' install/recover-id-exergism-install.sh
           grep -Fq 'MainPID' install/recover-id-exergism-install.sh
           grep -Fq 'ControlGroup' install/recover-id-exergism-install.sh
-          grep -Fq 'Could not determine ControlGroup for $unit' install/recover-id-exergism-install.sh
           grep -Fq 'cgroup_rc=$?' install/recover-id-exergism-install.sh
+          grep -Fq 'load_after="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"' install/recover-id-exergism-install.sh
+          grep -Fq 'cgroup_after="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)"' install/recover-id-exergism-install.sh
+          grep -Fq '[[ "$cgroup_after" == "$cgroup" ]] || return 1' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_failed=0' install/recover-id-exergism-install.sh
           grep -Fq 'no deployment artifact was modified and journal is retained' install/recover-id-exergism-install.sh
           grep -Fq 'Could not determine exact timer enablement during recovery' install/recover-id-exergism-install.sh
           grep -Fq 'quiesce_unit()' install/recover-id-exergism-install.sh
           grep -Fq 'AGENT_COORDINATION_LOCK=' install/recover-id-exergism-install.sh
           grep -Fq 'Agent coordination lock is busy' install/recover-id-exergism-install.sh
-          grep -Fq '[[ "$unit" == *.timer ]]' install/recover-id-exergism-install.sh
           grep -Fq 'Keep the timer quiesced until the restored generation' install/recover-id-exergism-install.sh
           grep -Fq 'previously active resolver could not be restored healthy after direct recovery' install/recover-id-exergism-install.sh
           grep -Fq '|| ! "$ARTIFACT_FENCE_AUDITOR"; then' install/recover-id-exergism-install.sh
@@ -288,6 +290,9 @@ jobs:
           grep -Fq 'timer_active_state()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_quiescent()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'target_quiescent()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'load_after="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)"' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'cgroup_after="$(systemctl show "$TARGET_UNIT" --property=ControlGroup --value 2>/dev/null)"' install/finalize-id-exergism-recovery.sh
+          grep -Fq '[[ "$cgroup_after" == "$cgroup" ]] || return 1' install/finalize-id-exergism-recovery.sh
           grep -Fq 'settle_target_after_inactive_baseline()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Never' install/finalize-id-exergism-recovery.sh
           grep -Fq 'preserve any later explicit start' install/finalize-id-exergism-recovery.sh
