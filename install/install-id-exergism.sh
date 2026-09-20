@@ -2,8 +2,10 @@
 set -Eeuo pipefail
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export HOME="/root"
 umask 077
 unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH
+unset XDG_CONFIG_HOME CURL_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
 unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_DIR GIT_WORK_TREE
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -539,9 +541,9 @@ fi
 rm -rf "$INSTALL_COMMITTED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
-TMP_MANIFEST="$(mktemp)"
+TMP_MANIFEST="$(mktemp "$NATIVE_AGENT_STAGE/manifest.XXXXXX")"
 tmp_manifest="$TMP_MANIFEST"
-curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 \
+curl -q --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 \
   --proto '=https' --proto-redir '=https' -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
 /usr/bin/python3 -I "$REPO_INPUT_STAGE/agent/validate-release-manifest.py" "$REPO_INPUT_STAGE/spec/release-manifest-v0.1.schema.json" "$tmp_manifest" || {
   echo "runtime-main publishes a schema-invalid DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2
@@ -957,7 +959,7 @@ mark_generation_validated
 
 systemctl start "$TARGET_UNIT"
 systemctl is-active --quiet "$TARGET_UNIT"
-curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
+curl -q -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null
 EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"
 verify_production_artifact_fence
 
