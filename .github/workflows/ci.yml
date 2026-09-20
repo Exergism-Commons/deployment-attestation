@@ -26,9 +26,11 @@ jobs:
       - name: Exercise trusted installer bootstrap
         run: |
           set -euo pipefail
+          agent_sha256="$(sha256sum /bin/true | awk '{print $1}')"
           sudo env -i \
             PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             EC_NATIVE_AGENT_BINARY=/bin/true \
+            EC_NATIVE_AGENT_SHA256="$agent_sha256" \
             "$PWD/install/install-id-exergism.sh" --bootstrap-self-test
           if sudo find /run -maxdepth 1 -type d -name 'ec-deployment-attestation-installer.*' -print -quit | grep -q .; then
             echo "Installer bootstrap staging leaked after self-test." >&2
@@ -175,6 +177,9 @@ jobs:
           grep -Fq 'cleanup_installer_temporaries()' install/install-id-exergism.sh
           ! grep -Fq 'cleanup_native_stage' install/install-id-exergism.sh
           grep -Fq 'agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)' install/install-id-exergism.sh
+          grep -Fq 'EC_NATIVE_AGENT_SHA256 is required and must be the reviewed lowercase SHA-256' install/install-id-exergism.sh
+          grep -Fq 'actual_agent_sha256 != expected_agent_sha256' install/install-id-exergism.sh
+          grep -Fq 'actual_sha256 != expected_sha256' install/install-id-exergism.sh
           grep -Fq 'O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)' install/install-id-exergism.sh
           grep -Fq 'if identity(os.fstat(source_fd)) != identity(before):' install/install-id-exergism.sh
           grep -Fq 'verify.digest() != digest.digest()' install/install-id-exergism.sh
@@ -188,6 +193,8 @@ jobs:
           ! grep -Fq 'expected_installer_sha256' install/install-id-exergism.sh
           ! grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE"' install/install-id-exergism.sh
           python3 - <<'PY'
+          import ast
+          import hashlib
           from pathlib import Path
           text = Path('install/install-id-exergism.sh').read_text()
           admission_end = text.index('exec 9>"$INSTALL_LOCK"')
@@ -197,11 +204,18 @@ jobs:
           assert '$ROOT/' not in tail
           assert '${ROOT}/' not in tail
           assert 'EC_NATIVE_AGENT_BINARY' not in tail
-          assert 'os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)' in bootstrap
-          assert 'os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)' in bootstrap
+          assert 'EC_NATIVE_AGENT_SHA256' not in tail
+          agent_open = bootstrap.index('agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)')
+          repo_walk = bootstrap.index('repo_inputs = (')
+          root_open = bootstrap.index('root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)')
+          assert agent_open < repo_walk < root_open
           assert 'script_procfd' in bootstrap
           assert 'running.st_dev, running.st_ino' in bootstrap
-          required = {
+          start = text.index('repo_inputs = (')
+          end = text.index('\n)\n\nrepo_stage', start) + 2
+          assignment = ast.parse(text[start:end]).body[0]
+          entries = ast.literal_eval(assignment.value)
+          expected_paths = {
               'install/validate-id-exergism-generation.sh',
               'install/verify-id-exergism-artifact-fence.sh',
               'agent/validate-release-manifest.py',
@@ -218,8 +232,11 @@ jobs:
               'packaging/ec-deployment-attestation@.timer',
               'packaging/id-exergism-artifact-fence.conf',
           }
-          for item in required:
-              assert f'("{item}", ' in text, item
+          assert {path for path, _, _ in entries} == expected_paths
+          for item, mode, expected_sha256 in entries:
+              assert len(expected_sha256) == 64
+              actual = hashlib.sha256(Path(item).read_bytes()).hexdigest()
+              assert actual == expected_sha256, (item, expected_sha256, actual)
               assert f'$REPO_INPUT_STAGE/{item}' in tail, item
           PY
           grep -Fq 'native_preflight_config="$NATIVE_AGENT_STAGE/preflight.env"' install/install-id-exergism.sh
