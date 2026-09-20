@@ -5,7 +5,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-TimeoutStartSec=15min
+# The agent owns per-operation deadlines/retries; a fixed systemd start deadline can
+# kill a valid retry sequence before it completes.
+TimeoutStartSec=infinity
 Environment=EC_ATTESTATION_CONFIG=/etc/ec-deployment-attestation/%i.env
 ExecStart=/usr/local/libexec/ec-deployment-agent run
 User=root
