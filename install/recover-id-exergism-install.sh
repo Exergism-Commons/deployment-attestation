@@ -34,6 +34,7 @@ INSTALL_PENDING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.pending"
 INSTALL_VALIDATED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.validated"
 INSTALL_RECOVERING_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovering"
 INSTALL_RECOVERED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.recovered"
+INSTALL_FINALIZED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.finalized"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
@@ -568,9 +569,15 @@ if [[ "$MODE" == "normal" ]]; then
 fi
 
 if [[ "$MODE" == "normal" ]]; then
-  # Synchronous/direct recovery has verified final target/timer states, so the
-  # recovered marker can be retired durably.
-  rm -rf -- "$INSTALL_RECOVERED_DIR"
+  # Synchronous/direct recovery has verified final target/timer states.
+  # Retire the actionable .recovered journal with an atomic rename first.
+  # A crash before the rename leaves a complete actionable journal; a crash
+  # after the durable rename leaves only a non-actionable .finalized tree.
+  require_real_phase_if_present "$INSTALL_FINALIZED_DIR" || exit 1
+  rm -rf -- "$INSTALL_FINALIZED_DIR"
+  mv -T -- "$INSTALL_RECOVERED_DIR" "$INSTALL_FINALIZED_DIR"
+  durable_sync_paths "$INSTALL_STATE_ROOT"
+  rm -rf -- "$INSTALL_FINALIZED_DIR"
   durable_sync_paths "$INSTALL_STATE_ROOT"
 else
   # Dependency/boot recovery used --no-block for at least one possible start.
