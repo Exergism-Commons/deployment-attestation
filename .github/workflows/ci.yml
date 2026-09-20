@@ -42,6 +42,23 @@ jobs:
             exit 1
           fi
 
+          early_stage="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
+          sudo mkdir -p "$early_stage/repo/install"
+          sudo cp "$PWD/install/install-id-exergism.sh" "$early_stage/repo/install/install-id-exergism.sh"
+          sudo chmod 0700 "$early_stage" "$early_stage/repo" "$early_stage/repo/install"
+          sudo chmod 0500 "$early_stage/repo/install/install-id-exergism.sh"
+          if sudo env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            EC_INSTALLER_TRUSTED_STAGE="$early_stage" \
+            "$early_stage/repo/install/install-id-exergism.sh" --bootstrap-self-test; then
+            echo "Trusted second stage unexpectedly accepted an incomplete stage." >&2
+            exit 1
+          fi
+          if sudo test -e "$early_stage"; then
+            echo "Trusted second-stage validation leaked staging." >&2
+            exit 1
+          fi
+
           sudo env -i \
             PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             EC_NATIVE_AGENT_BINARY=/bin/true \
@@ -186,6 +203,8 @@ jobs:
           grep -Fq 'bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"' install/install-id-exergism.sh
           grep -Fq 'trap cleanup_failed_bootstrap EXIT' install/install-id-exergism.sh
           grep -Fq 'rm -rf -- "$bootstrap_stage" || true' install/install-id-exergism.sh
+          grep -Fq 'trap cleanup_trusted_stage_early EXIT' install/install-id-exergism.sh
+          grep -Fq 'rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true' install/install-id-exergism.sh
           grep -Fq 'trap - EXIT' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"' install/install-id-exergism.sh
           grep -Fq '"/proc/${BASHPID}/fd/255" \' install/install-id-exergism.sh
@@ -229,6 +248,10 @@ jobs:
           assert agent_open < repo_walk < root_open
           assert 'script_procfd' in bootstrap
           assert 'running.st_dev, running.st_ino' in bootstrap
+          exec_pos = bootstrap.index('EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"')
+          trap_pos = bootstrap.index('trap cleanup_failed_bootstrap EXIT')
+          assert trap_pos < exec_pos
+          assert 'trap - EXIT' not in bootstrap[trap_pos:exec_pos]
           start = text.index('repo_inputs = (')
           end = text.index('\n)\n\nrepo_stage', start) + 2
           assignment = ast.parse(text[start:end]).body[0]
