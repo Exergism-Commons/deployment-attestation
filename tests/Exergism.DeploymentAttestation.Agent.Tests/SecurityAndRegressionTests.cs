@@ -1590,4 +1590,39 @@ public sealed class SecurityAndRegressionTests
         Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_CONFIG_COUNT));
     }
 
+
+    [TestMethod]
+    public void AgentGitInvocationInjectsNonExecutablePolicy()
+    {
+        var args = AgentGitInvocation.BuildArguments(
+            "/checkout",
+            new[] { "status" });
+
+        var joined = string.Join("\n", args);
+        StringAssert.Contains(joined, "core.hooksPath=/dev/null");
+        StringAssert.Contains(joined, "core.fsmonitor=false");
+        StringAssert.Contains(joined, "core.attributesFile=/dev/null");
+        StringAssert.Contains(joined, "credential.helper=");
+        StringAssert.Contains(joined, "protocol.allow=never");
+        StringAssert.Contains(joined, "protocol.https.allow=always");
+        StringAssert.Contains(joined, "protocol.ext.allow=never");
+        StringAssert.Contains(joined, "protocol.file.allow=never");
+        StringAssert.Contains(joined, "protocol.ssh.allow=never");
+    }
+
+    [TestMethod]
+    public void AgentGitInvocationRejectsExecutableFilterKeys()
+    {
+        Assert.IsTrue(
+            AgentGitInvocation.IsExecutableFilterConfigKey("filter.demo.clean"));
+        Assert.IsTrue(
+            AgentGitInvocation.IsExecutableFilterConfigKey("filter.demo.smudge"));
+        Assert.IsTrue(
+            AgentGitInvocation.IsExecutableFilterConfigKey("filter.demo.process"));
+        Assert.IsFalse(
+            AgentGitInvocation.IsExecutableFilterConfigKey("filter.demo.required"));
+        Assert.IsFalse(
+            AgentGitInvocation.IsExecutableFilterConfigKey("core.hooksPath"));
+    }
+
 }
