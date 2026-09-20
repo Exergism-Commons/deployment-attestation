@@ -385,8 +385,11 @@ release_owned_target_start_fence() {
       return 1
     }
     systemctl unmask --runtime "$TARGET_UNIT" >/dev/null 2>&1 || return 1
-    systemctl daemon-reload >/dev/null 2>&1 || return 1
   fi
+
+  # Always reload while the trusted marker still exists. This makes a crash
+  # after unmask but before daemon-reload/marker cleanup safely resumable.
+  systemctl daemon-reload >/dev/null 2>&1 || return 1
 
   path_exists_any "$TARGET_RUNTIME_MASK" && {
     echo "CRITICAL: recovery-owned runtime start fence still exists after unmask." >&2
@@ -605,7 +608,8 @@ fi
 # Release only that owned fence after the restored generation is exact and has
 # passed transient validation. Administrative masks without our marker remain.
 release_owned_target_start_fence || {
-  echo "CRITICAL: restored generation is valid but recovery-owned target start fence could not be released; journal retained." >&2
+  fence_and_quiesce_target_after_failure
+  echo "CRITICAL: restored generation is valid but recovery-owned target start fence could not be released; target remains fenced+quiescent and journal is retained." >&2
   exit 1
 }
 
