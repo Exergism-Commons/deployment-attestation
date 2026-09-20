@@ -307,7 +307,10 @@ internal static class Durability
         }
     }
 
-    public static byte[] ReadTrustedRegularFileBytes(string path, string displayPath)
+    public static byte[] ReadTrustedRegularFileBytes(
+        string path,
+        string displayPath,
+        bool requireExecutable = false)
     {
         if (!Path.IsPathFullyQualified(path))
             throw new AgentException($"{displayPath} path must be absolute");
@@ -332,6 +335,9 @@ internal static class Durability
             var mode = (UnixFileMode)(before.Mode & ~S_IFMT);
             if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
                 throw new AgentException($"{displayPath} must not be writable by group or others");
+            if (requireExecutable &&
+                (mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
+                throw new AgentException($"{displayPath} must be executable");
 
             using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
             fd = -1;
