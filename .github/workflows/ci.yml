@@ -160,7 +160,7 @@ jobs:
           grep -Fq 'Could not determine exact timer enablement state' install/install-id-exergism.sh
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
           grep -Fq 'EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary.' install/install-id-exergism.sh
-          grep -Fq 'AGENT_SOURCE="$EC_NATIVE_AGENT_BINARY"' install/install-id-exergism.sh
+          grep -Fq 'AGENT_SOURCE="$INSTALLER_TRUSTED_STAGE/native-agent"' install/install-id-exergism.sh
           test ! -e agent/ec-deployment-agent.sh
           ! grep -Fq 'ROOT/agent/ec-deployment-agent.sh' install/install-id-exergism.sh
           grep -Fq '#!/bin/bash' install/install-id-exergism.sh
@@ -168,23 +168,23 @@ jobs:
           grep -Fq 'unset LD_PRELOAD LD_LIBRARY_PATH' install/install-id-exergism.sh
           grep -Fq 'bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"' install/install-id-exergism.sh
-          grep -Fq '/usr/bin/python3 -I - "/proc/${BASHPID}/fd/255" "$bootstrap_script" "$bootstrap_digest"' install/install-id-exergism.sh
+          grep -Fq '"/proc/${BASHPID}/fd/255" \' install/install-id-exergism.sh
           grep -Fq 'os.pread(fd, 1024 * 1024, offset)' install/install-id-exergism.sh
           grep -Fq 'NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"' install/install-id-exergism.sh
-          grep -Fq 'AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"' install/install-id-exergism.sh
+          grep -Fq 'AGENT_INSTALL_SOURCE="$AGENT_SOURCE"' install/install-id-exergism.sh
           grep -Fq 'cleanup_installer_temporaries()' install/install-id-exergism.sh
           ! grep -Fq 'cleanup_native_stage' install/install-id-exergism.sh
           grep -Fq 'agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)' install/install-id-exergism.sh
           grep -Fq 'O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)' install/install-id-exergism.sh
-          grep -Fq 'after_copy = os.fstat(source_fd)' install/install-id-exergism.sh
+          grep -Fq 'if identity(os.fstat(source_fd)) != identity(before):' install/install-id-exergism.sh
           grep -Fq 'verify.digest() != digest.digest()' install/install-id-exergism.sh
-          grep -Fq 'os.fsync(stage_dir_fd)' install/install-id-exergism.sh
+          grep -Fq 'for directory, _, _ in os.walk(stage, topdown=False):' install/install-id-exergism.sh
           grep -Fq 'repo_inputs = (' install/install-id-exergism.sh
           grep -Fq 'open_repo_file_no_symlinks(root_fd, relative)' install/install-id-exergism.sh
-          grep -Fq 'REPO_INPUT_STAGE="$NATIVE_AGENT_STAGE/repo"' install/install-id-exergism.sh
+          grep -Fq 'REPO_INPUT_STAGE="$INSTALLER_TRUSTED_STAGE/repo"' install/install-id-exergism.sh
           grep -Fq 'root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)' install/install-id-exergism.sh
-          grep -Fq '"install/install-id-exergism.sh",' install/install-id-exergism.sh
-          grep -Fq 'installer_hash.hexdigest() != expected_installer_sha256' install/install-id-exergism.sh
+          grep -Fq 'installer_destination = os.path.join(' install/install-id-exergism.sh
+          grep -Fq 'if (running.st_dev, running.st_ino) != (repository.st_dev, repository.st_ino):' install/install-id-exergism.sh
           ! grep -Fq 'os.open(root,' install/install-id-exergism.sh
           ! grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE"' install/install-id-exergism.sh
           python3 - <<'PY'
@@ -192,10 +192,16 @@ jobs:
           text = Path('install/install-id-exergism.sh').read_text()
           admission_end = text.index('exec 9>"$INSTALL_LOCK"')
           tail = text[admission_end:]
+          bootstrap_end = text.index('INSTALLER_TRUSTED_STAGE="$EC_INSTALLER_TRUSTED_STAGE"')
+          bootstrap = text[:bootstrap_end]
           assert '$ROOT/' not in tail
           assert '${ROOT}/' not in tail
+          assert 'EC_NATIVE_AGENT_BINARY' not in tail
+          assert 'os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)' in bootstrap
+          assert 'os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)' in bootstrap
+          assert 'script_procfd' in bootstrap
+          assert 'running.st_dev, running.st_ino' in bootstrap
           required = {
-              'install/install-id-exergism.sh',
               'install/validate-id-exergism-generation.sh',
               'install/verify-id-exergism-artifact-fence.sh',
               'agent/validate-release-manifest.py',
