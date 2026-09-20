@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
-IFS=
+umask 077
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH
+unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_DIR GIT_WORK_TREE
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root (or with sudo)." >&2
