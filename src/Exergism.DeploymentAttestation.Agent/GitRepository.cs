@@ -1630,13 +1630,9 @@ internal sealed class GitRepository(AgentConfig config)
     private async Task AssertNoUnsafeMetadataConfigsAsync(IEnumerable<string> roots)
     {
         var configFiles = roots
-            .SelectMany(GitMetadataEnumeration.EnumerateFiles)
-            .Where(path =>
-            {
-                var name = Path.GetFileName(path);
-                return string.Equals(name, "config", StringComparison.Ordinal) ||
-                       string.Equals(name, "config.worktree", StringComparison.Ordinal);
-            })
+            .SelectMany(root => GitMetadataEnumeration
+                .EnumerateFiles(root)
+                .Where(path => IsGitMetadataConfigPath(root, path)))
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
@@ -1658,6 +1654,25 @@ internal sealed class GitRepository(AgentConfig config)
 
             EnsureNoUnsafeRepositoryConfigKeys(configFile, result.StdOut);
         }
+    }
+
+    internal static bool IsGitMetadataConfigPath(string root, string path)
+    {
+        root = Path.GetFullPath(root);
+        path = Path.GetFullPath(path);
+        var relative = Path.GetRelativePath(root, path)
+            .Replace(Path.DirectorySeparatorChar, '/');
+
+        if (relative is "config" or "config.worktree")
+            return true;
+
+        if (relative.StartsWith("modules/", StringComparison.Ordinal) &&
+            (relative.EndsWith("/config", StringComparison.Ordinal) ||
+             relative.EndsWith("/config.worktree", StringComparison.Ordinal)))
+            return true;
+
+        return relative.StartsWith("worktrees/", StringComparison.Ordinal) &&
+               relative.EndsWith("/config.worktree", StringComparison.Ordinal);
     }
 
     private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
