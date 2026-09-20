@@ -1569,4 +1569,25 @@ public sealed class SecurityAndRegressionTests
                 "/checkout/tracked.txt"));
     }
 
+
+    [TestMethod]
+    public void AgentGitEnvironmentDropsAmbientGitSelectors()
+    {
+        var environment = AgentGitEnvironment.Create();
+
+        Assert.AreEqual("1", environment[AgentConstants.GIT_ENV_CONFIG_NOSYSTEM]);
+        Assert.AreEqual("/dev/null", environment[AgentConstants.GIT_ENV_CONFIG_GLOBAL]);
+        Assert.AreEqual("0", environment[AgentConstants.GIT_ENV_TERMINAL_PROMPT]);
+        Assert.AreEqual("0", environment[AgentConstants.GIT_ENV_OPTIONAL_LOCKS]);
+
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_DIR));
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_WORK_TREE));
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_COMMON_DIR));
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_INDEX_FILE));
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_OBJECT_DIRECTORY));
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_ALTERNATE_OBJECT_DIRECTORIES));
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_CONFIG_PARAMETERS));
+        Assert.IsFalse(environment.ContainsKey(AgentConstants.GIT_ENV_CONFIG_COUNT));
+    }
+
 }
