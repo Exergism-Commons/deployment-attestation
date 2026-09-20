@@ -313,6 +313,44 @@ target_start_fence_active() {
   [[ "$load" == "masked" ]]
 }
 
+owned_target_start_fence_marker_valid() {
+  ensure_target_start_fence_root || return 1
+  [[ -f "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]] || return 1
+  [[ "$(stat -c '%u:%a' -- "$TARGET_START_FENCE_MARKER")" == "0:600" ]] || return 1
+  [[ "$(cat -- "$TARGET_START_FENCE_MARKER")" == "$TARGET_UNIT" ]]
+}
+
+release_owned_target_start_fence() {
+  # Absence of our marker means any existing mask is administrative/external
+  # and must never be removed by recovery.
+  path_exists_any "$TARGET_START_FENCE_MARKER" || return 0
+
+  owned_target_start_fence_marker_valid || {
+    echo "CRITICAL: recovery start-fence marker is invalid; refusing to unmask target." >&2
+    return 1
+  }
+
+  if path_exists_any "$TARGET_RUNTIME_MASK"; then
+    [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]] || {
+      echo "CRITICAL: recovery start-fence marker exists but runtime unit override is not our /dev/null mask." >&2
+      return 1
+    }
+    systemctl unmask --runtime "$TARGET_UNIT" >/dev/null 2>&1 || return 1
+  fi
+
+  # Always reload while the trusted marker still exists. This makes a crash
+  # after unmask but before daemon-reload/marker cleanup safely resumable.
+  systemctl daemon-reload >/dev/null 2>&1 || return 1
+
+  path_exists_any "$TARGET_RUNTIME_MASK" && {
+    echo "CRITICAL: recovery-owned runtime start fence still exists after unmask." >&2
+    return 1
+  }
+
+  rm -f -- "$TARGET_START_FENCE_MARKER" || return 1
+  return 0
+}
+
 establish_target_start_fence() {
   local marker_tmp
   ensure_target_start_fence_root || return 1
@@ -463,8 +501,17 @@ settle_target_after_inactive_baseline() {
 # boundary before publishing .recovered; preserve any later explicit start.
 finalize_restored_active_target() {
   # Recovery owns this start because the durable baseline says the target was
-  # active. Any failed/partial start or health validation must fail closed by
-  # proving the target quiescent before finalization returns an error.
+  # active. A prior failed finalizer may have left our runtime start fence in
+  # place; release only a fence carrying our trusted marker. Administrative
+  # masks without that marker are preserved and will make the start fail closed.
+  if ! release_owned_target_start_fence; then
+    quiesce_target_after_failed_validation
+    echo "CRITICAL: recovery-owned target start fence could not be released before finalization start; target remains fenced+quiescent." >&2
+    return 1
+  fi
+
+  # Any failed/partial start or health validation must fail closed by proving
+  # the target quiescent before finalization returns an error.
   if ! systemctl start "$TARGET_UNIT"; then
     quiesce_target_after_failed_validation
     echo "CRITICAL: restored active target failed to start during recovery finalization; recovered marker retained." >&2

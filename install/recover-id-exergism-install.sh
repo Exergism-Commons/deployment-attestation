@@ -362,6 +362,44 @@ target_start_fence_active() {
   [[ "$load" == "masked" ]]
 }
 
+owned_target_start_fence_marker_valid() {
+  ensure_target_start_fence_root || return 1
+  [[ -f "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]] || return 1
+  [[ "$(stat -c '%u:%a' -- "$TARGET_START_FENCE_MARKER")" == "0:600" ]] || return 1
+  [[ "$(cat -- "$TARGET_START_FENCE_MARKER")" == "$TARGET_UNIT" ]]
+}
+
+release_owned_target_start_fence() {
+  # Absence of our marker means any existing mask is administrative/external
+  # and must never be removed by recovery.
+  path_exists_any "$TARGET_START_FENCE_MARKER" || return 0
+
+  owned_target_start_fence_marker_valid || {
+    echo "CRITICAL: recovery start-fence marker is invalid; refusing to unmask target." >&2
+    return 1
+  }
+
+  if path_exists_any "$TARGET_RUNTIME_MASK"; then
+    [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]] || {
+      echo "CRITICAL: recovery start-fence marker exists but runtime unit override is not our /dev/null mask." >&2
+      return 1
+    }
+    systemctl unmask --runtime "$TARGET_UNIT" >/dev/null 2>&1 || return 1
+  fi
+
+  # Always reload while the trusted marker still exists. This makes a crash
+  # after unmask but before daemon-reload/marker cleanup safely resumable.
+  systemctl daemon-reload >/dev/null 2>&1 || return 1
+
+  path_exists_any "$TARGET_RUNTIME_MASK" && {
+    echo "CRITICAL: recovery-owned runtime start fence still exists after unmask." >&2
+    return 1
+  }
+
+  rm -f -- "$TARGET_START_FENCE_MARKER" || return 1
+  return 0
+}
+
 establish_target_start_fence() {
   local marker_tmp
   ensure_target_start_fence_root || return 1
@@ -565,6 +603,15 @@ if (( restore_rc != 0 )); then
   echo "CRITICAL: previous generation could not be restored exactly; target is fenced+quiescent and recovery journal is retained." >&2
   exit 1
 fi
+
+# A prior failed recovery/finalizer may have left a recovery-owned runtime mask.
+# Release only that owned fence after the restored generation is exact and has
+# passed transient validation. Administrative masks without our marker remain.
+release_owned_target_start_fence || {
+  fence_and_quiesce_target_after_failure
+  echo "CRITICAL: restored generation is valid but recovery-owned target start fence could not be released; target remains fenced+quiescent and journal is retained." >&2
+  exit 1
+}
 
 # The restored generation is now exact, durable and transiently healthy.
 # Retire the blocking phase atomically, but keep a recovered marker until the
