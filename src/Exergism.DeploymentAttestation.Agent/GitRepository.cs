@@ -67,6 +67,7 @@ internal static class AgentGitInvocation
            string.Equals(key, "core.alternateRefsCommand", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(key, "core.sshCommand", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(key, "core.gitProxy", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "core.sharedRepository", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(key, "diff.external", StringComparison.OrdinalIgnoreCase) ||
            (key.StartsWith("diff.", StringComparison.OrdinalIgnoreCase) &&
             key.EndsWith(".textconv", StringComparison.OrdinalIgnoreCase)) ||
