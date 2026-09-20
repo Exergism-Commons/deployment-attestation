@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
-IFS=
+umask 077
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH
 TARGET_UNIT="${EC_ID_TARGET_UNIT:-id-exergism.service}"
 APP_DIR="${EC_ID_APP_DIR:-/srv/id.exergism.org}"
 APP_BIN="${EC_ID_APP_BIN:-/usr/local/bin/idresolver}"
