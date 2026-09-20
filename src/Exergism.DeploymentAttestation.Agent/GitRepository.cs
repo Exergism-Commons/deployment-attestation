@@ -296,27 +296,35 @@ internal static class CheckoutWriteExclusion
             SetImmutableNoFollow(directory, immutable);
     }
 
-    internal static void AssertNoWritableReferences(IEnumerable<string> roots)
+    internal static void AssertNoWritableReferences(
+        IEnumerable<string> roots,
+        RepositoryDurabilitySnapshot repository,
+        IReadOnlyDictionary<string, GitMetadataDurabilitySnapshot> metadata)
     {
         var protectedRoots = roots
             .Select(Path.GetFullPath)
             .Select(Path.TrimEndingDirectorySeparator)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
+        var protectedFiles = new HashSet<FileIdentity>(
+            repository.Files.Values.Select(snapshot => snapshot.Identity));
+        foreach (var snapshot in metadata.Values)
+            protectedFiles.UnionWith(snapshot.Files.Values.Select(file => file.Identity));
 
         foreach (var procDir in Directory.EnumerateDirectories("/proc"))
         {
             if (!int.TryParse(Path.GetFileName(procDir), out _))
                 continue;
 
-            AssertNoWritableDescriptors(procDir, protectedRoots);
-            AssertNoWritableSharedMappings(procDir, protectedRoots);
+            AssertNoWritableDescriptors(procDir, protectedRoots, protectedFiles);
+            AssertNoWritableSharedMappings(procDir, protectedRoots, protectedFiles);
         }
     }
 
     private static void AssertNoWritableDescriptors(
         string procDir,
-        IReadOnlyCollection<string> protectedRoots)
+        IReadOnlyCollection<string> protectedRoots,
+        IReadOnlySet<FileIdentity> protectedFiles)
     {
         var fdDirectory = Path.Combine(procDir, "fd");
         try
@@ -350,9 +358,13 @@ internal static class CheckoutWriteExclusion
                     continue;
 
                 target = StripDeletedSuffix(target);
-                if (protectedRoots.Any(root => IsUnder(target, root)))
+                var protectedByPath = protectedRoots.Any(root => IsUnder(target, root));
+                var descriptorIdentity = TryReadDescriptorIdentity(fdPath);
+                var protectedByIdentity = descriptorIdentity is not null &&
+                                          protectedFiles.Contains(descriptorIdentity.Value);
+                if (protectedByPath || protectedByIdentity)
                     throw new AgentException(
-                        $"Writable file descriptor {Path.GetFileName(procDir)}/{fdName} references sealed checkout path {target}");
+                        $"Writable file descriptor {Path.GetFileName(procDir)}/{fdName} references sealed checkout inode {target}");
             }
         }
         catch (DirectoryNotFoundException) { }
@@ -365,7 +377,8 @@ internal static class CheckoutWriteExclusion
 
     private static void AssertNoWritableSharedMappings(
         string procDir,
-        IReadOnlyCollection<string> protectedRoots)
+        IReadOnlyCollection<string> protectedRoots,
+        IReadOnlySet<FileIdentity> protectedFiles)
     {
         var mapsPath = Path.Combine(procDir, "maps");
         try
@@ -381,12 +394,15 @@ internal static class CheckoutWriteExclusion
                     continue;
 
                 var target = StripDeletedSuffix(fields[5]);
-                if (!target.StartsWith('/'))
-                    continue;
+                var protectedByPath = target.StartsWith('/') &&
+                                      protectedRoots.Any(root => IsUnder(target, root));
+                var mappingIdentity = TryParseMappingIdentity(fields[3], fields[4]);
+                var protectedByIdentity = mappingIdentity is not null &&
+                                          protectedFiles.Contains(mappingIdentity.Value);
 
-                if (protectedRoots.Any(root => IsUnder(target, root)))
+                if (protectedByPath || protectedByIdentity)
                     throw new AgentException(
-                        $"Writable shared mapping in process {Path.GetFileName(procDir)} references sealed checkout path {target}");
+                        $"Writable shared mapping in process {Path.GetFileName(procDir)} references sealed checkout inode {target}");
             }
         }
         catch (FileNotFoundException) { }
@@ -396,6 +412,54 @@ internal static class CheckoutWriteExclusion
             throw new AgentException(
                 $"Cannot inspect writable mappings for process {Path.GetFileName(procDir)}");
         }
+    }
+
+    private static FileIdentity? TryReadDescriptorIdentity(string fdPath)
+    {
+        const uint STATX_BASIC_STATS = 0x000007ff;
+        if (Native.statx(
+                AT_FDCWD,
+                fdPath,
+                0,
+                STATX_BASIC_STATS,
+                out var stat) == 0)
+            return FileIdentity.From(stat);
+
+        var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+        if (error is 2 or 3)
+            return null;
+
+        throw new AgentException(
+            $"Cannot inspect writable descriptor identity {fdPath}; errno={error}");
+    }
+
+    internal static FileIdentity? TryParseMappingIdentity(string device, string inode)
+    {
+        if (!ulong.TryParse(
+                inode,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsedInode) ||
+            parsedInode == 0)
+            return null;
+
+        var separator = device.IndexOf(':');
+        if (separator <= 0 || separator == device.Length - 1)
+            return null;
+
+        if (!uint.TryParse(
+                device[..separator],
+                System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var major) ||
+            !uint.TryParse(
+                device[(separator + 1)..],
+                System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var minor))
+            return null;
+
+        return new FileIdentity(major, minor, parsedInode);
     }
 
     internal static bool IsWritableDescriptor(string flagsLine)
@@ -1006,7 +1070,10 @@ internal sealed class GitRepository(AgentConfig config)
         {
             Path.GetFullPath(_config.AppDirectory)
         };
-        CheckoutWriteExclusion.AssertNoWritableReferences(protectedRoots);
+        CheckoutWriteExclusion.AssertNoWritableReferences(
+            protectedRoots,
+            verified,
+            metadataBeforeSeal);
 
         // Sealing changes inode ctime. Re-snapshot only after write exclusion is
         // active, then prove exact bytes/structure while no unprivileged writer
