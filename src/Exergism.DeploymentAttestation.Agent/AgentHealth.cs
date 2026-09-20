@@ -152,10 +152,13 @@ internal sealed class AgentHealthStore(AgentConfig config)
 
     internal AgentHealthState? TryRead()
     {
-        if (!File.Exists(_config.AgentHealthFile))
+        if (!Durability.PathExistsNoFollow(_config.AgentHealthFile))
             return null;
 
-        using var document = JsonDocument.Parse(File.ReadAllBytes(_config.AgentHealthFile));
+        using var document = JsonDocument.Parse(
+            Durability.ReadTrustedRegularFileBytes(
+                _config.AgentHealthFile,
+                "agent health state"));
         var root = document.RootElement;
         if (root.ValueKind != JsonValueKind.Object)
             throw new AgentException("Agent health state must be a JSON object");
@@ -286,7 +289,7 @@ internal sealed class AgentSelfHealthService(AgentConfig config)
         var version = state is not null && state.AgentVersion == AGENT_VERSION;
         var recentSuccess = state is not null && IsRecent(state.LastSuccessAt, _config.AgentHealthMaxAge);
         var cycleNotStuck = state is not null && IsCycleNotStuck(state);
-        var transactionClear = !File.Exists(_config.TransactionFile);
+        var transactionClear = !Durability.PathExistsNoFollow(_config.TransactionFile);
         var timerActive = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ACTIVE, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
         var timerEnabled = await SystemctlSuccessAsync(SYSTEMD_COMMAND_IS_ENABLED, SYSTEMD_FLAG_QUIET, _config.AgentTimerUnit);
         var attestationDelivery = IsDeliveryHealthy(
