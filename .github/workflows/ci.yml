@@ -68,20 +68,73 @@ jobs:
         run: |
           set -euo pipefail
 
-          sed -n '/^quiesce_target_after_failed_validation() {/,/^}$/p' \
-            install/finalize-id-exergism-recovery.sh > /tmp/quiesce-restored-target.sh
+          : > /tmp/quiesce-restored-target.sh
+          for fn in \
+            ensure_target_start_fence_root \
+            target_start_fence_active \
+            establish_target_start_fence \
+            quiesce_target_after_failed_validation; do
+            sed -n "/^${fn}() {/,/^}$/p" install/finalize-id-exergism-recovery.sh \
+              >> /tmp/quiesce-restored-target.sh
+          done
           # shellcheck disable=SC1091
           source /tmp/quiesce-restored-target.sh
 
           TARGET_UNIT=id-exergism.service
+          fence_tmp="$(mktemp -d)"
+          trap 'rm -rf "$fence_tmp"' EXIT
+          TARGET_START_FENCE_ROOT="$fence_tmp/fence-root"
+          TARGET_START_FENCE_MARKER="$TARGET_START_FENCE_ROOT/id.exergism.org.target-start-fence"
+          TARGET_RUNTIME_MASK="$fence_tmp/systemd/id-exergism.service"
+          mkdir -p "$TARGET_START_FENCE_ROOT" "$(dirname "$TARGET_RUNTIME_MASK")"
+
+          path_exists_any() { [[ -e "$1" || -L "$1" ]]; }
+          chown() { :; }
+          stat() {
+            case "$*" in
+              *"%u:%a"*"$TARGET_START_FENCE_MARKER"*) printf '0:600\n' ;;
+              *"%u"*"$TARGET_START_FENCE_ROOT"*) printf '0\n' ;;
+              *"%a"*"$TARGET_START_FENCE_ROOT"*) printf '700\n' ;;
+              *) command stat "$@" ;;
+            esac
+          }
+
           STOP_CALLS=0
           QUIESCENT_CALLS=0
           systemctl() {
-            [[ "$1" == "stop" && "$2" == "$TARGET_UNIT" ]] || return 99
-            STOP_CALLS=$((STOP_CALLS + 1))
-            return 1
+            case "$1" in
+              mask)
+                [[ "$2" == "--runtime" && "$3" == "$TARGET_UNIT" ]] || return 99
+                ln -s /dev/null "$TARGET_RUNTIME_MASK"
+                return 0
+                ;;
+              daemon-reload)
+                return 0
+                ;;
+              show)
+                [[ "$2" == "$TARGET_UNIT" ]] || return 99
+                if [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink "$TARGET_RUNTIME_MASK")" == /dev/null ]]; then
+                  printf 'masked\n'
+                else
+                  printf 'loaded\n'
+                fi
+                return 0
+                ;;
+              stop)
+                [[ "$2" == "$TARGET_UNIT" ]] || return 99
+                STOP_CALLS=$((STOP_CALLS + 1))
+                return 1
+                ;;
+              *)
+                return 99
+                ;;
+            esac
           }
           target_quiescent() {
+            target_start_fence_active || {
+              echo "Quiescence was sampled without an active systemd start fence." >&2
+              return 1
+            }
             QUIESCENT_CALLS=$((QUIESCENT_CALLS + 1))
             (( QUIESCENT_CALLS >= 4 ))
           }
@@ -90,6 +143,8 @@ jobs:
           quiesce_target_after_failed_validation
           [[ "$STOP_CALLS" == 4 ]]
           [[ "$QUIESCENT_CALLS" == 4 ]]
+          target_start_fence_active
+          [[ -f "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]]
 
           sed -n '/^finalize_restored_active_target() {/,/^}$/p' \
             install/finalize-id-exergism-recovery.sh > /tmp/finalize-restored-active-target.sh
@@ -565,7 +620,14 @@ jobs:
           grep -Fq 'finalize_restored_active_target()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'restored active target failed to start during recovery finalization' install/finalize-id-exergism-recovery.sh
           grep -Fq 'restored active target failed recovery finalization health validation' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'target_start_fence_active()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'systemctl mask --runtime "$TARGET_UNIT"' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'target_start_fence_active && target_quiescent && target_start_fence_active' install/finalize-id-exergism-recovery.sh
           grep -Fq 'retrying while locks remain held' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'fence_and_quiesce_target_after_failure()' install/recover-id-exergism-install.sh
+          grep -Fq 'systemctl mask --runtime "$TARGET_UNIT"' install/recover-id-exergism-install.sh
+          grep -Fq 'target_start_fence_active && unit_is_quiescent "$TARGET_UNIT" && target_start_fence_active' install/recover-id-exergism-install.sh
+          grep -Fq 'target is fenced+quiescent and recovery journal is retained' install/recover-id-exergism-install.sh
           ! grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
           grep -Fq 'quiesce_target_after_failed_validation()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
