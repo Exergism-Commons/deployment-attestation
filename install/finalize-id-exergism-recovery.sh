@@ -24,10 +24,16 @@ path_exists_any() {
 }
 
 require_real_dir_if_present() {
-  local path="$1"
+  local path="$1" owner mode
   if path_exists_any "$path"; then
     [[ -d "$path" && ! -L "$path" ]] || {
       echo "CRITICAL: recovery phase path is not a real directory: $path" >&2
+      return 1
+    }
+    owner="$(stat -c '%u' -- "$path")" || return 1
+    mode="$(stat -c '%a' -- "$path")" || return 1
+    [[ "$owner" == 0 && "$mode" == 700 ]] || {
+      echo "CRITICAL: recovery phase path is not root-owned mode 0700: $path" >&2
       return 1
     }
   fi
