@@ -72,6 +72,8 @@ jobs:
           for fn in \
             ensure_target_start_fence_root \
             target_start_fence_active \
+            owned_target_start_fence_marker_valid \
+            release_owned_target_start_fence \
             establish_target_start_fence \
             quiesce_target_after_failed_validation; do
             sed -n "/^${fn}() {/,/^}$/p" install/finalize-id-exergism-recovery.sh \
@@ -101,11 +103,18 @@ jobs:
 
           STOP_CALLS=0
           QUIESCENT_CALLS=0
+          UNMASK_CALLS=0
           systemctl() {
             case "$1" in
               mask)
                 [[ "$2" == "--runtime" && "$3" == "$TARGET_UNIT" ]] || return 99
                 ln -s /dev/null "$TARGET_RUNTIME_MASK"
+                return 0
+                ;;
+              unmask)
+                [[ "$2" == "--runtime" && "$3" == "$TARGET_UNIT" ]] || return 99
+                UNMASK_CALLS=$((UNMASK_CALLS + 1))
+                rm -f -- "$TARGET_RUNTIME_MASK"
                 return 0
                 ;;
               daemon-reload)
@@ -146,6 +155,37 @@ jobs:
           target_start_fence_active
           [[ -f "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]]
 
+          # A recovery-owned fence is removable only with the trusted marker.
+          UNMASK_CALLS=0
+          release_owned_target_start_fence
+          [[ "$UNMASK_CALLS" == 1 ]]
+          [[ ! -e "$TARGET_RUNTIME_MASK" && ! -L "$TARGET_RUNTIME_MASK" ]]
+          [[ ! -e "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]]
+
+          # An administrative runtime mask without our marker must be preserved.
+          ln -s /dev/null "$TARGET_RUNTIME_MASK"
+          UNMASK_CALLS=0
+          release_owned_target_start_fence
+          [[ "$UNMASK_CALLS" == 0 ]]
+          [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink "$TARGET_RUNTIME_MASK")" == /dev/null ]]
+          rm -f -- "$TARGET_RUNTIME_MASK"
+
+          # A crash after unmask but before marker cleanup is idempotently recoverable.
+          printf '%s\n' "$TARGET_UNIT" > "$TARGET_START_FENCE_MARKER"
+          UNMASK_CALLS=0
+          release_owned_target_start_fence
+          [[ "$UNMASK_CALLS" == 0 ]]
+          [[ ! -e "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]]
+
+          # Never unmask from an invalid/spoofed marker.
+          printf '%s\n' wrong.service > "$TARGET_START_FENCE_MARKER"
+          if release_owned_target_start_fence; then
+            echo "Invalid recovery start-fence marker was accepted." >&2
+            exit 1
+          fi
+          [[ -f "$TARGET_START_FENCE_MARKER" ]]
+          rm -f -- "$TARGET_START_FENCE_MARKER"
+
           sed -n '/^finalize_restored_active_target() {/,/^}$/p' \
             install/finalize-id-exergism-recovery.sh > /tmp/finalize-restored-active-target.sh
           # shellcheck disable=SC1091
@@ -154,10 +194,16 @@ jobs:
           START_RESULT=0
           HEALTH_RESULT=0
           QUIESCE_CALLS=0
+          RELEASE_RESULT=0
+          RELEASE_CALLS=0
 
           systemctl() {
             [[ "$1" == "start" && "$2" == "$TARGET_UNIT" ]] || return 99
             return "$START_RESULT"
+          }
+          release_owned_target_start_fence() {
+            RELEASE_CALLS=$((RELEASE_CALLS + 1))
+            return "$RELEASE_RESULT"
           }
           wait_target_healthy_active() {
             return "$HEALTH_RESULT"
@@ -167,29 +213,46 @@ jobs:
             return 0
           }
 
+          RELEASE_RESULT=1
+          RELEASE_CALLS=0
+          QUIESCE_CALLS=0
+          if finalize_restored_active_target; then
+            echo "Failed owned-fence release was accepted before target restart." >&2
+            exit 1
+          fi
+          [[ "$RELEASE_CALLS" == 1 ]]
+          [[ "$QUIESCE_CALLS" == 0 ]]
+
+          RELEASE_RESULT=0
           START_RESULT=1
           HEALTH_RESULT=0
           QUIESCE_CALLS=0
+          RELEASE_CALLS=0
           if finalize_restored_active_target; then
             echo "Failed target start was accepted during finalization." >&2
             exit 1
           fi
           [[ "$QUIESCE_CALLS" == 1 ]]
+          [[ "$RELEASE_CALLS" == 1 ]]
 
           START_RESULT=0
           HEALTH_RESULT=1
           QUIESCE_CALLS=0
+          RELEASE_CALLS=0
           if finalize_restored_active_target; then
             echo "Failed restored-target health validation was accepted." >&2
             exit 1
           fi
           [[ "$QUIESCE_CALLS" == 1 ]]
+          [[ "$RELEASE_CALLS" == 1 ]]
 
           START_RESULT=0
           HEALTH_RESULT=0
           QUIESCE_CALLS=0
+          RELEASE_CALLS=0
           finalize_restored_active_target
           [[ "$QUIESCE_CALLS" == 0 ]]
+          [[ "$RELEASE_CALLS" == 1 ]]
 
           grep -Fq 'finalize_restored_active_target || exit 1' install/finalize-id-exergism-recovery.sh
           grep -Fq 'while true; do' install/finalize-id-exergism-recovery.sh
@@ -621,6 +684,11 @@ jobs:
           grep -Fq 'restored active target failed to start during recovery finalization' install/finalize-id-exergism-recovery.sh
           grep -Fq 'restored active target failed recovery finalization health validation' install/finalize-id-exergism-recovery.sh
           grep -Fq 'target_start_fence_active()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'release_owned_target_start_fence()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'systemctl unmask --runtime "$TARGET_UNIT"' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'release_owned_target_start_fence()' install/recover-id-exergism-install.sh
+          grep -Fq 'systemctl unmask --runtime "$TARGET_UNIT"' install/recover-id-exergism-install.sh
+          grep -Fq 'restored generation is valid but recovery-owned target start fence could not be released' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl mask --runtime "$TARGET_UNIT"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'target_start_fence_active && target_quiescent && target_start_fence_active' install/finalize-id-exergism-recovery.sh
           grep -Fq 'retrying while locks remain held' install/finalize-id-exergism-recovery.sh
@@ -685,12 +753,13 @@ jobs:
           retire = recovery.index('mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
           direct_start = recovery.index('if ! systemctl start "$TARGET_UNIT"')
           direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR"', direct_start)
+          owned_fence_release = recovery.index('release_owned_target_start_fence || {', validate)
           direct_fence_quiesce = recovery.index('fence_and_quiesce_target_after_failure', direct_fence)
           direct_restart = recovery.index('previously active resolver could not be restored healthy after direct recovery')
           timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
           assert dependent_quiesce_helper < preserve_boot_start < updater_quiesce_call < target_quiesce_call < hard_quiesce
           assert hard_quiesce < first_restore
-          assert validate < retire < direct_start < direct_fence < direct_fence_quiesce < direct_restart < timer_restore
+          assert validate < owned_fence_release < retire < direct_start < direct_fence < direct_fence_quiesce < direct_restart < timer_restore
 
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
