@@ -305,7 +305,8 @@ jobs:
           grep -Fq '"$ARTIFACT_FENCE_AUDITOR"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'systemctl enable "$TIMER_UNIT"' install/install-id-exergism.sh
           grep -Fq -- '--connect-timeout 10 --max-time 120' install/install-id-exergism.sh
-          grep -Fq 'TimeoutStartSec=15min' packaging/ec-deployment-attestation@.service
+          grep -Fq 'TimeoutStartSec=infinity' packaging/ec-deployment-attestation@.service
+          ! grep -Fq 'TimeoutStartSec=15min' packaging/ec-deployment-attestation@.service
           grep -Fq 'EC_INSTALL_LOCK_HELD=1 "$RECOVERY_HELPER" normal' install/install-id-exergism.sh
           grep -Fq 'Recovery retained an actionable journal' install/install-id-exergism.sh
           grep -Fq 'origin_boot_id' install/install-id-exergism.sh
