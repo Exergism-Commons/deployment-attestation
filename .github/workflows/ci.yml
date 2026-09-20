@@ -64,6 +64,59 @@ jobs:
           grep -Fq '|| ! restored_smoke_healthy \' install/recover-id-exergism-install.sh
           ! grep -Fq '|| { [[ ! -x "$SMOKE" ]] || EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; } \' install/recover-id-exergism-install.sh
 
+      - name: Validate finalizer fail-closed target policy
+        run: |
+          set -euo pipefail
+
+          sed -n '/^finalize_restored_active_target() {/,/^}$/p' \
+            install/finalize-id-exergism-recovery.sh > /tmp/finalize-restored-active-target.sh
+          # shellcheck disable=SC1091
+          source /tmp/finalize-restored-active-target.sh
+
+          TARGET_UNIT=id-exergism.service
+          START_RESULT=0
+          HEALTH_RESULT=0
+          QUIESCE_CALLS=0
+
+          systemctl() {
+            [[ "$1" == "start" && "$2" == "$TARGET_UNIT" ]] || return 99
+            return "$START_RESULT"
+          }
+          wait_target_healthy_active() {
+            return "$HEALTH_RESULT"
+          }
+          quiesce_target_after_failed_validation() {
+            QUIESCE_CALLS=$((QUIESCE_CALLS + 1))
+            return 0
+          }
+
+          START_RESULT=1
+          HEALTH_RESULT=0
+          QUIESCE_CALLS=0
+          if finalize_restored_active_target; then
+            echo "Failed target start was accepted during finalization." >&2
+            exit 1
+          fi
+          [[ "$QUIESCE_CALLS" == 1 ]]
+
+          START_RESULT=0
+          HEALTH_RESULT=1
+          QUIESCE_CALLS=0
+          if finalize_restored_active_target; then
+            echo "Failed restored-target health validation was accepted." >&2
+            exit 1
+          fi
+          [[ "$QUIESCE_CALLS" == 1 ]]
+
+          START_RESULT=0
+          HEALTH_RESULT=0
+          QUIESCE_CALLS=0
+          finalize_restored_active_target
+          [[ "$QUIESCE_CALLS" == 0 ]]
+
+          grep -Fq 'finalize_restored_active_target || exit 1' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
+
       - name: Exercise trusted installer bootstrap
         run: |
           set -euo pipefail
@@ -486,6 +539,9 @@ jobs:
           grep -Fq 'Never' install/finalize-id-exergism-recovery.sh
           grep -Fq 'preserve any later explicit start' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Production resolver failed the live artifact-fence audit during recovery finalization.' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'finalize_restored_active_target()' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'restored active target failed to start during recovery finalization' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'restored active target failed recovery finalization health validation' install/finalize-id-exergism-recovery.sh
           grep -Fq 'quiesce_target_after_failed_validation()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
