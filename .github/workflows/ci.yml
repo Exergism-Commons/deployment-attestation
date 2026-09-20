@@ -68,12 +68,34 @@ jobs:
         run: |
           set -euo pipefail
 
+          sed -n '/^quiesce_target_after_failed_validation() {/,/^}$/p' \
+            install/finalize-id-exergism-recovery.sh > /tmp/quiesce-restored-target.sh
+          # shellcheck disable=SC1091
+          source /tmp/quiesce-restored-target.sh
+
+          TARGET_UNIT=id-exergism.service
+          STOP_CALLS=0
+          QUIESCENT_CALLS=0
+          systemctl() {
+            [[ "$1" == "stop" && "$2" == "$TARGET_UNIT" ]] || return 99
+            STOP_CALLS=$((STOP_CALLS + 1))
+            return 1
+          }
+          target_quiescent() {
+            QUIESCENT_CALLS=$((QUIESCENT_CALLS + 1))
+            (( QUIESCENT_CALLS >= 4 ))
+          }
+          sleep() { :; }
+
+          quiesce_target_after_failed_validation
+          [[ "$STOP_CALLS" == 4 ]]
+          [[ "$QUIESCENT_CALLS" == 4 ]]
+
           sed -n '/^finalize_restored_active_target() {/,/^}$/p' \
             install/finalize-id-exergism-recovery.sh > /tmp/finalize-restored-active-target.sh
           # shellcheck disable=SC1091
           source /tmp/finalize-restored-active-target.sh
 
-          TARGET_UNIT=id-exergism.service
           START_RESULT=0
           HEALTH_RESULT=0
           QUIESCE_CALLS=0
@@ -115,7 +137,8 @@ jobs:
           [[ "$QUIESCE_CALLS" == 0 ]]
 
           grep -Fq 'finalize_restored_active_target || exit 1' install/finalize-id-exergism-recovery.sh
-          grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'while true; do' install/finalize-id-exergism-recovery.sh
+          ! grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
 
       - name: Exercise trusted installer bootstrap
         run: |
@@ -542,6 +565,8 @@ jobs:
           grep -Fq 'finalize_restored_active_target()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'restored active target failed to start during recovery finalization' install/finalize-id-exergism-recovery.sh
           grep -Fq 'restored active target failed recovery finalization health validation' install/finalize-id-exergism-recovery.sh
+          grep -Fq 'retrying while locks remain held' install/finalize-id-exergism-recovery.sh
+          ! grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
           grep -Fq 'quiesce_target_after_failed_validation()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
