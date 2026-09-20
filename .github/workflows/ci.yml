@@ -323,7 +323,7 @@ jobs:
           from pathlib import Path
 
           text = Path('install/install-id-exergism.sh').read_text()
-          native_stage = text.index('install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"')
+          native_stage = text.index('source_fd = os.open(source, flags)')
           native_preflight = text.index('EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config')
           native_self_test = text.index('"$AGENT_INSTALL_SOURCE" self-test', native_preflight)
           agent_replace = text.index('install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"')
