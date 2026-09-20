@@ -465,7 +465,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     {
         var result = await ProcessRunner.RunAsync(
             COMMAND_NSENTER,
-            ["--target", pid.ToString(), "--mount", "--", "cat", "/proc/self/mountinfo"],
+            ["--target", pid.ToString(), "--mount", "--root", "--", "cat", "/proc/self/mountinfo"],
             TimeSpan.FromSeconds(5));
         if (!result.Success)
             throw new AgentException("Could not inspect production mount namespace");
@@ -528,12 +528,21 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
         }
     }
 
-    private static bool Contains(string root, string path)
+    internal static bool Contains(string root, string path)
     {
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-        return path == root ||
-               path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+
+        if (path == root)
+            return true;
+
+        // Path.TrimEndingDirectorySeparator intentionally preserves filesystem
+        // roots. Appending another separator would turn "/" into "//" on Linux
+        // and incorrectly make the root mount fail to cover every descendant.
+        if (root == Path.GetPathRoot(root))
+            return path.StartsWith(root, StringComparison.Ordinal);
+
+        return path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     private static string UnescapeMountPath(string value)
