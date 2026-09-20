@@ -150,7 +150,7 @@ repo_inputs = (
     ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400, "9a132fe45b037d2082ebec87948743180ffc19d1588a1d128937ddda912440d9"),
     ("examples/id.exergism.org.env.example", 0o400, "1b1e7318c4a6d1341185e27a79d46b117ecbb14b759e6ce194fc6a0795069659"),
     ("examples/id.exergism.org-smoke.sh", 0o500, "a78cd1f64258c1a4252a4c06a6a941b0490dbd5fc0f67159ddd5dfa71ff0d98c"),
-    ("packaging/ec-deployment-attestation@.service", 0o400, "f5453cf016f2ee79938306e56e4cbadc9c210aee56bc95538464b523d25dcc27"),
+    ("packaging/ec-deployment-attestation@.service", 0o400, "9c2f627a589dfa418f3334d6fe68722cc1c3f50d5324b331497e7676de93ff94"),
     ("packaging/ec-deployment-attestation@.timer", 0o400, "a27cdffdd9e4e8d4cfeebc78f7c83836d3944314ba0c0559229670c5dbfa5b56"),
     ("packaging/id-exergism-artifact-fence.conf", 0o400, "3c0eeb7e8ce627d199b6093a3f0a267a64f23bd73875ec779c1a7d9bebcda42e"),
 )
