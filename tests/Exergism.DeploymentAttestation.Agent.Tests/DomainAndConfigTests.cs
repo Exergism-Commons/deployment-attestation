@@ -323,7 +323,7 @@ public sealed class DomainAndConfigTests
     }
 
     [TestMethod]
-    public void SmokeScriptConfigRequiresOnlyAbsolutePathWhileRuntimeRequiresExecutable()
+    public void SmokeScriptConfigRequiresOnlyAbsolutePathWhileRuntimeRequiresTrustedExecutable()
     {
         using var environment = TestEnvironment.Create();
         var missing = Path.Combine(environment.Root, "not-installed-yet.sh");
@@ -339,25 +339,42 @@ public sealed class DomainAndConfigTests
                 ENV_SMOKE_SCRIPT,
                 "relative-smoke.sh"));
 
-        Assert.IsFalse(SmokeScriptValidation.IsUsable(missing));
+        TestAssert.Throws<AgentException>(
+            () => Durability.ReadTrustedRegularFileBytes(
+                missing,
+                "smoke script",
+                requireExecutable: true));
 
         var script = Path.Combine(environment.Root, "smoke.sh");
         File.WriteAllText(script, "#!/bin/sh\nexit 0\n");
         File.SetUnixFileMode(
             script,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        Assert.IsTrue(SmokeScriptValidation.IsUsable(script));
+        CollectionAssert.AreEqual(
+            System.Text.Encoding.UTF8.GetBytes("#!/bin/sh\nexit 0\n"),
+            Durability.ReadTrustedRegularFileBytes(
+                script,
+                "smoke script",
+                requireExecutable: true));
 
         var nonExecutable = Path.Combine(environment.Root, "not-executable.sh");
         File.WriteAllText(nonExecutable, "#!/bin/sh\nexit 0\n");
         File.SetUnixFileMode(
             nonExecutable,
             UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        Assert.IsFalse(SmokeScriptValidation.IsUsable(nonExecutable));
+        TestAssert.Throws<AgentException>(
+            () => Durability.ReadTrustedRegularFileBytes(
+                nonExecutable,
+                "smoke script",
+                requireExecutable: true));
 
         var symlink = Path.Combine(environment.Root, "smoke-link");
         File.CreateSymbolicLink(symlink, script);
-        Assert.IsFalse(SmokeScriptValidation.IsUsable(symlink));
+        TestAssert.Throws<AgentException>(
+            () => Durability.ReadTrustedRegularFileBytes(
+                symlink,
+                "smoke script",
+                requireExecutable: true));
     }
 
     [TestMethod]
