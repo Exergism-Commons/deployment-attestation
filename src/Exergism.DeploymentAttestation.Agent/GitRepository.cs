@@ -4,6 +4,21 @@ using static Exergism.DeploymentAttestation.Agent.AgentConstants;
 
 namespace Exergism.DeploymentAttestation.Agent;
 
+internal static class AgentGitEnvironment
+{
+    internal static IReadOnlyDictionary<string, string> Create()
+        => new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? "/usr/bin:/bin",
+            ["LANG"] = "C",
+            ["LC_ALL"] = "C",
+            [GIT_ENV_CONFIG_NOSYSTEM] = CONFIG_BOOLEAN_TRUE,
+            [GIT_ENV_CONFIG_GLOBAL] = "/dev/null",
+            [GIT_ENV_TERMINAL_PROMPT] = "0",
+            [GIT_ENV_OPTIONAL_LOCKS] = "0"
+        };
+}
+
 internal static class TrackedFileDurability
 {
     internal static VerifiedRegularFile ReadVerifiedRegularFile(string path, string relativePath)
@@ -2352,7 +2367,9 @@ internal sealed class GitRepository(AgentConfig config)
         var bytes = await ProcessRunner.RunBytesAsync(
             COMMAND_GIT,
             [GIT_FLAG_CHDIR, repository, GIT_SUBCOMMAND_LS_TREE, "-rz", "--full-tree", commit],
-            TimeSpan.FromSeconds(30));
+            TimeSpan.FromSeconds(30),
+            environment: AgentGitEnvironment.Create(),
+            clearEnvironment: true);
 
         var result = new List<TreeEntry>();
         var start = 0;
@@ -2393,7 +2410,12 @@ internal sealed class GitRepository(AgentConfig config)
     {
         var all = new List<string> { GIT_FLAG_CHDIR, repository };
         all.AddRange(args);
-        var result = await ProcessRunner.RunAsync(COMMAND_GIT, all, TimeSpan.FromMinutes(2));
+        var result = await ProcessRunner.RunAsync(
+            COMMAND_GIT,
+            all,
+            TimeSpan.FromMinutes(2),
+            environment: AgentGitEnvironment.Create(),
+            clearEnvironment: true);
         if (required && !result.Success)
             throw new AgentException($"Git command failed in {repository}: {result.StdErr.Trim()}");
         return result;
