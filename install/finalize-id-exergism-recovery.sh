@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
-IFS=
+umask 077
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root (or with sudo)." >&2
   exit 1
