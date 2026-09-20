@@ -222,6 +222,11 @@ jobs:
           grep -Fq 'Refusing privileged execution without a trusted root-owned installer stage.' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALLER_SOURCE_ROOT' install/install-id-exergism.sh
           grep -Fq 'EC_INSTALLER_SHA256' install/install-id-exergism.sh
+          grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$STAGE"' docs/NATIVE-AOT-MIGRATION.md
+          grep -Fq 'EC_INSTALLER_SOURCE_ROOT="$SOURCE_ROOT"' docs/NATIVE-AOT-MIGRATION.md
+          grep -Fq 'EC_INSTALLER_SHA256="$INSTALLER_SHA256"' docs/NATIVE-AOT-MIGRATION.md
+          grep -Fq 'EC_NATIVE_AGENT_SHA256="$AGENT_SHA256"' docs/NATIVE-AOT-MIGRATION.md
+          ! grep -Fq 'sudo EC_NATIVE_AGENT_BINARY=/path/to/ec-deployment-agent' docs/NATIVE-AOT-MIGRATION.md
           grep -Fq 'actual_installer_sha256="$(sha256sum -- "${BASH_SOURCE[0]}"' install/install-id-exergism.sh
           ! grep -Fq 'BASHPID' install/install-id-exergism.sh
           ! grep -Fq 'bootstrap_stage=' install/install-id-exergism.sh
