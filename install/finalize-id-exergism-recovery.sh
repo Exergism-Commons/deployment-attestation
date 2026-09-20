@@ -447,8 +447,9 @@ wait_target_healthy_active() {
     case "$state" in
       active)
         if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1; then
-          if [[ -x "$SMOKE" ]]; then
-            EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || return 1
+          if [[ -x "$SMOKE" ]] && ! EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE"; then
+            sleep 1
+            continue
           fi
           "$ARTIFACT_FENCE_AUDITOR" || {
             echo "Production resolver failed the live artifact-fence audit during recovery finalization." >&2
