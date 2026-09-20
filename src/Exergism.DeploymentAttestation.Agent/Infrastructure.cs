@@ -215,6 +215,8 @@ internal static class Durability
     private const uint STATX_REGULAR_REQUIRED = STATX_TYPE | STATX_MODE | STATX_CTIME | STATX_INO | STATX_SIZE;
     private const uint STATX_TRUSTED_CONFIG_REQUIRED = STATX_REGULAR_REQUIRED | STATX_UID | STATX_GID;
     private const uint STATX_DIRECTORY_REQUIRED = STATX_TYPE | STATX_MTIME | STATX_CTIME | STATX_INO;
+    private const uint STATX_TRUSTED_DIRECTORY_REQUIRED =
+        STATX_TYPE | STATX_MODE | STATX_UID | STATX_GID | STATX_INO;
     private const ushort S_IFMT = 0xF000;
     private const ushort S_IFDIR = 0x4000;
     private const ushort S_IFREG = 0x8000;
@@ -355,6 +357,82 @@ internal static class Durability
             if (fd >= 0)
                 _ = Native.close(fd);
         }
+    }
+
+    public static void EnsureTrustedDirectory(string target, UnixFileMode mode)
+    {
+        target = Path.GetFullPath(target);
+
+        ValidateExistingTrustedDirectoryChain(target);
+        EnsureDirectory(target, mode);
+        ValidateExistingTrustedDirectoryChain(target);
+    }
+
+    internal static void ValidateExistingTrustedDirectoryChain(string target)
+    {
+        var effectiveUid = Native.geteuid();
+        var current = Path.GetFullPath(target);
+
+        while (true)
+        {
+            if (Directory.Exists(current))
+                ValidateTrustedDirectoryNoFollow(current, effectiveUid);
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent) || parent == current)
+                return;
+            current = parent;
+        }
+    }
+
+    private static void ValidateTrustedDirectoryNoFollow(string path, uint effectiveUid)
+    {
+        var fd = Native.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException(
+                $"Trusted state directory is not a real directory: {path}; errno={Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            if (Native.statx(
+                    fd,
+                    "",
+                    AT_EMPTY_PATH,
+                    STATX_TRUSTED_DIRECTORY_REQUIRED,
+                    out var stat) != 0)
+                throw new AgentException(
+                    $"Could not inspect trusted state directory: {path}; errno={Marshal.GetLastPInvokeError()}");
+
+            if ((stat.Mask & STATX_TRUSTED_DIRECTORY_REQUIRED) != STATX_TRUSTED_DIRECTORY_REQUIRED ||
+                (stat.Mode & S_IFMT) != S_IFDIR)
+                throw new AgentException(
+                    $"Trusted state path is not a fully inspectable directory: {path}");
+
+            EnsureTrustedDirectoryAttributes(
+                stat.Uid,
+                (UnixFileMode)(stat.Mode & ~S_IFMT),
+                effectiveUid,
+                path);
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
+    internal static void EnsureTrustedDirectoryAttributes(
+        uint ownerUid,
+        UnixFileMode mode,
+        uint effectiveUid,
+        string path)
+    {
+        if (ownerUid != effectiveUid)
+            throw new AgentException(
+                $"Trusted state directory must be owned by effective uid {effectiveUid}: {path}");
+
+        if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+            throw new AgentException(
+                $"Trusted state directory must not be writable by group or others: {path}");
     }
 
     public static void EnsureDirectory(string target, UnixFileMode mode)
