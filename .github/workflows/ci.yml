@@ -294,8 +294,11 @@ jobs:
             printf '%s\n' "$stage"
           }
 
-          ! grep -Fq '/run/ec-deployment-attestation-installer' install/install-id-exergism.sh
+          ! grep -R -Fq '/run/ec-deployment-attestation-installer' \
+            README.md docs install
           grep -Fq '/var/lib/ec-deployment-attestation/bootstrap' install/install-id-exergism.sh
+          grep -Fq '/var/lib/ec-deployment-attestation/bootstrap' docs/NATIVE-AOT-MIGRATION.md
+          grep -Fq '/var/lib/ec-deployment-attestation/bootstrap' docs/THREAT-MODEL.md
 
           stage="$(stage_installer)"
           if sudo env -i \
