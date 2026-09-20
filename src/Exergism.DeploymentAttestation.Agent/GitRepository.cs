@@ -767,6 +767,15 @@ internal static class CheckoutWriteExclusion
                     EnsureDescriptorSingleLink(fd, path);
                     EnsurePathStillReferencesDescriptor(fd, path);
                 }
+                else
+                {
+                    // After clearing immutable another process may immediately
+                    // rename/link the inode. Detect that before durability work,
+                    // but never re-apply immutable on an inode that may already
+                    // have escaped the protected namespace.
+                    EnsureDescriptorSingleLink(fd, path);
+                    EnsurePathStillReferencesDescriptor(fd, path);
+                }
 
                 if (Native.fsync(fd) != 0)
                     throw new AgentException(
@@ -782,6 +791,9 @@ internal static class CheckoutWriteExclusion
             }
             catch (Exception mutationFailure)
             {
+                if (!immutable)
+                    throw;
+
                 var restore = flags;
                 Exception? rollbackFailure = null;
                 if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref restore) != 0)
