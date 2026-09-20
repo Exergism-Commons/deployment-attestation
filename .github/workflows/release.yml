@@ -174,7 +174,7 @@ jobs:
           cat > artifacts/release/RELEASE_NOTES.md <<EOF
           ## Deployment Attestation $TAG
 
-          First packaged release of the Exergism Commons deployment-attestation stack.
+          Packaged release of the Exergism Commons deployment-attestation stack.
 
           - .NET 10 Native AOT deployment/attestation agent for linux-x64.
           - Release-manifest-bound source/runtime verification.
