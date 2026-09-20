@@ -3,6 +3,7 @@ name: Native AOT agent
 on:
   push:
     branches:
+      - main
       - native-aot-agent
   pull_request:
 

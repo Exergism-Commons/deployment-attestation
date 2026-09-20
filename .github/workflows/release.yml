@@ -1,0 +1,206 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deployment-attestation-release
+  cancel-in-progress: false
+
+jobs:
+  release-linux-x64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$version" =~ ^0\.[0-9]+\.[0-9]+$ ]] || {
+            echo "VERSION must be a 0.x.y semantic version during protocol pre-adoption." >&2
+            exit 1
+          }
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse published release and clean stale draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null)"; then
+            is_draft="$(jq -r '.draft' <<<"$release_json")"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Published release $TAG already exists; bump VERSION instead of overwriting it." >&2
+              exit 1
+            fi
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Native AOT toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+
+      - name: Build with AOT analyzers
+        run: dotnet build src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release
+
+      - name: Run unit tests
+        run: dotnet test tests/Exergism.DeploymentAttestation.Agent.Tests/Exergism.DeploymentAttestation.Agent.Tests.csproj -c Release
+
+      - name: Run managed self-test
+        run: dotnet run --project src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release -- self-test
+
+      - name: Publish linux-x64 Native AOT
+        run: |
+          set -euo pipefail
+          dotnet publish src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj \
+            -c Release -r linux-x64 \
+            -o artifacts/linux-x64
+          test -x artifacts/linux-x64/ec-deployment-agent
+          file artifacts/linux-x64/ec-deployment-agent
+          ! ldd artifacts/linux-x64/ec-deployment-agent 2>&1 | grep -E 'libhostfxr|libcoreclr|hostpolicy'
+
+      - name: Run Native AOT self-test
+        run: ./artifacts/linux-x64/ec-deployment-agent self-test
+
+      - name: Validate Native AOT host config
+        run: EC_ATTESTATION_CONFIG="$PWD/examples/id.exergism.org.env.example" ./artifacts/linux-x64/ec-deployment-agent validate-config
+
+      - name: Assemble release assets
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/release
+          install -m 0755 artifacts/linux-x64/ec-deployment-agent artifacts/release/ec-deployment-agent-linux-x64
+          install -m 0755 install/install-id-exergism.sh artifacts/release/install-id-exergism.sh
+
+          agent_sha256="$(sha256sum artifacts/release/ec-deployment-agent-linux-x64 | awk '{print $1}')"
+          installer_sha256="$(sha256sum artifacts/release/install-id-exergism.sh | awk '{print $1}')"
+          generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          python3 - "$TAG" "$GITHUB_SHA" "$generated_at" "$agent_sha256" "$installer_sha256" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          tag, source_commit, generated_at, agent_sha256, installer_sha256 = sys.argv[1:]
+          document = {
+              "schema_version": "0.1",
+              "repository": "Exergism-Commons/deployment-attestation",
+              "release_tag": tag,
+              "source_commit": source_commit,
+              "generated_at": generated_at,
+              "assets": {
+                  "amd64": {
+                      "name": "ec-deployment-agent-linux-x64",
+                      "sha256": agent_sha256,
+                  },
+                  "installer": {
+                      "name": "install-id-exergism.sh",
+                      "sha256": installer_sha256,
+                  },
+              },
+          }
+          pathlib.Path("artifacts/release/DEPLOYMENT_MANIFEST.json").write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          python3 agent/validate-release-manifest.py \
+            spec/release-manifest-v0.1.schema.json \
+            artifacts/release/DEPLOYMENT_MANIFEST.json
+
+          (
+            cd artifacts/release
+            sha256sum \
+              ec-deployment-agent-linux-x64 \
+              install-id-exergism.sh \
+              DEPLOYMENT_MANIFEST.json > SHA256SUMS
+          )
+
+          cat > artifacts/release/RELEASE_NOTES.md <<EOF
+          ## Deployment Attestation $TAG
+
+          First packaged release of the Exergism Commons deployment-attestation stack.
+
+          - .NET 10 Native AOT deployment/attestation agent for linux-x64.
+          - Release-manifest-bound source/runtime verification.
+          - Crash-safe transactional deployment and rollback.
+          - Recovery/finalization with fail-closed systemd start fencing.
+          - Root-owned, digest-verified privileged installer bootstrap.
+          - Independent agent self-health and deployment attestation protocol v0.1.
+
+          Source commit: \`$GITHUB_SHA\`
+
+          The release includes \`DEPLOYMENT_MANIFEST.json\` and \`SHA256SUMS\`; verify the installer and Native AOT binary before installing on a host.
+          EOF
+
+      - name: Create immutable tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            existing="$(git rev-list -n 1 "$TAG")"
+            [[ "$existing" == "$GITHUB_SHA" ]] || {
+              echo "Existing tag $TAG points to $existing, expected $GITHUB_SHA." >&2
+              exit 1
+            }
+          else
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "Deployment Attestation $TAG" \
+            --notes-file artifacts/release/RELEASE_NOTES.md \
+            artifacts/release/ec-deployment-agent-linux-x64 \
+            artifacts/release/install-id-exergism.sh \
+            artifacts/release/DEPLOYMENT_MANIFEST.json \
+            artifacts/release/SHA256SUMS
+
+      - name: Verify draft assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          expected=DEPLOYMENT_MANIFEST.json\nSHA256SUMS\nec-deployment-agent-linux-x64\ninstall-id-exergism.sh'
+          actual="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
+          [[ "$actual" == "$expected" ]] || {
+            echo "Draft release asset set is incomplete or unexpected." >&2
+            printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
+            exit 1
+          }
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
