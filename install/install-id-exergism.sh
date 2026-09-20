@@ -13,61 +13,91 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-# The documented entrypoint is a user-writable checkout. Bash reads scripts
-# incrementally, so before doing any long-running privileged work bind the
-# already-open script inode, copy it from the Bash script descriptor into a
-# root-private /run directory, and immediately re-exec that immutable snapshot.
-# CWD is deliberately preserved across exec; the trusted second stage pins "."
-# as the repository root, so a parent rename/replacement cannot redirect it.
-if [[ -z "${EC_INSTALLER_TRUSTED_STAGE:-}" ]]; then
-  if [[ -z "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
-    echo "EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary." >&2
-    exit 1
-  fi
-  if [[ ! "${EC_NATIVE_AGENT_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "EC_NATIVE_AGENT_SHA256 is required and must be the reviewed lowercase SHA-256 of the Native AOT binary." >&2
-    exit 1
-  fi
-  [[ -x /usr/bin/python3 ]] || {
-    echo "Required dependency not found: /usr/bin/python3" >&2
-    exit 1
-  }
-  command -v mktemp >/dev/null 2>&1 || {
-    echo "Required dependency not found: mktemp" >&2
-    exit 1
-  }
+# This file is a privileged second-stage installer. Never execute it directly
+# from a user-writable checkout. The documented bootstrap first copies these
+# exact reviewed bytes into a root-owned private /run directory and verifies
+# EC_INSTALLER_SHA256 before Bash parses this body as root.
+INSTALLER_TRUSTED_STAGE="${EC_INSTALLER_TRUSTED_STAGE:-}"
+INSTALLER_SOURCE_ROOT="${EC_INSTALLER_SOURCE_ROOT:-}"
+EXPECTED_INSTALLER_SHA256="${EC_INSTALLER_SHA256:-}"
+EXPECTED_AGENT_SHA256="${EC_NATIVE_AGENT_SHA256:-}"
+AGENT_SOURCE_PATH="${EC_NATIVE_AGENT_BINARY:-}"
 
-  bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"
-  cleanup_failed_bootstrap() {
-    local rc=$?
-    trap - EXIT
-    if [[ -n "${bootstrap_stage:-}" ]]; then
-      rm -rf -- "$bootstrap_stage" || true
-      bootstrap_stage=""
-    fi
-    exit "$rc"
-  }
-  trap cleanup_failed_bootstrap EXIT
+case "$INSTALLER_TRUSTED_STAGE" in
+  /run/ec-deployment-attestation-installer.*) ;;
+  *)
+    echo "Refusing privileged execution without a trusted root-owned installer stage." >&2
+    exit 1
+    ;;
+esac
+[[ -d "$INSTALLER_TRUSTED_STAGE" && ! -L "$INSTALLER_TRUSTED_STAGE" ]] || {
+  echo "Trusted installer staging directory is invalid." >&2
+  exit 1
+}
+[[ "$(stat -c '%u:%a' -- "$INSTALLER_TRUSTED_STAGE")" == "0:700" ]] || {
+  echo "Trusted installer staging directory must be root-owned mode 0700." >&2
+  exit 1
+}
+[[ "${BASH_SOURCE[0]}" == "$INSTALLER_TRUSTED_STAGE/install-id-exergism.sh" ]] || {
+  echo "Installer must execute from the verified root-owned staging pathname." >&2
+  exit 1
+}
+[[ -f "${BASH_SOURCE[0]}" && ! -L "${BASH_SOURCE[0]}" ]] || {
+  echo "Trusted installer snapshot is not a regular file." >&2
+  exit 1
+}
+[[ "$(stat -c '%u:%a' -- "${BASH_SOURCE[0]}")" == "0:500" ]] || {
+  echo "Trusted installer snapshot must be root-owned mode 0500." >&2
+  exit 1
+}
+[[ "$EXPECTED_INSTALLER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "EC_INSTALLER_SHA256 must be the reviewed lowercase SHA-256 of the installer." >&2
+  exit 1
+}
+actual_installer_sha256="$(sha256sum -- "${BASH_SOURCE[0]}" | awk '{print $1}')"
+[[ "$actual_installer_sha256" == "$EXPECTED_INSTALLER_SHA256" ]] || {
+  echo "Trusted installer SHA-256 does not match the reviewed digest." >&2
+  exit 1
+}
+[[ -n "$INSTALLER_SOURCE_ROOT" ]] || {
+  echo "EC_INSTALLER_SOURCE_ROOT must point to the reviewed checkout root." >&2
+  exit 1
+}
+[[ "$EXPECTED_AGENT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "EC_NATIVE_AGENT_SHA256 must be the reviewed lowercase SHA-256 of the Native AOT binary." >&2
+  exit 1
+}
+[[ -n "$AGENT_SOURCE_PATH" ]] || {
+  echo "EC_NATIVE_AGENT_BINARY must point to the reviewed Native AOT binary." >&2
+  exit 1
+}
 
-  chmod 0700 "$bootstrap_stage"
-  chown root:root "$bootstrap_stage"
+cleanup_trusted_stage_early() {
+  local rc=$?
+  trap - EXIT
+  rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true
+  exit "$rc"
+}
+trap cleanup_trusted_stage_early EXIT
 
-  /usr/bin/python3 -I - \
-    "/proc/${BASHPID}/fd/255" \
-    "$bootstrap_stage" \
-    "$EC_NATIVE_AGENT_BINARY" \
-    "$EC_NATIVE_AGENT_SHA256" <<'PY'
+[[ -x /usr/bin/python3 ]] || {
+  echo "Required dependency not found: /usr/bin/python3" >&2
+  exit 1
+}
+
+/usr/bin/python3 -I - \
+  "$INSTALLER_SOURCE_ROOT" \
+  "$INSTALLER_TRUSTED_STAGE" \
+  "$AGENT_SOURCE_PATH" \
+  "$EXPECTED_AGENT_SHA256" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-script_procfd, stage, agent_source, expected_agent_sha256 = sys.argv[1:5]
+source_root, stage, agent_source, expected_agent_sha256 = sys.argv[1:5]
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 O_CLOEXEC = os.O_CLOEXEC
-
-# Bind the caller-supplied AOT candidate before any repository traversal.
-agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
 
 def identity(st):
     return (
@@ -171,35 +201,10 @@ os.makedirs(repo_stage, mode=0o700, exist_ok=False)
 os.chmod(repo_stage, 0o700)
 os.chown(repo_stage, 0, 0)
 
-script_fd = os.open(script_procfd, os.O_RDONLY | O_CLOEXEC)
-root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)
+# Bind the AOT candidate before traversing the mutable checkout.
+agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+root_fd = os.open(source_root, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
 try:
-    repo_installer_fd = open_repo_file_no_symlinks(
-        root_fd,
-        "install/install-id-exergism.sh",
-    )
-    try:
-        running = os.fstat(script_fd)
-        repository = os.fstat(repo_installer_fd)
-        if (running.st_dev, running.st_ino) != (repository.st_dev, repository.st_ino):
-            raise SystemExit(
-                "installer must be invoked from the repository root as ./install/install-id-exergism.sh"
-            )
-    finally:
-        os.close(repo_installer_fd)
-
-    installer_destination = os.path.join(
-        repo_stage,
-        "install/install-id-exergism.sh",
-    )
-    installer_digest = copy_fd_verified(
-        script_fd,
-        installer_destination,
-        0o500,
-        "installer",
-        require_executable=True,
-    )
-
     for relative, mode, expected_sha256 in repo_inputs:
         source_fd = open_repo_file_no_symlinks(root_fd, relative)
         try:
@@ -218,7 +223,6 @@ try:
             os.close(source_fd)
 finally:
     os.close(root_fd)
-    os.close(script_fd)
 
 try:
     actual_agent_sha256 = copy_fd_verified(
@@ -236,20 +240,6 @@ try:
 finally:
     os.close(agent_fd)
 
-digest_path = os.path.join(stage, "original-installer.sha256")
-digest_fd = os.open(
-    digest_path,
-    os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-    0o400,
-)
-try:
-    os.write(digest_fd, installer_digest.encode("ascii") + b"\n")
-    os.fchmod(digest_fd, 0o400)
-    os.fchown(digest_fd, 0, 0)
-    os.fsync(digest_fd)
-finally:
-    os.close(digest_fd)
-
 for directory, _, _ in os.walk(stage, topdown=False):
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
     try:
@@ -258,47 +248,6 @@ for directory, _, _ in os.walk(stage, topdown=False):
         os.close(fd)
 PY
 
-  bootstrap_script="$bootstrap_stage/repo/install/install-id-exergism.sh"
-  EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"
-fi
-
-INSTALLER_TRUSTED_STAGE="$EC_INSTALLER_TRUSTED_STAGE"
-case "$INSTALLER_TRUSTED_STAGE" in
-  /run/ec-deployment-attestation-installer.*) ;;
-  *)
-    echo "Untrusted installer staging path." >&2
-    exit 1
-    ;;
-esac
-[[ -d "$INSTALLER_TRUSTED_STAGE" && ! -L "$INSTALLER_TRUSTED_STAGE" ]] || {
-  echo "Trusted installer staging directory is invalid." >&2
-  exit 1
-}
-[[ "$(stat -c '%u:%a' -- "$INSTALLER_TRUSTED_STAGE")" == "0:700" ]] || {
-  echo "Trusted installer staging directory must be root-owned mode 0700." >&2
-  exit 1
-}
-
-cleanup_trusted_stage_early() {
-  local rc=$?
-  trap - EXIT
-  rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true
-  exit "$rc"
-}
-trap cleanup_trusted_stage_early EXIT
-
-[[ "${BASH_SOURCE[0]}" == "$INSTALLER_TRUSTED_STAGE/repo/install/install-id-exergism.sh" ]] || {
-  echo "Trusted installer did not re-execute from its staged pathname." >&2
-  exit 1
-}
-[[ -f "${BASH_SOURCE[0]}" && ! -L "${BASH_SOURCE[0]}" ]] || {
-  echo "Trusted installer snapshot is not a regular file." >&2
-  exit 1
-}
-[[ "$(stat -c '%u:%a' -- "${BASH_SOURCE[0]}")" == "0:500" ]] || {
-  echo "Trusted installer snapshot must be root-owned mode 0500." >&2
-  exit 1
-}
 [[ -d "$INSTALLER_TRUSTED_STAGE/repo" &&
    ! -L "$INSTALLER_TRUSTED_STAGE/repo" ]] || {
   echo "Trusted repository snapshot is missing." >&2
