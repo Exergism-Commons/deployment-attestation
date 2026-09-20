@@ -386,17 +386,26 @@ settle_target_after_inactive_baseline() {
 # Same-boot recovery restores a previously-active target. If the recorded
 # baseline was inactive, recovery itself already established the stale-process
 # boundary before publishing .recovered; preserve any later explicit start.
+finalize_restored_active_target() {
+  # Recovery owns this start because the durable baseline says the target was
+  # active. Any failed/partial start or health validation must fail closed by
+  # proving the target quiescent before finalization returns an error.
+  if ! systemctl start "$TARGET_UNIT"; then
+    quiesce_target_after_failed_validation || true
+    echo "CRITICAL: restored active target failed to start during recovery finalization; recovered marker retained." >&2
+    return 1
+  fi
+
+  if ! wait_target_healthy_active; then
+    quiesce_target_after_failed_validation || true
+    echo "CRITICAL: restored active target failed recovery finalization health validation; recovered marker retained." >&2
+    return 1
+  fi
+}
+
 if [[ "$RECOVERY_MODE" == "normal" ]]; then
   if [[ "$target_was_active" == 1 ]]; then
-    systemctl start "$TARGET_UNIT"
-    if ! wait_target_healthy_active; then
-      # A target that recovery itself restored to the active state must never
-      # remain serving after any post-start validation failure (state, local
-      # probe, optional smoke, or artifact-fence validation).
-      quiesce_target_after_failed_validation || true
-      echo "CRITICAL: restored active target failed recovery finalization health validation; recovered marker retained." >&2
-      exit 1
-    fi
+    finalize_restored_active_target || exit 1
   else
     # A later explicit start did not originate from recovery. Observe it but do
     # not cancel/reverse it merely because finalization cannot validate it.
