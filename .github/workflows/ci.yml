@@ -279,13 +279,23 @@ jobs:
           bad_sha256="$(printf '0%.0s' {1..64})"
 
           stage_installer() {
-            local stage
-            stage="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
+            local stage mount_options
+            sudo install -d -o root -g root -m 0700 /var/lib/ec-deployment-attestation
+            sudo install -d -o root -g root -m 0700 /var/lib/ec-deployment-attestation/bootstrap
+            stage="$(sudo mktemp -d /var/lib/ec-deployment-attestation/bootstrap/installer.XXXXXX)"
             sudo chmod 0700 "$stage"
             sudo chown root:root "$stage"
+            mount_options="$(findmnt -n -o OPTIONS -T "$stage")"
+            if tr ',' '\n' <<<"$mount_options" | grep -Fxq noexec; then
+              echo "CI trusted stage unexpectedly resides on a noexec filesystem." >&2
+              exit 1
+            fi
             sudo install -o root -g root -m 0500 install/install-id-exergism.sh "$stage/install-id-exergism.sh"
             printf '%s\n' "$stage"
           }
+
+          ! grep -Fq '/run/ec-deployment-attestation-installer' install/install-id-exergism.sh
+          grep -Fq '/var/lib/ec-deployment-attestation/bootstrap' install/install-id-exergism.sh
 
           stage="$(stage_installer)"
           if sudo env -i \
