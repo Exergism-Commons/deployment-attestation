@@ -149,11 +149,16 @@ jobs:
           grep -Fq 'capture_active_baseline()' install/install-id-exergism.sh
           grep -Fq 'EC_NATIVE_AGENT_BINARY is required and must point to a reviewed Native AOT agent binary.' install/install-id-exergism.sh
           grep -Fq 'AGENT_SOURCE="$EC_NATIVE_AGENT_BINARY"' install/install-id-exergism.sh
-          grep -Fq 'AGENT_INSTALL_SOURCE="$AGENT_SOURCE"' install/install-id-exergism.sh
           test ! -e agent/ec-deployment-agent.sh
           ! grep -Fq 'ROOT/agent/ec-deployment-agent.sh' install/install-id-exergism.sh
           grep -Fq 'NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"' install/install-id-exergism.sh
-          grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"' install/install-id-exergism.sh
+          grep -Fq 'AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"' install/install-id-exergism.sh
+          grep -Fq 'source_fd = os.open(source, flags)' install/install-id-exergism.sh
+          grep -Fq 'os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)' install/install-id-exergism.sh
+          grep -Fq 'after_copy = os.fstat(source_fd)' install/install-id-exergism.sh
+          grep -Fq 'verify.digest() != digest.digest()' install/install-id-exergism.sh
+          grep -Fq 'os.fsync(stage_dir_fd)' install/install-id-exergism.sh
+          ! grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE"' install/install-id-exergism.sh
           grep -Fq 'native_preflight_config="$NATIVE_AGENT_STAGE/preflight.env"' install/install-id-exergism.sh
           grep -Fq 'install -o root -g root -m 0600' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config' install/install-id-exergism.sh
@@ -162,7 +167,8 @@ jobs:
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
           grep -Fq 'install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"' install/install-id-exergism.sh
           grep -Fq '"$AGENT_INSTALL_SOURCE" self-test' install/install-id-exergism.sh
-          grep -Fq 'EC_NATIVE_AGENT_BINARY must point to a real executable Native AOT binary.' install/install-id-exergism.sh
+          grep -Fq 'EC_NATIVE_AGENT_BINARY must be a regular file' install/install-id-exergism.sh
+          grep -Fq 'EC_NATIVE_AGENT_BINARY must be executable' install/install-id-exergism.sh
           grep -Fq 'Deployment updater transaction could not be recovered' install/install-id-exergism.sh
           grep -Fq 'pretransaction_journal_published=0' install/install-id-exergism.sh
           grep -Fq 'restore_pretransaction_timer_on_exit()' install/install-id-exergism.sh
