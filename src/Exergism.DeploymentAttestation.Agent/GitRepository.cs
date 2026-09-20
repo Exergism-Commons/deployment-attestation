@@ -19,6 +19,50 @@ internal static class AgentGitEnvironment
         };
 }
 
+internal static class AgentGitInvocation
+{
+    private static readonly string[] HardenedConfig =
+    [
+        "core.hooksPath=/dev/null",
+        "core.fsmonitor=false",
+        "core.attributesFile=/dev/null",
+        "core.askPass=/bin/false",
+        "credential.helper=",
+        "protocol.allow=never",
+        "protocol.https.allow=always",
+        "protocol.ext.allow=never",
+        "protocol.file.allow=never",
+        "protocol.ssh.allow=never"
+    ];
+
+    internal static List<string> BuildArguments(
+        string repository,
+        IEnumerable<string> arguments)
+    {
+        var result = new List<string>();
+        foreach (var config in HardenedConfig)
+        {
+            result.Add(GIT_FLAG_CONFIG);
+            result.Add(config);
+        }
+
+        result.Add(GIT_FLAG_CHDIR);
+        result.Add(repository);
+        result.AddRange(arguments);
+        return result;
+    }
+
+    internal static bool IsExecutableFilterConfigKey(string key)
+    {
+        if (!key.StartsWith("filter.", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return key.EndsWith(".clean", StringComparison.OrdinalIgnoreCase) ||
+               key.EndsWith(".smudge", StringComparison.OrdinalIgnoreCase) ||
+               key.EndsWith(".process", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
 internal static class TrackedFileDurability
 {
     internal static VerifiedRegularFile ReadVerifiedRegularFile(string path, string relativePath)
@@ -1523,6 +1567,8 @@ internal sealed class GitRepository(AgentConfig config)
 
     private async Task PrepareCheckoutMutationAsync(string targetCommit)
     {
+        await AssertNoExecutableGitConfigAsync(_config.AppDirectory);
+
         var currentCommit = await HeadAsync();
         var metadataRoots = await RecoveryGitMetadataRootsAsync(currentCommit, targetCommit);
 
@@ -1545,6 +1591,30 @@ internal sealed class GitRepository(AgentConfig config)
         await AssertNoRelatedGitAsync(protectedRoots);
     }
 
+    private static async Task AssertNoExecutableGitConfigAsync(string repository)
+    {
+        var result = await GitAtAsync(
+            repository,
+            ["config", "--local", "--name-only", "--get-regexp", "^filter\\."],
+            required: false);
+        if (result.ExitCode == 1 && string.IsNullOrWhiteSpace(result.StdOut))
+            return;
+        if (!result.Success)
+            throw new AgentException(
+                $"Could not inspect local Git filter configuration in {repository}: {result.StdErr.Trim()}");
+
+        var unsafeKeys = result.StdOut
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(AgentGitInvocation.IsExecutableFilterConfigKey)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (unsafeKeys.Length > 0)
+            throw new AgentException(
+                $"Executable Git filters are not permitted in deployment metadata for {repository}: " +
+                string.Join(",", unsafeKeys));
+    }
+
     private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
         string repository,
         string commit,
@@ -1558,6 +1628,7 @@ internal sealed class GitRepository(AgentConfig config)
         if (!Directory.Exists(repository) || new DirectoryInfo(repository).LinkTarget is not null)
             throw new AgentException($"Repository path is not a real directory: {repository}");
 
+        await AssertNoExecutableGitConfigAsync(repository);
         await EnsureRepositoryMetadataBindingAsync(
             repository,
             expectedMetadataBindings);
@@ -1781,7 +1852,14 @@ internal sealed class GitRepository(AgentConfig config)
     {
         await PrepareGitlinksAsync(commit);
         await GitRequiredAsync([GIT_SUBCOMMAND_SUBMODULE, "sync", "--recursive"]);
-        await GitRequiredAsync([GIT_SUBCOMMAND_SUBMODULE, "update", "--init", "--recursive", "--force"]);
+        await GitRequiredAsync([
+            GIT_SUBCOMMAND_SUBMODULE,
+            "update",
+            "--init",
+            "--recursive",
+            "--force",
+            "--checkout"
+        ]);
 
         var clean = await GitAsync([
             GIT_SUBCOMMAND_SUBMODULE, "foreach", "--recursive",
@@ -2366,7 +2444,9 @@ internal sealed class GitRepository(AgentConfig config)
     {
         var bytes = await ProcessRunner.RunBytesAsync(
             COMMAND_GIT,
-            [GIT_FLAG_CHDIR, repository, GIT_SUBCOMMAND_LS_TREE, "-rz", "--full-tree", commit],
+            AgentGitInvocation.BuildArguments(
+                repository,
+                [GIT_SUBCOMMAND_LS_TREE, "-rz", "--full-tree", commit]),
             TimeSpan.FromSeconds(30),
             environment: AgentGitEnvironment.Create(),
             clearEnvironment: true);
@@ -2408,8 +2488,7 @@ internal sealed class GitRepository(AgentConfig config)
 
     private static async Task<ProcessResult> GitAtAsync(string repository, IEnumerable<string> args, bool required = true)
     {
-        var all = new List<string> { GIT_FLAG_CHDIR, repository };
-        all.AddRange(args);
+        var all = AgentGitInvocation.BuildArguments(repository, args);
         var result = await ProcessRunner.RunAsync(
             COMMAND_GIT,
             all,
