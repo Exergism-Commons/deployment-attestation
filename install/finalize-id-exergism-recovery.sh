@@ -305,10 +305,14 @@ ensure_target_start_fence_root() {
   install -d -o root -g root -m 0700 "$TARGET_START_FENCE_ROOT"
 }
 
+runtime_target_mask_present() {
+  [[ -L "$TARGET_RUNTIME_MASK" ]] || return 1
+  [[ "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]]
+}
+
 target_start_fence_active() {
   local load
-  [[ -L "$TARGET_RUNTIME_MASK" ]] || return 1
-  [[ "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]] || return 1
+  runtime_target_mask_present || return 1
   load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)" || return 1
   [[ "$load" == "masked" ]]
 }
@@ -331,15 +335,13 @@ release_owned_target_start_fence() {
   }
 
   if path_exists_any "$TARGET_RUNTIME_MASK"; then
-    [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]] || {
+    runtime_target_mask_present || {
       echo "CRITICAL: recovery start-fence marker exists but runtime unit override is not our /dev/null mask." >&2
       return 1
     }
     systemctl unmask --runtime "$TARGET_UNIT" >/dev/null 2>&1 || return 1
   fi
 
-  # Always reload while the trusted marker still exists. This makes a crash
-  # after unmask but before daemon-reload/marker cleanup safely resumable.
   systemctl daemon-reload >/dev/null 2>&1 || return 1
 
   path_exists_any "$TARGET_RUNTIME_MASK" && {
@@ -355,19 +357,23 @@ establish_target_start_fence() {
   local marker_tmp
   ensure_target_start_fence_root || return 1
 
-  # Respect any already-active runtime/admin mask as an effective start fence.
-  if target_start_fence_active; then
+  if path_exists_any "$TARGET_RUNTIME_MASK"; then
+    runtime_target_mask_present || {
+      echo "CRITICAL: unexpected runtime unit override prevents installing target start fence: $TARGET_RUNTIME_MASK" >&2
+      return 1
+    }
+    if path_exists_any "$TARGET_START_FENCE_MARKER"; then
+      owned_target_start_fence_marker_valid || {
+        echo "CRITICAL: runtime target mask exists with an invalid recovery ownership marker." >&2
+        return 1
+      }
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || return 1
     return 0
   fi
 
-  if path_exists_any "$TARGET_RUNTIME_MASK"; then
-    echo "CRITICAL: unexpected runtime unit override prevents installing target start fence: $TARGET_RUNTIME_MASK" >&2
-    return 1
-  fi
-
   if path_exists_any "$TARGET_START_FENCE_MARKER"; then
-    [[ -f "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]] || return 1
-    [[ "$(stat -c '%u:%a' -- "$TARGET_START_FENCE_MARKER")" == "0:600" ]] || return 1
+    owned_target_start_fence_marker_valid || return 1
   else
     marker_tmp="$(mktemp "$TARGET_START_FENCE_ROOT/.target-start-fence.XXXXXX")" || return 1
     chown root:root "$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
@@ -378,9 +384,8 @@ establish_target_start_fence() {
 
   systemctl mask --runtime "$TARGET_UNIT" >/dev/null 2>&1 || return 1
   systemctl daemon-reload >/dev/null 2>&1 || return 1
-  target_start_fence_active
+  runtime_target_mask_present
 }
-
 target_active_state() {
   local load active
   if ! load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)"; then
@@ -422,6 +427,7 @@ quiesce_target_after_failed_validation() {
 
   while true; do
     systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
     if target_start_fence_active && target_quiescent && target_start_fence_active; then
       return 0
     fi
@@ -439,10 +445,21 @@ wait_target_healthy_active() {
   for i in {1..30}; do
     state="$(target_active_state)" || return 1
     case "$state" in
-      active) break ;;
-      activating|reloading) sleep 1; continue ;;
+      active)
+        if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1; then
+          if [[ -x "$SMOKE" ]]; then
+            EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || return 1
+          fi
+          "$ARTIFACT_FENCE_AUDITOR" || {
+            echo "Production resolver failed the live artifact-fence audit during recovery finalization." >&2
+            return 1
+          }
+          return 0
+        fi
+        ;;
+      activating|reloading) ;;
       inactive|failed|deactivating|not-found)
-        echo "Target failed to become active while finalizing recovery: $state" >&2
+        echo "Target failed to become healthy while finalizing recovery: $state" >&2
         return 1
         ;;
       *)
@@ -450,22 +467,11 @@ wait_target_healthy_active() {
         return 1
         ;;
     esac
+    sleep 1
   done
-  [[ "$state" == "active" ]] || {
-    echo "Target did not become provably active while finalizing recovery." >&2
-    return 1
-  }
-  systemctl is-active --quiet "$TARGET_UNIT" || return 1
-  curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || return 1
-  if [[ -x "$SMOKE" ]]; then
-    EC_LOCAL_URL=http://127.0.0.1:8080 "$SMOKE" || return 1
-  fi
-  "$ARTIFACT_FENCE_AUDITOR" || {
-    echo "Production resolver failed the live artifact-fence audit during recovery finalization." >&2
-    return 1
-  }
+  echo "Target did not become healthy within recovery finalization readiness window." >&2
+  return 1
 }
-
 settle_target_after_inactive_baseline() {
   local i state
   # Recovery publishes .recovered only after it has proved the old target
