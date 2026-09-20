@@ -50,6 +50,9 @@ script_procfd, stage, agent_source = sys.argv[1:4]
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 O_CLOEXEC = os.O_CLOEXEC
 
+# Bind the caller-supplied AOT candidate before any repository traversal.
+agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+
 def identity(st):
     return (
         st.st_dev,
@@ -130,21 +133,21 @@ def open_repo_file_no_symlinks(root_fd, relative):
         os.close(current)
 
 repo_inputs = (
-    ("install/validate-id-exergism-generation.sh", 0o500),
-    ("install/verify-id-exergism-artifact-fence.sh", 0o500),
-    ("agent/validate-release-manifest.py", 0o500),
-    ("spec/release-manifest-v0.1.schema.json", 0o400),
-    ("install/finalize-id-exergism-recovery.sh", 0o500),
-    ("packaging/id-exergism-install-recovery-finalize.service", 0o400),
-    ("install/recover-id-exergism-install.sh", 0o500),
-    ("packaging/id-exergism-install-recovery.service", 0o400),
-    ("packaging/id-exergism-install-recovery-interlock.conf", 0o400),
-    ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400),
-    ("examples/id.exergism.org.env.example", 0o400),
-    ("examples/id.exergism.org-smoke.sh", 0o500),
-    ("packaging/ec-deployment-attestation@.service", 0o400),
-    ("packaging/ec-deployment-attestation@.timer", 0o400),
-    ("packaging/id-exergism-artifact-fence.conf", 0o400),
+    ("install/validate-id-exergism-generation.sh", 0o500, "3964e637b5950eae6f17a77fef7119f342f8fa41767fafe0359c085981943f4d"),
+    ("install/verify-id-exergism-artifact-fence.sh", 0o500, "e6c84bb1a4711a0d172325b68dadbf0ce650c09ed5fc1175332799c50af74ccf"),
+    ("agent/validate-release-manifest.py", 0o500, "4154e2114a4978e5e2c16159498b91093ae4812514b998b7a5a0f430a3c71f1a"),
+    ("spec/release-manifest-v0.1.schema.json", 0o400, "adb9d2c1d990788cbca273bc982a6ff646b3ced029f6e6246fbbe9bea0fce243"),
+    ("install/finalize-id-exergism-recovery.sh", 0o500, "212b5290c61e30217f242150212b2b64a2fcd68b45dd8d57b4dd5cfa90e4e60c"),
+    ("packaging/id-exergism-install-recovery-finalize.service", 0o400, "6b13d75586da44b853a1f040c1978d074950ab6ffbc459a3c5b1c2e8cfdf9043"),
+    ("install/recover-id-exergism-install.sh", 0o500, "5be1864acded2bf22e05cddbe169c5e232911bb2d6ef9824d9380742f05287ec"),
+    ("packaging/id-exergism-install-recovery.service", 0o400, "53b72bd616d3f98621df6fe8b6163e672a301f5b93c805cdecbd12098fb4209a"),
+    ("packaging/id-exergism-install-recovery-interlock.conf", 0o400, "ea9cfd62f9138a0e0006b63094079b78ebeb9f1452d703663988987f36d2ff8e"),
+    ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400, "5d4236c8caa6b2b69799d35ce70ebdaf4ec4c34dce3a8ab3bd93b36e2b5208b4"),
+    ("examples/id.exergism.org.env.example", 0o400, "5497bab30b9445ed4d19b3afa5eb22df09e7d1cebfb70e2f06c043b7d9c7be2f"),
+    ("examples/id.exergism.org-smoke.sh", 0o500, "1022295777fefcfbe347055ef9647b309404f48858f6d51565a091c209043f4e"),
+    ("packaging/ec-deployment-attestation@.service", 0o400, "2ecb5be2aabe48f139aabab763300bad87ee1b02011b77283f31e88aecb981c9"),
+    ("packaging/ec-deployment-attestation@.timer", 0o400, "057cac94e27f35bf81f9fb80e6790d530fbbaeab6bc043cb3f579c278cd2e7cd"),
+    ("packaging/id-exergism-artifact-fence.conf", 0o400, "425fca28190954fecba0bd69fe3b7e10b1222e588512690a01e560fc53843389"),
 )
 
 repo_stage = os.path.join(stage, "repo")
@@ -181,22 +184,26 @@ try:
         require_executable=True,
     )
 
-    for relative, mode in repo_inputs:
+    for relative, mode, expected_sha256 in repo_inputs:
         source_fd = open_repo_file_no_symlinks(root_fd, relative)
         try:
-            copy_fd_verified(
+            actual_sha256 = copy_fd_verified(
                 source_fd,
                 os.path.join(repo_stage, relative),
                 mode,
                 f"repository input {relative}",
             )
+            if actual_sha256 != expected_sha256:
+                raise SystemExit(
+                    f"repository input digest mismatch for {relative}: "
+                    f"expected={expected_sha256} actual={actual_sha256}"
+                )
         finally:
             os.close(source_fd)
 finally:
     os.close(root_fd)
     os.close(script_fd)
 
-agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
 try:
     copy_fd_verified(
         agent_fd,
