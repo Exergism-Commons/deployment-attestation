@@ -184,7 +184,7 @@ repo_inputs = (
     ("install/verify-id-exergism-artifact-fence.sh", 0o500, "6001cc876a7e2a9d390f7aa62ed86d5a355af005798faee8de9d6744c515e3a9"),
     ("agent/validate-release-manifest.py", 0o500, "1d9c3f889e89b8ff5acb8659504655e7237ad32f5e3e4c4bd29fb719150ab481"),
     ("spec/release-manifest-v0.1.schema.json", 0o400, "53338bbdbb822c8a94bfbc45246af56017165a0af14d1fea818c6fc9d23120b2"),
-    ("install/finalize-id-exergism-recovery.sh", 0o500, "762df4fd1f6d7ff9f8f2fa0ad35a63225733dc2a340f8839362eb9bc028fd910"),
+    ("install/finalize-id-exergism-recovery.sh", 0o500, "b4dde940072b4e2d66e2b72d731d1775194f9a827ab45a7907a97df3b51e2c9b"),
     ("packaging/id-exergism-install-recovery-finalize.service", 0o400, "758f1921d2f344d071a141fdd7611ba72f44dcaa71288e1fe07c7868278552b0"),
     ("install/recover-id-exergism-install.sh", 0o500, "578029289e593a66155923154319dadfb58774d48c536b77e90edae1993627e3"),
     ("packaging/id-exergism-install-recovery.service", 0o400, "6b4590d37a30c8f8567b07ee69e2f9f74454f9f7e39e5fd102ff4dbe9a732d6c"),
