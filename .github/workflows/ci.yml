@@ -104,6 +104,7 @@ jobs:
           STOP_CALLS=0
           QUIESCENT_CALLS=0
           UNMASK_CALLS=0
+          DAEMON_RELOAD_CALLS=0
           systemctl() {
             case "$1" in
               mask)
@@ -118,6 +119,7 @@ jobs:
                 return 0
                 ;;
               daemon-reload)
+                DAEMON_RELOAD_CALLS=$((DAEMON_RELOAD_CALLS + 1))
                 return 0
                 ;;
               show)
@@ -157,33 +159,43 @@ jobs:
 
           # A recovery-owned fence is removable only with the trusted marker.
           UNMASK_CALLS=0
+          DAEMON_RELOAD_CALLS=0
           release_owned_target_start_fence
           [[ "$UNMASK_CALLS" == 1 ]]
+          [[ "$DAEMON_RELOAD_CALLS" == 1 ]]
           [[ ! -e "$TARGET_RUNTIME_MASK" && ! -L "$TARGET_RUNTIME_MASK" ]]
           [[ ! -e "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]]
 
           # An administrative runtime mask without our marker must be preserved.
           ln -s /dev/null "$TARGET_RUNTIME_MASK"
           UNMASK_CALLS=0
+          DAEMON_RELOAD_CALLS=0
           release_owned_target_start_fence
           [[ "$UNMASK_CALLS" == 0 ]]
+          [[ "$DAEMON_RELOAD_CALLS" == 0 ]]
           [[ -L "$TARGET_RUNTIME_MASK" && "$(readlink "$TARGET_RUNTIME_MASK")" == /dev/null ]]
           rm -f -- "$TARGET_RUNTIME_MASK"
 
           # A crash after unmask but before marker cleanup is idempotently recoverable.
           printf '%s\n' "$TARGET_UNIT" > "$TARGET_START_FENCE_MARKER"
           UNMASK_CALLS=0
+          DAEMON_RELOAD_CALLS=0
           release_owned_target_start_fence
           [[ "$UNMASK_CALLS" == 0 ]]
+          [[ "$DAEMON_RELOAD_CALLS" == 1 ]]
           [[ ! -e "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]]
 
           # Never unmask from an invalid/spoofed marker.
           printf '%s\n' wrong.service > "$TARGET_START_FENCE_MARKER"
+          UNMASK_CALLS=0
+          DAEMON_RELOAD_CALLS=0
           if release_owned_target_start_fence; then
             echo "Invalid recovery start-fence marker was accepted." >&2
             exit 1
           fi
           [[ -f "$TARGET_START_FENCE_MARKER" ]]
+          [[ "$UNMASK_CALLS" == 0 ]]
+          [[ "$DAEMON_RELOAD_CALLS" == 0 ]]
           rm -f -- "$TARGET_START_FENCE_MARKER"
 
           sed -n '/^finalize_restored_active_target() {/,/^}$/p' \
@@ -221,7 +233,7 @@ jobs:
             exit 1
           fi
           [[ "$RELEASE_CALLS" == 1 ]]
-          [[ "$QUIESCE_CALLS" == 0 ]]
+          [[ "$QUIESCE_CALLS" == 1 ]]
 
           RELEASE_RESULT=0
           START_RESULT=1
@@ -689,6 +701,8 @@ jobs:
           grep -Fq 'release_owned_target_start_fence()' install/recover-id-exergism-install.sh
           grep -Fq 'systemctl unmask --runtime "$TARGET_UNIT"' install/recover-id-exergism-install.sh
           grep -Fq 'restored generation is valid but recovery-owned target start fence could not be released' install/recover-id-exergism-install.sh
+          grep -Fq 'target remains fenced+quiescent and journal is retained' install/recover-id-exergism-install.sh
+          grep -Fq 'recovery-owned target start fence could not be released before finalization start; target remains fenced+quiescent' install/finalize-id-exergism-recovery.sh
           grep -Fq 'systemctl mask --runtime "$TARGET_UNIT"' install/finalize-id-exergism-recovery.sh
           grep -Fq 'target_start_fence_active && target_quiescent && target_start_fence_active' install/finalize-id-exergism-recovery.sh
           grep -Fq 'retrying while locks remain held' install/finalize-id-exergism-recovery.sh
