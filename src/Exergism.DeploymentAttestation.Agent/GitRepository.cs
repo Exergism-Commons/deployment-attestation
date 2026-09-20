@@ -214,6 +214,13 @@ internal static class GitMetadataEnumeration
         };
 }
 
+internal enum CheckoutSealState
+{
+    Unsealed,
+    FullySealed,
+    PartiallySealed
+}
+
 internal static class CheckoutWriteExclusion
 {
     private const int O_RDONLY = 0;
@@ -224,6 +231,7 @@ internal static class CheckoutWriteExclusion
     private const int AT_EMPTY_PATH = 0x1000;
     private const int AT_SYMLINK_NOFOLLOW = 0x100;
     private const uint STATX_TYPE = 0x00000001;
+    private const uint STATX_NLINK = 0x00000004;
     private const ushort S_IFMT = 0xF000;
     private const ushort S_IFDIR = 0x4000;
     private const ushort S_IFREG = 0x8000;
@@ -252,6 +260,8 @@ internal static class CheckoutWriteExclusion
             files.UnionWith(snapshot.Files.Keys);
             directories.UnionWith(snapshot.Directories.Keys);
         }
+
+        EnsureNoMultiplyLinkedFiles(files);
 
         foreach (var file in files.Order(StringComparer.Ordinal))
             SetImmutableNoFollow(file, immutable: true);
@@ -287,6 +297,9 @@ internal static class CheckoutWriteExclusion
             rejectSymlinks: false,
             rejectSpecial: false);
 
+        if (immutable)
+            EnsureNoMultiplyLinkedFiles(files);
+
         foreach (var file in files.Order(StringComparer.Ordinal))
             SetImmutableNoFollow(file, immutable);
 
@@ -294,6 +307,36 @@ internal static class CheckoutWriteExclusion
                      .OrderByDescending(PathDepth)
                      .ThenBy(path => path, StringComparer.Ordinal))
             SetImmutableNoFollow(directory, immutable);
+    }
+
+    internal static CheckoutSealState InspectTreeSealState(string root)
+    {
+        var (files, directories) = EnumerateTreeTargets(
+            root,
+            rejectSymlinks: false,
+            rejectSpecial: false);
+        var states = files
+            .Concat(directories)
+            .Select(IsImmutableNoFollow)
+            .ToArray();
+        return ClassifySealState(states);
+    }
+
+    internal static CheckoutSealState ClassifySealState(IEnumerable<bool> immutableStates)
+    {
+        var any = false;
+        var all = true;
+        foreach (var immutable in immutableStates)
+        {
+            any |= immutable;
+            all &= immutable;
+        }
+
+        if (!any)
+            return CheckoutSealState.Unsealed;
+        return all
+            ? CheckoutSealState.FullySealed
+            : CheckoutSealState.PartiallySealed;
     }
 
     internal static void AssertNoWritableReferences(
@@ -547,6 +590,54 @@ internal static class CheckoutWriteExclusion
         return (ushort)(stat.Mode & S_IFMT);
     }
 
+    private static void EnsureNoMultiplyLinkedFiles(IEnumerable<string> files)
+    {
+        foreach (var file in files.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+            EnsureSingleLinkNoFollow(file);
+    }
+
+    internal static void EnsureSingleLinkNoFollow(string path)
+    {
+        var fd = Native.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException(
+                $"Could not open checkout file to inspect hardlinks: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            EnsureDescriptorSingleLink(fd, path);
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
+    internal static void EnsureSingleLinkCount(uint linkCount, string path)
+    {
+        if (linkCount != 1)
+            throw new AgentException(
+                $"Checkout regular file has {linkCount} hardlinks and cannot be safely write-excluded: {path}");
+    }
+
+    private static void EnsureDescriptorSingleLink(int fd, string path)
+    {
+        if (Native.statx(
+                fd,
+                "",
+                AT_EMPTY_PATH,
+                STATX_TYPE | STATX_NLINK,
+                out var stat) != 0)
+            throw new AgentException(
+                $"Could not inspect checkout hardlink count: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        if ((stat.Mask & (STATX_TYPE | STATX_NLINK)) != (STATX_TYPE | STATX_NLINK))
+            throw new AgentException($"statx omitted hardlink fields for checkout path: {path}");
+
+        if ((stat.Mode & S_IFMT) == S_IFREG)
+            EnsureSingleLinkCount(stat.LinkCount, path);
+    }
+
     private static void SetImmutableNoFollow(string path, bool immutable)
     {
         var fd = Native.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
@@ -568,6 +659,7 @@ internal static class CheckoutWriteExclusion
                 : flags & ~FS_IMMUTABLE_FL;
             if (desired != flags)
             {
+                EnsureDescriptorSingleLink(fd, path);
                 if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref desired) != 0)
                     throw new AgentException(
                         $"Could not {(immutable ? "seal" : "unseal")} checkout path {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
@@ -1109,39 +1201,22 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task SwitchSourceAsync(string commit, bool fetchFirst)
     {
-        var mutationRoots = await PrepareCheckoutMutationAsync(commit);
-        try
+        await PrepareCheckoutMutationAsync(commit);
+
+        if (fetchFirst)
         {
-            if (fetchFirst)
-            {
-                await GitRequiredAsync([GIT_SUBCOMMAND_FETCH, "--force", "--depth", "1", "origin", commit]);
-                await GitRequiredAsync([GIT_SUBCOMMAND_CHECKOUT, "--detach", "FETCH_HEAD"]);
-            }
-
-            await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
-            await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
-            await SyncSubmodulesAsync(commit);
-
-            if (await HeadAsync() != commit)
-                throw new AgentException("Source HEAD mismatch after switch");
-            await VerifySourceTreeExactAsync(commit);
-            await FsyncCheckoutAsync(commit);
+            await GitRequiredAsync([GIT_SUBCOMMAND_FETCH, "--force", "--depth", "1", "origin", commit]);
+            await GitRequiredAsync([GIT_SUBCOMMAND_CHECKOUT, "--detach", "FETCH_HEAD"]);
         }
-        catch (Exception original)
-        {
-            try
-            {
-                ResealMutationRoots(mutationRoots);
-            }
-            catch (Exception resealFailure)
-            {
-                throw new AgentException(
-                    "Source switch failed and checkout write exclusion could not be restored",
-                    new AggregateException(original, resealFailure));
-            }
 
-            throw;
-        }
+        await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
+        await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
+        await SyncSubmodulesAsync(commit);
+
+        if (await HeadAsync() != commit)
+            throw new AgentException("Source HEAD mismatch after switch");
+        await VerifySourceTreeExactAsync(commit);
+        await FsyncCheckoutAsync(commit);
     }
 
     public async Task FsyncCheckoutAsync(string commit)
@@ -1187,12 +1262,13 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var root in roots)
             _ = GitMetadataDurability.Capture(root);
 
-        var restoreSeal = roots.ToDictionary(
+        var sealState = roots.ToDictionary(
             root => root,
-            CheckoutWriteExclusion.IsImmutableNoFollow,
+            CheckoutWriteExclusion.InspectTreeSealState,
             StringComparer.Ordinal);
 
-        foreach (var root in roots.Where(root => restoreSeal[root]))
+        foreach (var root in roots.Where(root =>
+                     sealState[root] is not CheckoutSealState.Unsealed))
             CheckoutWriteExclusion.SetTreeImmutable(root, immutable: false);
 
         Exception? cleanupFailure = null;
@@ -1217,7 +1293,8 @@ internal sealed class GitRepository(AgentConfig config)
 
         try
         {
-            foreach (var root in roots.Where(root => restoreSeal[root]))
+            foreach (var root in roots.Where(root =>
+                         sealState[root] == CheckoutSealState.FullySealed))
                 CheckoutWriteExclusion.SetTreeImmutable(root, immutable: true);
         }
         catch (Exception resealFailure)
@@ -1233,7 +1310,7 @@ internal sealed class GitRepository(AgentConfig config)
             throw cleanupFailure;
     }
 
-    private async Task<List<string>> PrepareCheckoutMutationAsync(string targetCommit)
+    private async Task PrepareCheckoutMutationAsync(string targetCommit)
     {
         var currentCommit = await HeadAsync();
         var metadataRoots = await RecoveryGitMetadataRootsAsync(currentCommit, targetCommit);
@@ -1244,15 +1321,6 @@ internal sealed class GitRepository(AgentConfig config)
         CheckoutWriteExclusion.SetTreeImmutable(_config.AppDirectory, immutable: false);
         foreach (var root in metadataRoots)
             CheckoutWriteExclusion.SetTreeImmutable(root, immutable: false);
-
-        return metadataRoots;
-    }
-
-    private void ResealMutationRoots(IEnumerable<string> metadataRoots)
-    {
-        CheckoutWriteExclusion.SetTreeImmutable(_config.AppDirectory, immutable: true);
-        foreach (var root in metadataRoots)
-            CheckoutWriteExclusion.SetTreeImmutable(root, immutable: true);
     }
 
     private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
