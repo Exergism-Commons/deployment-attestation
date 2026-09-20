@@ -1649,4 +1649,26 @@ public sealed class SecurityAndRegressionTests
             "remote.origin.url\ncore.repositoryformatversion\n");
     }
 
+
+    [TestMethod]
+    public void GitMetadataConfigPathIgnoresRefsNamedConfig()
+    {
+        Assert.IsTrue(
+            GitRepository.IsGitMetadataConfigPath(
+                "/checkout/.git",
+                "/checkout/.git/config"));
+        Assert.IsTrue(
+            GitRepository.IsGitMetadataConfigPath(
+                "/checkout/.git",
+                "/checkout/.git/modules/child/config"));
+        Assert.IsTrue(
+            GitRepository.IsGitMetadataConfigPath(
+                "/checkout/.git",
+                "/checkout/.git/worktrees/site/config.worktree"));
+        Assert.IsFalse(
+            GitRepository.IsGitMetadataConfigPath(
+                "/checkout/.git",
+                "/checkout/.git/refs/heads/config"));
+    }
+
 }
