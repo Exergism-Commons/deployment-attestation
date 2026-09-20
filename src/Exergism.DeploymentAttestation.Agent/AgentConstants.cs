@@ -121,6 +121,8 @@ internal static class AgentConstants
     internal const string GIT_ENV_CONFIG_NOSYSTEM = "GIT_CONFIG_NOSYSTEM";
     internal const string GIT_ENV_CEILING_DIRECTORIES = "GIT_CEILING_DIRECTORIES";
     internal const string GIT_ENV_DISCOVERY_ACROSS_FILESYSTEM = "GIT_DISCOVERY_ACROSS_FILESYSTEM";
+    internal const string GIT_ENV_TERMINAL_PROMPT = "GIT_TERMINAL_PROMPT";
+    internal const string GIT_ENV_OPTIONAL_LOCKS = "GIT_OPTIONAL_LOCKS";
     internal const string GIT_ENV_CONFIG_KEY_PREFIX = "GIT_CONFIG_KEY_";
     internal const string GIT_ENV_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_";
     internal const string GIT_CONFIG_CORE_WORKTREE = "core.worktree";
