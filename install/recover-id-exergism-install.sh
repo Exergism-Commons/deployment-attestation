@@ -668,8 +668,8 @@ wait_restored_target_healthy() {
     state="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)" || return 1
     case "$state" in
       active)
-        if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1; then
-          restored_smoke_healthy || return 1
+        if curl -q -fsS --max-time 2 http://127.0.0.1:8080/ >/dev/null 2>&1 \
+           && restored_smoke_healthy; then
           "$ARTIFACT_FENCE_AUDITOR" || return 1
           return 0
         fi
