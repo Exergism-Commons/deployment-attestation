@@ -21,6 +21,7 @@ fi
 AGENT_SOURCE="$EC_NATIVE_AGENT_BINARY"
 AGENT_INSTALL_SOURCE=""
 NATIVE_AGENT_STAGE=""
+REPO_INPUT_STAGE=""
 TMP_MANIFEST=""
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
@@ -114,16 +115,17 @@ NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
 chmod 0700 "$NATIVE_AGENT_STAGE"
 chown root:root "$NATIVE_AGENT_STAGE"
 AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
+REPO_INPUT_STAGE="$NATIVE_AGENT_STAGE/repo"
 
-python3 - "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE" <<'PY'
+python3 - "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE" "$ROOT" "$REPO_INPUT_STAGE" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-source, destination = sys.argv[1:3]
-flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
-source_fd = os.open(source, flags)
+agent_source, agent_destination, root, repo_stage = sys.argv[1:5]
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC = os.O_CLOEXEC
 
 def identity(st):
     return (
@@ -135,21 +137,16 @@ def identity(st):
         st.st_ctime_ns,
     )
 
-try:
+def copy_fd_verified(source_fd, destination, mode, label, require_executable=False):
     before = os.fstat(source_fd)
     if not stat.S_ISREG(before.st_mode):
-        raise SystemExit("EC_NATIVE_AGENT_BINARY must be a regular file")
-    if before.st_mode & 0o111 == 0:
-        raise SystemExit("EC_NATIVE_AGENT_BINARY must be executable")
+        raise SystemExit(f"{label} must be a regular file")
+    if require_executable and before.st_mode & 0o111 == 0:
+        raise SystemExit(f"{label} must be executable")
 
-    dest_flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | os.O_CLOEXEC
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    dest_fd = os.open(destination, dest_flags, 0o500)
+    os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+    dest_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_CLOEXEC | O_NOFOLLOW
+    dest_fd = os.open(destination, dest_flags, mode)
     digest = hashlib.sha256()
     try:
         while True:
@@ -161,8 +158,7 @@ try:
             while view:
                 written = os.write(dest_fd, view)
                 view = view[written:]
-
-        os.fchmod(dest_fd, 0o500)
+        os.fchmod(dest_fd, mode)
         os.fchown(dest_fd, 0, 0)
         os.fsync(dest_fd)
     finally:
@@ -170,7 +166,7 @@ try:
 
     after_copy = os.fstat(source_fd)
     if identity(after_copy) != identity(before):
-        raise SystemExit("EC_NATIVE_AGENT_BINARY changed while being snapshotted")
+        raise SystemExit(f"{label} changed while being snapshotted")
 
     os.lseek(source_fd, 0, os.SEEK_SET)
     verify = hashlib.sha256()
@@ -179,16 +175,94 @@ try:
         if not chunk:
             break
         verify.update(chunk)
-
     after_verify = os.fstat(source_fd)
     if identity(after_verify) != identity(before) or verify.digest() != digest.digest():
-        raise SystemExit("EC_NATIVE_AGENT_BINARY changed during snapshot verification")
+        raise SystemExit(f"{label} changed during snapshot verification")
+
+def open_repo_file_no_symlinks(root_fd, relative):
+    parts = relative.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise SystemExit(f"unsafe repository input path: {relative}")
+
+    current = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = next_fd
+        return os.open(
+            parts[-1],
+            os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
+            dir_fd=current,
+        )
+    finally:
+        os.close(current)
+
+agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+try:
+    copy_fd_verified(
+        agent_fd,
+        agent_destination,
+        0o500,
+        "EC_NATIVE_AGENT_BINARY",
+        require_executable=True,
+    )
 finally:
-    os.close(source_fd)
+    os.close(agent_fd)
+
+os.makedirs(repo_stage, mode=0o700, exist_ok=False)
+os.chmod(repo_stage, 0o700)
+os.chown(repo_stage, 0, 0)
+
+repo_inputs = (
+    ("install/validate-id-exergism-generation.sh", 0o500),
+    ("install/verify-id-exergism-artifact-fence.sh", 0o500),
+    ("agent/validate-release-manifest.py", 0o500),
+    ("spec/release-manifest-v0.1.schema.json", 0o400),
+    ("install/finalize-id-exergism-recovery.sh", 0o500),
+    ("packaging/id-exergism-install-recovery-finalize.service", 0o400),
+    ("install/recover-id-exergism-install.sh", 0o500),
+    ("packaging/id-exergism-install-recovery.service", 0o400),
+    ("packaging/id-exergism-install-recovery-interlock.conf", 0o400),
+    ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400),
+    ("examples/id.exergism.org.env.example", 0o400),
+    ("examples/id.exergism.org-smoke.sh", 0o500),
+    ("packaging/ec-deployment-attestation@.service", 0o400),
+    ("packaging/ec-deployment-attestation@.timer", 0o400),
+    ("packaging/id-exergism-artifact-fence.conf", 0o400),
+)
+
+root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+try:
+    for relative, mode in repo_inputs:
+        source_fd = open_repo_file_no_symlinks(root_fd, relative)
+        try:
+            destination = os.path.join(repo_stage, relative)
+            copy_fd_verified(
+                source_fd,
+                destination,
+                mode,
+                f"repository input {relative}",
+            )
+        finally:
+            os.close(source_fd)
+finally:
+    os.close(root_fd)
+
+for directory, _, _ in os.walk(repo_stage, topdown=False):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 stage_dir_fd = os.open(
-    os.path.dirname(destination),
-    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+    os.path.dirname(agent_destination),
+    os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
 )
 try:
     os.fsync(stage_dir_fd)
@@ -303,20 +377,20 @@ fi
 # replacement must still leave either the complete old recovery generation or
 # a host where the old helper continues to run; never expose a helper whose
 # finalizer/validator does not yet exist durably.
-atomic_install_root_file "$ROOT/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755
-atomic_install_root_file "$ROOT/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755
-atomic_install_root_file "$ROOT/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755
-atomic_install_root_file "$ROOT/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA" 0644
-atomic_install_root_file "$ROOT/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755
-atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644
+atomic_install_root_file "$REPO_INPUT_STAGE/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755
+atomic_install_root_file "$REPO_INPUT_STAGE/install/verify-id-exergism-artifact-fence.sh" "$ARTIFACT_FENCE_AUDITOR" 0755
+atomic_install_root_file "$REPO_INPUT_STAGE/agent/validate-release-manifest.py" "$MANIFEST_VALIDATOR" 0755
+atomic_install_root_file "$REPO_INPUT_STAGE/spec/release-manifest-v0.1.schema.json" "$MANIFEST_SCHEMA" 0644
+atomic_install_root_file "$REPO_INPUT_STAGE/install/finalize-id-exergism-recovery.sh" "$RECOVERY_FINALIZER" 0755
+atomic_install_root_file "$REPO_INPUT_STAGE/packaging/id-exergism-install-recovery-finalize.service" "$RECOVERY_FINALIZE_UNIT_PATH" 0644
 durable_sync_paths   "$VALIDATOR"   "$ARTIFACT_FENCE_AUDITOR"   "$MANIFEST_VALIDATOR"   "$MANIFEST_SCHEMA"   "$RECOVERY_FINALIZER"   "$RECOVERY_FINALIZE_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
 systemctl daemon-reload
 
 # Only after the helper dependency generation is durable and known to systemd
 # may the helper that references it become visible.
-atomic_install_root_file "$ROOT/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755
-atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644
+atomic_install_root_file "$REPO_INPUT_STAGE/install/recover-id-exergism-install.sh" "$RECOVERY_HELPER" 0755
+atomic_install_root_file "$REPO_INPUT_STAGE/packaging/id-exergism-install-recovery.service" "$RECOVERY_UNIT_PATH" 0644
 durable_sync_paths   "$RECOVERY_HELPER"   "$RECOVERY_UNIT_PATH"   /usr/local/libexec   /etc/systemd/system
 durable_sync_ancestor_chain   /usr/local/libexec   /etc/systemd/system
 systemctl daemon-reload
@@ -329,8 +403,8 @@ durable_sync_ancestor_chain   /etc/systemd/system/multi-user.target.wants
 
 # Only now expose resolver/updater dependencies on the already-durable recovery
 # core. A power loss can no longer persist an interlock without its prerequisite.
-atomic_install_root_file "$ROOT/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK" 0644
-atomic_install_root_file "$ROOT/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK" 0644
+atomic_install_root_file "$REPO_INPUT_STAGE/packaging/id-exergism-install-recovery-interlock.conf" "$TARGET_RECOVERY_INTERLOCK" 0644
+atomic_install_root_file "$REPO_INPUT_STAGE/packaging/id-exergism-agent-recovery-interlock.conf" "$AGENT_RECOVERY_INTERLOCK" 0644
 rm -f "$LEGACY_TIMER_RECOVERY_INTERLOCK"
 
 durable_sync_paths   "$TARGET_RECOVERY_INTERLOCK"   "$AGENT_RECOVERY_INTERLOCK"   "$FENCE_DROPIN_DIR"   "$AGENT_RECOVERY_DROPIN_DIR"   /etc/systemd/system
@@ -352,7 +426,7 @@ TMP_MANIFEST="$(mktemp)"
 tmp_manifest="$TMP_MANIFEST"
 curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 \
   --proto '=https' --proto-redir '=https' -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
-python3 "$ROOT/agent/validate-release-manifest.py" "$ROOT/spec/release-manifest-v0.1.schema.json" "$tmp_manifest" || {
+python3 "$REPO_INPUT_STAGE/agent/validate-release-manifest.py" "$REPO_INPUT_STAGE/spec/release-manifest-v0.1.schema.json" "$tmp_manifest" || {
   echo "runtime-main publishes a schema-invalid DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2
   exit 1
 }
@@ -380,7 +454,7 @@ TMP_MANIFEST=""
 native_preflight_config="$ENV_FILE"
 if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
   native_preflight_config="$NATIVE_AGENT_STAGE/preflight.env"
-  install -o root -g root -m 0600     "$ROOT/examples/id.exergism.org.env.example"     "$native_preflight_config"
+  install -o root -g root -m 0600     "$REPO_INPUT_STAGE/examples/id.exergism.org.env.example"     "$native_preflight_config"
 fi
 EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config
 "$AGENT_INSTALL_SOURCE" self-test
@@ -732,12 +806,12 @@ stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
 install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"
-install -o root -g root -m 0755 "$ROOT/examples/id.exergism.org-smoke.sh" "$SMOKE"
-install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
-install -o root -g root -m 0644 "$ROOT/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
-install -o root -g root -m 0644 "$ROOT/packaging/id-exergism-artifact-fence.conf" "$FENCE_DROPIN"
+install -o root -g root -m 0755 "$REPO_INPUT_STAGE/examples/id.exergism.org-smoke.sh" "$SMOKE"
+install -o root -g root -m 0644 "$REPO_INPUT_STAGE/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
+install -o root -g root -m 0644 "$REPO_INPUT_STAGE/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
+install -o root -g root -m 0644 "$REPO_INPUT_STAGE/packaging/id-exergism-artifact-fence.conf" "$FENCE_DROPIN"
 if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
-  install -o root -g root -m 0640 "$ROOT/examples/id.exergism.org.env.example" "$ENV_FILE"
+  install -o root -g root -m 0640 "$REPO_INPUT_STAGE/examples/id.exergism.org.env.example" "$ENV_FILE"
 fi
 
 systemctl daemon-reload
