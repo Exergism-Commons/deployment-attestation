@@ -64,6 +64,16 @@ internal static class AgentGitInvocation
 
     internal static bool IsUnsafeRepositoryConfigKey(string key)
         => IsExecutableFilterConfigKey(key) ||
+           string.Equals(key, "core.alternateRefsCommand", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "core.sshCommand", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "core.gitProxy", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "diff.external", StringComparison.OrdinalIgnoreCase) ||
+           (key.StartsWith("diff.", StringComparison.OrdinalIgnoreCase) &&
+            key.EndsWith(".textconv", StringComparison.OrdinalIgnoreCase)) ||
+           (key.StartsWith("merge.", StringComparison.OrdinalIgnoreCase) &&
+            key.EndsWith(".driver", StringComparison.OrdinalIgnoreCase)) ||
+           (key.StartsWith("submodule.", StringComparison.OrdinalIgnoreCase) &&
+            key.EndsWith(".update", StringComparison.OrdinalIgnoreCase)) ||
            string.Equals(key, "include.path", StringComparison.OrdinalIgnoreCase) ||
            (key.StartsWith("includeif.", StringComparison.OrdinalIgnoreCase) &&
             key.EndsWith(".path", StringComparison.OrdinalIgnoreCase));
@@ -313,6 +323,50 @@ internal static class CheckoutWriteExclusion
 
     internal static void ValidateMetadataTree(string root)
         => _ = EnumerateTreeTargets(root, rejectSymlinks: true, rejectSpecial: true);
+
+    internal static void EnsureMutationTreeTrusted(string root)
+    {
+        root = Path.GetFullPath(root);
+        var effectiveUid = Native.geteuid();
+
+        Validate(root);
+        Walk(root);
+
+        void Walk(string directory)
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var stat = StatPathNoFollow(entry);
+                var kind = (ushort)(stat.Mode & S_IFMT);
+
+                if (kind == S_IFLNK)
+                    continue;
+
+                if (kind is not (S_IFREG or S_IFDIR))
+                    throw new AgentException(
+                        $"Checkout mutation tree contains unsupported special entry: {entry}");
+
+                Validate(entry, stat);
+                if (kind == S_IFDIR)
+                    Walk(entry);
+            }
+        }
+
+        void Validate(string path)
+            => Validate(path, StatPathNoFollow(path));
+
+        void Validate(string path, LinuxStatx stat)
+        {
+            if (stat.Uid != effectiveUid)
+                throw new AgentException(
+                    $"Checkout mutation path must be owned by effective uid {effectiveUid}: {path}");
+
+            var mode = (UnixFileMode)(stat.Mode & ~S_IFMT);
+            if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+                throw new AgentException(
+                    $"Checkout mutation path must not be writable by group or others: {path}");
+        }
+    }
 
     internal static void SealVerifiedState(
         RepositoryDurabilitySnapshot repository,
@@ -722,20 +776,23 @@ internal static class CheckoutWriteExclusion
     }
 
     private static ushort PathKindNoFollow(string path)
+        => (ushort)(StatPathNoFollow(path).Mode & S_IFMT);
+
+    private static LinuxStatx StatPathNoFollow(string path)
     {
         if (Native.statx(
                 AT_FDCWD,
                 path,
                 AT_SYMLINK_NOFOLLOW,
-                STATX_TYPE,
+                STATX_BASIC_STATS,
                 out var stat) != 0)
             throw new AgentException(
                 $"Could not inspect checkout path without following symlinks: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
 
-        if ((stat.Mask & STATX_TYPE) != STATX_TYPE)
-            throw new AgentException($"statx omitted checkout path type: {path}");
+        if ((stat.Mask & STATX_BASIC_STATS) != STATX_BASIC_STATS)
+            throw new AgentException($"statx omitted checkout path attributes: {path}");
 
-        return (ushort)(stat.Mode & S_IFMT);
+        return stat;
     }
 
     private static void EnsureNoMultiplyLinkedFiles(IEnumerable<string> files)
@@ -1590,6 +1647,15 @@ internal sealed class GitRepository(AgentConfig config)
         };
 
         await AssertNoRelatedGitAsync(protectedRoots);
+
+        // The immutable seal is about to be removed so Git can mutate the
+        // checkout. Prove first, while the tree is still frozen, that no
+        // non-agent UID can write existing worktree or metadata paths. This
+        // keeps repository config/attributes from becoming an executable
+        // injection channel between validation and the root Git commands.
+        CheckoutWriteExclusion.EnsureMutationTreeTrusted(_config.AppDirectory);
+        foreach (var root in metadataRoots)
+            CheckoutWriteExclusion.EnsureMutationTreeTrusted(root);
 
         CheckoutWriteExclusion.SetTreeImmutable(_config.AppDirectory, immutable: false);
         foreach (var root in metadataRoots)
