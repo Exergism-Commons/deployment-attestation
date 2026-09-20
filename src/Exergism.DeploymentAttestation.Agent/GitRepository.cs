@@ -95,6 +95,7 @@ internal static class GitMetadataDurability
     internal static GitMetadataDurabilitySnapshot Capture(string root)
     {
         root = Path.GetFullPath(root);
+        CheckoutWriteExclusion.ValidateMetadataTree(root);
         var directories = new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal)
         {
             [root] = Durability.ReadDirectorySnapshotNoFollow(root, root)
@@ -211,6 +212,365 @@ internal static class GitMetadataEnumeration
             IgnoreInaccessible = false,
             ReturnSpecialDirectories = false
         };
+}
+
+internal static class CheckoutWriteExclusion
+{
+    private const int O_RDONLY = 0;
+    private const int O_NONBLOCK = 0x800;
+    private const int O_NOFOLLOW = 0x20000;
+    private const int O_CLOEXEC = 0x80000;
+    private const int AT_FDCWD = -100;
+    private const int AT_EMPTY_PATH = 0x1000;
+    private const int AT_SYMLINK_NOFOLLOW = 0x100;
+    private const uint STATX_TYPE = 0x00000001;
+    private const ushort S_IFMT = 0xF000;
+    private const ushort S_IFDIR = 0x4000;
+    private const ushort S_IFREG = 0x8000;
+    private const ushort S_IFLNK = 0xA000;
+    private const int O_ACCMODE = 0x3;
+    private const int O_WRONLY = 0x1;
+    private const int O_RDWR = 0x2;
+    private const int FS_IMMUTABLE_FL = 0x00000010;
+
+    // Linux UAPI: _IOR('f', 1, long) / _IOW('f', 2, long) on 64-bit Linux.
+    private const ulong FS_IOC_GETFLAGS = 0x80086601;
+    private const ulong FS_IOC_SETFLAGS = 0x40086602;
+
+    internal static void ValidateMetadataTree(string root)
+        => _ = EnumerateTreeTargets(root, rejectSymlinks: true, rejectSpecial: true);
+
+    internal static void SealVerifiedState(
+        RepositoryDurabilitySnapshot repository,
+        IReadOnlyDictionary<string, GitMetadataDurabilitySnapshot> metadata)
+    {
+        var files = new HashSet<string>(repository.Files.Keys, StringComparer.Ordinal);
+        var directories = new HashSet<string>(repository.Directories.Keys, StringComparer.Ordinal);
+
+        foreach (var snapshot in metadata.Values)
+        {
+            files.UnionWith(snapshot.Files.Keys);
+            directories.UnionWith(snapshot.Directories.Keys);
+        }
+
+        foreach (var file in files.Order(StringComparer.Ordinal))
+            SetImmutableNoFollow(file, immutable: true);
+
+        foreach (var directory in directories
+                     .OrderByDescending(PathDepth)
+                     .ThenBy(path => path, StringComparer.Ordinal))
+            SetImmutableNoFollow(directory, immutable: true);
+    }
+
+    internal static void EnsureVerifiedStateSealed(
+        RepositoryDurabilitySnapshot repository,
+        IReadOnlyDictionary<string, GitMetadataDurabilitySnapshot> metadata)
+    {
+        foreach (var file in repository.Files.Keys)
+            EnsureImmutableNoFollow(file);
+        foreach (var directory in repository.Directories.Keys)
+            EnsureImmutableNoFollow(directory);
+
+        foreach (var snapshot in metadata.Values)
+        {
+            foreach (var file in snapshot.Files.Keys)
+                EnsureImmutableNoFollow(file);
+            foreach (var directory in snapshot.Directories.Keys)
+                EnsureImmutableNoFollow(directory);
+        }
+    }
+
+    internal static void SetTreeImmutable(string root, bool immutable)
+    {
+        var (files, directories) = EnumerateTreeTargets(
+            root,
+            rejectSymlinks: false,
+            rejectSpecial: false);
+
+        foreach (var file in files.Order(StringComparer.Ordinal))
+            SetImmutableNoFollow(file, immutable);
+
+        foreach (var directory in directories
+                     .OrderByDescending(PathDepth)
+                     .ThenBy(path => path, StringComparer.Ordinal))
+            SetImmutableNoFollow(directory, immutable);
+    }
+
+    internal static void AssertNoWritableReferences(IEnumerable<string> roots)
+    {
+        var protectedRoots = roots
+            .Select(Path.GetFullPath)
+            .Select(Path.TrimEndingDirectorySeparator)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        foreach (var procDir in Directory.EnumerateDirectories("/proc"))
+        {
+            if (!int.TryParse(Path.GetFileName(procDir), out _))
+                continue;
+
+            AssertNoWritableDescriptors(procDir, protectedRoots);
+            AssertNoWritableSharedMappings(procDir, protectedRoots);
+        }
+    }
+
+    private static void AssertNoWritableDescriptors(
+        string procDir,
+        IReadOnlyCollection<string> protectedRoots)
+    {
+        var fdDirectory = Path.Combine(procDir, "fd");
+        try
+        {
+            foreach (var fdPath in Directory.EnumerateFileSystemEntries(fdDirectory))
+            {
+                var fdName = Path.GetFileName(fdPath);
+                var fdInfo = Path.Combine(procDir, "fdinfo", fdName);
+                string flagsLine;
+                try
+                {
+                    flagsLine = File.ReadLines(fdInfo)
+                        .FirstOrDefault(line => line.StartsWith("flags:", StringComparison.Ordinal))
+                        ?? string.Empty;
+                }
+                catch (FileNotFoundException) { continue; }
+                catch (DirectoryNotFoundException) { return; }
+
+                if (!IsWritableDescriptor(flagsLine))
+                    continue;
+
+                string? target;
+                try
+                {
+                    target = new FileInfo(fdPath).LinkTarget;
+                }
+                catch (FileNotFoundException) { continue; }
+                catch (DirectoryNotFoundException) { return; }
+
+                if (string.IsNullOrEmpty(target) || !target.StartsWith('/'))
+                    continue;
+
+                target = StripDeletedSuffix(target);
+                if (protectedRoots.Any(root => IsUnder(target, root)))
+                    throw new AgentException(
+                        $"Writable file descriptor {Path.GetFileName(procDir)}/{fdName} references sealed checkout path {target}");
+            }
+        }
+        catch (DirectoryNotFoundException) { }
+        catch (UnauthorizedAccessException)
+        {
+            throw new AgentException(
+                $"Cannot inspect writable file descriptors for process {Path.GetFileName(procDir)}");
+        }
+    }
+
+    private static void AssertNoWritableSharedMappings(
+        string procDir,
+        IReadOnlyCollection<string> protectedRoots)
+    {
+        var mapsPath = Path.Combine(procDir, "maps");
+        try
+        {
+            foreach (var line in File.ReadLines(mapsPath))
+            {
+                var fields = line.Split(' ', 6, StringSplitOptions.RemoveEmptyEntries);
+                if (fields.Length < 6 || fields[1].Length < 4)
+                    continue;
+
+                var permissions = fields[1];
+                if (permissions[1] != 'w' || permissions[3] != 's')
+                    continue;
+
+                var target = StripDeletedSuffix(fields[5]);
+                if (!target.StartsWith('/'))
+                    continue;
+
+                if (protectedRoots.Any(root => IsUnder(target, root)))
+                    throw new AgentException(
+                        $"Writable shared mapping in process {Path.GetFileName(procDir)} references sealed checkout path {target}");
+            }
+        }
+        catch (FileNotFoundException) { }
+        catch (DirectoryNotFoundException) { }
+        catch (UnauthorizedAccessException)
+        {
+            throw new AgentException(
+                $"Cannot inspect writable mappings for process {Path.GetFileName(procDir)}");
+        }
+    }
+
+    internal static bool IsWritableDescriptor(string flagsLine)
+    {
+        if (string.IsNullOrWhiteSpace(flagsLine))
+            return false;
+
+        var value = flagsLine["flags:".Length..].Trim();
+        try
+        {
+            var flags = Convert.ToInt32(value, 8);
+            var accessMode = flags & O_ACCMODE;
+            return accessMode is O_WRONLY or O_RDWR;
+        }
+        catch (FormatException)
+        {
+            throw new AgentException($"Malformed /proc fd flags: {flagsLine}");
+        }
+        catch (OverflowException)
+        {
+            throw new AgentException($"Unsafe /proc fd flags: {flagsLine}");
+        }
+    }
+
+    private static (List<string> Files, List<string> Directories) EnumerateTreeTargets(
+        string root,
+        bool rejectSymlinks,
+        bool rejectSpecial)
+    {
+        root = Path.GetFullPath(root);
+        if (PathKindNoFollow(root) != S_IFDIR)
+            throw new AgentException($"Write-exclusion root is not a real directory: {root}");
+
+        var files = new List<string>();
+        var directories = new List<string>();
+        Walk(root);
+        directories.Add(root);
+        return (files, directories);
+
+        void Walk(string directory)
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var kind = PathKindNoFollow(entry);
+                if (kind == S_IFLNK)
+                {
+                    if (rejectSymlinks)
+                        throw new AgentException($"Git metadata symlink is not permitted: {entry}");
+                    continue;
+                }
+
+                if (kind == S_IFREG)
+                {
+                    files.Add(Path.GetFullPath(entry));
+                    continue;
+                }
+
+                if (kind == S_IFDIR)
+                {
+                    Walk(entry);
+                    directories.Add(Path.GetFullPath(entry));
+                    continue;
+                }
+
+                if (rejectSpecial)
+                    throw new AgentException($"Git metadata contains unsupported special entry: {entry}");
+            }
+        }
+    }
+
+    private static ushort PathKindNoFollow(string path)
+    {
+        if (Native.statx(
+                AT_FDCWD,
+                path,
+                AT_SYMLINK_NOFOLLOW,
+                STATX_TYPE,
+                out var stat) != 0)
+            throw new AgentException(
+                $"Could not inspect checkout path without following symlinks: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        if ((stat.Mask & STATX_TYPE) != STATX_TYPE)
+            throw new AgentException($"statx omitted checkout path type: {path}");
+
+        return (ushort)(stat.Mode & S_IFMT);
+    }
+
+    private static void SetImmutableNoFollow(string path, bool immutable)
+    {
+        var fd = Native.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException(
+                $"Could not open checkout path for write exclusion: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            EnsureDescriptorIsRegularOrDirectory(fd, path);
+
+            var flags = 0;
+            if (Native.ioctl(fd, FS_IOC_GETFLAGS, ref flags) != 0)
+                throw new AgentException(
+                    $"Filesystem does not expose inode flags required for checkout write exclusion: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+            var desired = immutable
+                ? flags | FS_IMMUTABLE_FL
+                : flags & ~FS_IMMUTABLE_FL;
+            if (desired != flags)
+            {
+                if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref desired) != 0)
+                    throw new AgentException(
+                        $"Could not {(immutable ? "seal" : "unseal")} checkout path {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+                if (Native.fsync(fd) != 0)
+                    throw new AgentException(
+                        $"Could not fsync checkout inode flags for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+            }
+
+            var after = 0;
+            if (Native.ioctl(fd, FS_IOC_GETFLAGS, ref after) != 0 ||
+                ((after & FS_IMMUTABLE_FL) != 0) != immutable)
+                throw new AgentException(
+                    $"Checkout write-exclusion state did not persist for {path}");
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
+    private static void EnsureImmutableNoFollow(string path)
+    {
+        var fd = Native.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException(
+                $"Could not open sealed checkout path: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            EnsureDescriptorIsRegularOrDirectory(fd, path);
+            var flags = 0;
+            if (Native.ioctl(fd, FS_IOC_GETFLAGS, ref flags) != 0 ||
+                (flags & FS_IMMUTABLE_FL) == 0)
+                throw new AgentException($"Checkout path is not write-excluded: {path}");
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
+    private static void EnsureDescriptorIsRegularOrDirectory(int fd, string path)
+    {
+        if (Native.statx(fd, "", AT_EMPTY_PATH, STATX_TYPE, out var stat) != 0)
+            throw new AgentException(
+                $"Could not inspect opened checkout path: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        var kind = (ushort)(stat.Mode & S_IFMT);
+        if (kind is not (S_IFREG or S_IFDIR))
+            throw new AgentException($"Checkout write exclusion only supports regular files/directories: {path}");
+    }
+
+    private static bool IsUnder(string path, string root)
+    {
+        path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        return path == root ||
+               path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    }
+
+    private static string StripDeletedSuffix(string path)
+        => path.EndsWith(" (deleted)", StringComparison.Ordinal)
+            ? path[..^" (deleted)".Length]
+            : path;
+
+    private static int PathDepth(string path)
+        => Path.GetFullPath(path).Count(character => character == Path.DirectorySeparatorChar);
 }
 
 internal sealed class PinnedGitMetadataRoot : IDisposable
@@ -628,30 +988,80 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task VerifySourceTreeExactAsync(string commit)
     {
+        var metadataHierarchy = await VerifiedGitMetadataRootsAsync(
+            _config.AppDirectory,
+            commit,
+            parentMetadataHierarchy: null,
+            GitMetadataTraversalMode.StrictTargetCommit);
+        var metadataBeforeSeal = CaptureGitMetadataSnapshots(metadataHierarchy);
+
         var verified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
         await RevalidateRepositorySnapshotAsync(verified);
+
+        CheckoutWriteExclusion.SealVerifiedState(verified, metadataBeforeSeal);
+
+        var protectedRoots = new HashSet<string>(
+            metadataHierarchy.Select(Path.GetFullPath),
+            StringComparer.Ordinal)
+        {
+            Path.GetFullPath(_config.AppDirectory)
+        };
+        CheckoutWriteExclusion.AssertNoWritableReferences(protectedRoots);
+
+        // Sealing changes inode ctime. Re-snapshot only after write exclusion is
+        // active, then prove exact bytes/structure while no unprivileged writer
+        // can open a new writable handle.
+        var sealedMetadata = CaptureGitMetadataSnapshots(metadataHierarchy);
+        var sealedVerified = await VerifyRepositoryExactAsync(_config.AppDirectory, commit);
+        await RevalidateRepositorySnapshotAsync(sealedVerified);
+        EnsureGitMetadataSnapshotsUnchanged(sealedMetadata);
+        CheckoutWriteExclusion.EnsureVerifiedStateSealed(sealedVerified, sealedMetadata);
     }
 
     public async Task SwitchSourceAsync(string commit, bool fetchFirst)
     {
-        if (fetchFirst)
+        var mutationRoots = await PrepareCheckoutMutationAsync(commit);
+        try
         {
-            await GitRequiredAsync([GIT_SUBCOMMAND_FETCH, "--force", "--depth", "1", "origin", commit]);
-            await GitRequiredAsync([GIT_SUBCOMMAND_CHECKOUT, "--detach", "FETCH_HEAD"]);
+            if (fetchFirst)
+            {
+                await GitRequiredAsync([GIT_SUBCOMMAND_FETCH, "--force", "--depth", "1", "origin", commit]);
+                await GitRequiredAsync([GIT_SUBCOMMAND_CHECKOUT, "--detach", "FETCH_HEAD"]);
+            }
+
+            await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
+            await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
+            await SyncSubmodulesAsync(commit);
+
+            if (await HeadAsync() != commit)
+                throw new AgentException("Source HEAD mismatch after switch");
+            await VerifySourceTreeExactAsync(commit);
+            await FsyncCheckoutAsync(commit);
         }
+        catch (Exception original)
+        {
+            try
+            {
+                ResealMutationRoots(mutationRoots);
+            }
+            catch (Exception resealFailure)
+            {
+                throw new AgentException(
+                    "Source switch failed and checkout write exclusion could not be restored",
+                    new AggregateException(original, resealFailure));
+            }
 
-        await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
-        await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
-        await SyncSubmodulesAsync(commit);
-
-        if (await HeadAsync() != commit)
-            throw new AgentException("Source HEAD mismatch after switch");
-        await VerifySourceTreeExactAsync(commit);
-        await FsyncCheckoutAsync(commit);
+            throw;
+        }
     }
 
     public async Task FsyncCheckoutAsync(string commit)
     {
+        // Establish persistent write exclusion first. This makes the trailing
+        // durability verification stable through method return instead of
+        // merely moving the final TOCTOU window to another read.
+        await VerifySourceTreeExactAsync(commit);
+
         var metadataHierarchy = await VerifiedGitMetadataRootsAsync(
             _config.AppDirectory,
             commit,
@@ -676,6 +1086,7 @@ internal sealed class GitRepository(AgentConfig config)
         await RevalidateRepositorySnapshotAsync(final);
         EnsureSnapshotsUnchanged(verified, final);
         EnsureGitMetadataSnapshotsUnchanged(metadataSnapshots);
+        CheckoutWriteExclusion.EnsureVerifiedStateSealed(final, metadataSnapshots);
     }
 
     public async Task ReconcileStaleGitLocksAsync(string? rollbackCommit = null)
@@ -684,17 +1095,70 @@ internal sealed class GitRepository(AgentConfig config)
         var roots = await RecoveryGitMetadataRootsAsync(head, rollbackCommit);
         var protectedRoots = new HashSet<string>(roots, StringComparer.Ordinal) { Path.GetFullPath(_config.AppDirectory) };
 
-        await AssertNoRelatedGitAsync(protectedRoots);
+        foreach (var root in roots)
+            _ = GitMetadataDurability.Capture(root);
 
         foreach (var root in roots)
+            CheckoutWriteExclusion.SetTreeImmutable(root, immutable: false);
+
+        Exception? cleanupFailure = null;
+        try
         {
-            using var pinnedRoot = PinnedGitMetadataRoot.Open(root);
-            await pinnedRoot.CleanupLocksAsync(
-                () => AssertNoRelatedGitAsync(protectedRoots),
-                PinnedGitMetadataRoot.AnyProcessHasOpenIdentityAsync);
+            await AssertNoRelatedGitAsync(protectedRoots);
+
+            foreach (var root in roots)
+            {
+                using var pinnedRoot = PinnedGitMetadataRoot.Open(root);
+                await pinnedRoot.CleanupLocksAsync(
+                    () => AssertNoRelatedGitAsync(protectedRoots),
+                    PinnedGitMetadataRoot.AnyProcessHasOpenIdentityAsync);
+            }
+
+            await AssertNoRelatedGitAsync(protectedRoots);
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = exception;
         }
 
-        await AssertNoRelatedGitAsync(protectedRoots);
+        try
+        {
+            foreach (var root in roots)
+                CheckoutWriteExclusion.SetTreeImmutable(root, immutable: true);
+        }
+        catch (Exception resealFailure)
+        {
+            if (cleanupFailure is not null)
+                throw new AgentException(
+                    "Git lock reconciliation and metadata reseal both failed",
+                    new AggregateException(cleanupFailure, resealFailure));
+            throw;
+        }
+
+        if (cleanupFailure is not null)
+            throw cleanupFailure;
+    }
+
+    private async Task<List<string>> PrepareCheckoutMutationAsync(string targetCommit)
+    {
+        var currentCommit = await HeadAsync();
+        var metadataRoots = await RecoveryGitMetadataRootsAsync(currentCommit, targetCommit);
+
+        foreach (var root in metadataRoots)
+            _ = GitMetadataDurability.Capture(root);
+
+        CheckoutWriteExclusion.SetTreeImmutable(_config.AppDirectory, immutable: false);
+        foreach (var root in metadataRoots)
+            CheckoutWriteExclusion.SetTreeImmutable(root, immutable: false);
+
+        return metadataRoots;
+    }
+
+    private void ResealMutationRoots(IEnumerable<string> metadataRoots)
+    {
+        CheckoutWriteExclusion.SetTreeImmutable(_config.AppDirectory, immutable: true);
+        foreach (var root in metadataRoots)
+            CheckoutWriteExclusion.SetTreeImmutable(root, immutable: true);
     }
 
     private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
