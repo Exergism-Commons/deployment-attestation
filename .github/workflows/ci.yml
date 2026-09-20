@@ -26,46 +26,65 @@ jobs:
       - name: Exercise trusted installer bootstrap
         run: |
           set -euo pipefail
+
+          installer_sha256="$(sha256sum install/install-id-exergism.sh | awk '{print $1}')"
           agent_sha256="$(sha256sum /bin/true | awk '{print $1}')"
           bad_sha256="$(printf '0%.0s' {1..64})"
 
+          stage_installer() {
+            local stage
+            stage="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
+            sudo chmod 0700 "$stage"
+            sudo chown root:root "$stage"
+            sudo install -o root -g root -m 0500 install/install-id-exergism.sh "$stage/install-id-exergism.sh"
+            printf '%s\n' "$stage"
+          }
+
+          stage="$(stage_installer)"
           if sudo env -i \
             PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-            EC_NATIVE_AGENT_BINARY=/bin/true \
-            EC_NATIVE_AGENT_SHA256="$bad_sha256" \
-            "$PWD/install/install-id-exergism.sh" --bootstrap-self-test; then
-            echo "Installer bootstrap unexpectedly accepted a bad Native AOT digest." >&2
-            exit 1
-          fi
-          if sudo find /run -maxdepth 1 -type d -name 'ec-deployment-attestation-installer.*' -print -quit | grep -q .; then
-            echo "Installer bootstrap staging leaked after failed admission." >&2
-            exit 1
-          fi
-
-          early_stage="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
-          sudo mkdir -p "$early_stage/repo/install"
-          sudo cp "$PWD/install/install-id-exergism.sh" "$early_stage/repo/install/install-id-exergism.sh"
-          sudo chmod 0700 "$early_stage" "$early_stage/repo" "$early_stage/repo/install"
-          sudo chmod 0500 "$early_stage/repo/install/install-id-exergism.sh"
-          if sudo env -i \
-            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-            EC_INSTALLER_TRUSTED_STAGE="$early_stage" \
-            "$early_stage/repo/install/install-id-exergism.sh" --bootstrap-self-test; then
-            echo "Trusted second stage unexpectedly accepted an incomplete stage." >&2
-            exit 1
-          fi
-          if sudo test -e "$early_stage"; then
-            echo "Trusted second-stage validation leaked staging." >&2
-            exit 1
-          fi
-
-          sudo env -i \
-            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            EC_INSTALLER_TRUSTED_STAGE="$stage" \
+            EC_INSTALLER_SOURCE_ROOT="$PWD" \
+            EC_INSTALLER_SHA256="$bad_sha256" \
             EC_NATIVE_AGENT_BINARY=/bin/true \
             EC_NATIVE_AGENT_SHA256="$agent_sha256" \
-            "$PWD/install/install-id-exergism.sh" --bootstrap-self-test
-          if sudo find /run -maxdepth 1 -type d -name 'ec-deployment-attestation-installer.*' -print -quit | grep -q .; then
-            echo "Installer bootstrap staging leaked after self-test." >&2
+            "$stage/install-id-exergism.sh" --bootstrap-self-test; then
+            echo "Trusted installer unexpectedly accepted a bad installer digest." >&2
+            exit 1
+          fi
+          if sudo test -e "$stage"; then
+            echo "Trusted installer staging leaked after installer-digest rejection." >&2
+            exit 1
+          fi
+
+          stage="$(stage_installer)"
+          if sudo env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            EC_INSTALLER_TRUSTED_STAGE="$stage" \
+            EC_INSTALLER_SOURCE_ROOT="$PWD" \
+            EC_INSTALLER_SHA256="$installer_sha256" \
+            EC_NATIVE_AGENT_BINARY=/bin/true \
+            EC_NATIVE_AGENT_SHA256="$bad_sha256" \
+            "$stage/install-id-exergism.sh" --bootstrap-self-test; then
+            echo "Trusted installer unexpectedly accepted a bad Native AOT digest." >&2
+            exit 1
+          fi
+          if sudo test -e "$stage"; then
+            echo "Trusted installer staging leaked after failed admission." >&2
+            exit 1
+          fi
+
+          stage="$(stage_installer)"
+          sudo env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            EC_INSTALLER_TRUSTED_STAGE="$stage" \
+            EC_INSTALLER_SOURCE_ROOT="$PWD" \
+            EC_INSTALLER_SHA256="$installer_sha256" \
+            EC_NATIVE_AGENT_BINARY=/bin/true \
+            EC_NATIVE_AGENT_SHA256="$agent_sha256" \
+            "$stage/install-id-exergism.sh" --bootstrap-self-test
+          if sudo test -e "$stage"; then
+            echo "Trusted installer staging leaked after self-test." >&2
             exit 1
           fi
 
@@ -200,14 +219,15 @@ jobs:
           grep -Fq '#!/bin/bash' install/install-id-exergism.sh
           grep -Fq 'export PATH="/usr/sbin:/usr/bin:/sbin:/bin"' install/install-id-exergism.sh
           grep -Fq 'PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH' install/install-id-exergism.sh
-          grep -Fq 'bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"' install/install-id-exergism.sh
-          grep -Fq 'trap cleanup_failed_bootstrap EXIT' install/install-id-exergism.sh
-          grep -Fq 'rm -rf -- "$bootstrap_stage" || true' install/install-id-exergism.sh
+          grep -Fq 'Refusing privileged execution without a trusted root-owned installer stage.' install/install-id-exergism.sh
+          grep -Fq 'EC_INSTALLER_SOURCE_ROOT' install/install-id-exergism.sh
+          grep -Fq 'EC_INSTALLER_SHA256' install/install-id-exergism.sh
+          grep -Fq 'actual_installer_sha256="$(sha256sum -- "${BASH_SOURCE[0]}"' install/install-id-exergism.sh
+          ! grep -Fq 'BASHPID' install/install-id-exergism.sh
+          ! grep -Fq 'bootstrap_stage=' install/install-id-exergism.sh
           grep -Fq 'trap cleanup_trusted_stage_early EXIT' install/install-id-exergism.sh
           grep -Fq 'rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true' install/install-id-exergism.sh
           grep -Fq 'trap - EXIT' install/install-id-exergism.sh
-          grep -Fq 'EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"' install/install-id-exergism.sh
-          grep -Fq '"/proc/${BASHPID}/fd/255" \' install/install-id-exergism.sh
           grep -Fq 'os.pread(source_fd, 1024 * 1024, offset)' install/install-id-exergism.sh
           grep -Fq 'NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"' install/install-id-exergism.sh
           grep -Fq 'AGENT_INSTALL_SOURCE="$AGENT_SOURCE"' install/install-id-exergism.sh
@@ -224,34 +244,26 @@ jobs:
           grep -Fq 'repo_inputs = (' install/install-id-exergism.sh
           grep -Fq 'open_repo_file_no_symlinks(root_fd, relative)' install/install-id-exergism.sh
           grep -Fq 'REPO_INPUT_STAGE="$INSTALLER_TRUSTED_STAGE/repo"' install/install-id-exergism.sh
-          grep -Fq 'root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)' install/install-id-exergism.sh
-          grep -Fq 'installer_destination = os.path.join(' install/install-id-exergism.sh
-          grep -Fq 'if (running.st_dev, running.st_ino) != (repository.st_dev, repository.st_ino):' install/install-id-exergism.sh
-          ! grep -Fq 'expected_installer_sha256' install/install-id-exergism.sh
           ! grep -Fq 'install -o root -g root -m 0500 "$AGENT_SOURCE"' install/install-id-exergism.sh
           python3 - <<'PY'
           import ast
           import hashlib
           from pathlib import Path
+
           text = Path('install/install-id-exergism.sh').read_text()
           admission_end = text.index('exec 9>"$INSTALL_LOCK"')
           tail = text[admission_end:]
-          bootstrap_end = text.index('INSTALLER_TRUSTED_STAGE="$EC_INSTALLER_TRUSTED_STAGE"')
-          bootstrap = text[:bootstrap_end]
-          assert '$ROOT/' not in tail
-          assert '${ROOT}/' not in tail
+
+          assert 'BASHPID' not in text
+          assert 'bootstrap_stage=' not in text
+          assert 'EC_INSTALLER_TRUSTED_STAGE' in text
+          assert 'EC_INSTALLER_SOURCE_ROOT' in text
+          assert 'EC_INSTALLER_SHA256' in text
+          assert 'actual_installer_sha256=' in text
+          assert 'root_fd = os.open(source_root, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)' in text
           assert 'EC_NATIVE_AGENT_BINARY' not in tail
           assert 'EC_NATIVE_AGENT_SHA256' not in tail
-          agent_open = bootstrap.index('agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)')
-          repo_walk = bootstrap.index('repo_inputs = (')
-          root_open = bootstrap.index('root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)')
-          assert agent_open < repo_walk < root_open
-          assert 'script_procfd' in bootstrap
-          assert 'running.st_dev, running.st_ino' in bootstrap
-          exec_pos = bootstrap.index('EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script" "$@"')
-          trap_pos = bootstrap.index('trap cleanup_failed_bootstrap EXIT')
-          assert trap_pos < exec_pos
-          assert 'trap - EXIT' not in bootstrap[trap_pos:exec_pos]
+
           start = text.index('repo_inputs = (')
           end = text.index('\n)\n\nrepo_stage', start) + 2
           assignment = ast.parse(text[start:end]).body[0]
