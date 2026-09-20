@@ -263,13 +263,48 @@ internal static class CheckoutWriteExclusion
 
         EnsureNoMultiplyLinkedFiles(files);
 
-        foreach (var file in files.Order(StringComparer.Ordinal))
-            SetImmutableNoFollow(file, immutable: true);
+        var orderedFiles = files.Order(StringComparer.Ordinal).ToArray();
+        var orderedDirectories = directories
+            .OrderByDescending(PathDepth)
+            .ThenBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        var newlySealed = new List<string>();
 
-        foreach (var directory in directories
-                     .OrderByDescending(PathDepth)
-                     .ThenBy(path => path, StringComparer.Ordinal))
-            SetImmutableNoFollow(directory, immutable: true);
+        try
+        {
+            foreach (var file in orderedFiles)
+            {
+                if (SetImmutableNoFollow(file, immutable: true))
+                    newlySealed.Add(file);
+            }
+
+            foreach (var directory in orderedDirectories)
+            {
+                if (SetImmutableNoFollow(directory, immutable: true))
+                    newlySealed.Add(directory);
+            }
+        }
+        catch (Exception sealFailure)
+        {
+            var rollbackFailures = new List<Exception>();
+            foreach (var path in newlySealed.AsEnumerable().Reverse())
+            {
+                try
+                {
+                    _ = SetImmutableNoFollow(path, immutable: false);
+                }
+                catch (Exception rollbackFailure)
+                {
+                    rollbackFailures.Add(rollbackFailure);
+                }
+            }
+
+            if (rollbackFailures.Count > 0)
+                throw new AgentException(
+                    "Checkout sealing failed and partial seal rollback also failed",
+                    new AggregateException(new[] { sealFailure }.Concat(rollbackFailures)));
+            throw;
+        }
     }
 
     internal static void EnsureVerifiedStateSealed(
@@ -638,7 +673,7 @@ internal static class CheckoutWriteExclusion
             EnsureSingleLinkCount(stat.LinkCount, path);
     }
 
-    private static void SetImmutableNoFollow(string path, bool immutable)
+    private static bool SetImmutableNoFollow(string path, bool immutable)
     {
         var fd = Native.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0)
@@ -657,12 +692,40 @@ internal static class CheckoutWriteExclusion
             var desired = immutable
                 ? flags | FS_IMMUTABLE_FL
                 : flags & ~FS_IMMUTABLE_FL;
-            if (desired != flags)
+            var changed = desired != flags;
+            if (changed)
             {
                 EnsureDescriptorSingleLink(fd, path);
                 if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref desired) != 0)
                     throw new AgentException(
                         $"Could not {(immutable ? "seal" : "unseal")} checkout path {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+                if (immutable)
+                {
+                    try
+                    {
+                        // Once immutable is active Linux rejects new hardlinks.
+                        // Rechecking nlink here closes the link(2) race between
+                        // the precheck and FS_IOC_SETFLAGS.
+                        EnsureDescriptorSingleLink(fd, path);
+                    }
+                    catch (Exception linkRace)
+                    {
+                        var restore = flags;
+                        if (Native.ioctl(fd, FS_IOC_SETFLAGS, ref restore) != 0)
+                        {
+                            var rollback = new AgentException(
+                                $"Could not roll back unsafe checkout seal for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+                            throw new AgentException(
+                                $"A hardlink appeared while sealing checkout path {path}",
+                                new AggregateException(linkRace, rollback));
+                        }
+
+                        _ = Native.fsync(fd);
+                        throw;
+                    }
+                }
+
                 if (Native.fsync(fd) != 0)
                     throw new AgentException(
                         $"Could not fsync checkout inode flags for {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
@@ -673,6 +736,7 @@ internal static class CheckoutWriteExclusion
                 ((after & FS_IMMUTABLE_FL) != 0) != immutable)
                 throw new AgentException(
                     $"Checkout write-exclusion state did not persist for {path}");
+            return changed;
         }
         finally
         {
