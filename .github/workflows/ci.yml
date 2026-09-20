@@ -654,11 +654,12 @@ jobs:
           finalizer_text = Path('install/finalize-id-exergism-recovery.sh').read_text()
           finalizer_health = finalizer_text.index('wait_target_healthy_active()')
           finalizer_fence = finalizer_text.index('"$ARTIFACT_FENCE_AUDITOR"', finalizer_health)
-          finalizer_quiesce = finalizer_text.index('quiesce_target_after_failed_validation || true', finalizer_fence)
+          finalizer_owner = finalizer_text.index('finalize_restored_active_target()')
+          finalizer_quiesce = finalizer_text.index('quiesce_target_after_failed_validation', finalizer_owner)
           timer_terminal = finalizer_text.index('expected_active="$(expected_timer_active)"')
           enablement_recheck = finalizer_text.index('Could not re-check timer enablement after runtime restoration.')
           marker_retire = finalizer_text.index('mv -T -- "$RECOVERED_DIR" "$FINALIZED_DIR"')
-          assert finalizer_health < finalizer_fence < finalizer_quiesce < timer_terminal < enablement_recheck < marker_retire
+          assert finalizer_health < finalizer_fence < finalizer_owner < finalizer_quiesce < timer_terminal < enablement_recheck < marker_retire
           PY
 
       - name: Reject obvious committed secrets
