@@ -106,7 +106,8 @@ internal static partial class Protocol
 
     public static CurrentState ReadCurrentState(string path)
     {
-        using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+        using var doc = JsonDocument.Parse(
+            Durability.ReadTrustedRegularFileBytes(path, "current deployment state"));
         var root = doc.RootElement;
         RequireObject(root, "$");
         EnsureNoDuplicateProperties(root, "$");
@@ -151,7 +152,8 @@ internal static partial class Protocol
 
     public static DeploymentTransaction ReadTransaction(string path)
     {
-        using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+        using var doc = JsonDocument.Parse(
+            Durability.ReadTrustedRegularFileBytes(path, "deployment transaction"));
         var root = doc.RootElement;
         RequireObject(root, "$");
         EnsureNoDuplicateProperties(root, "$");
