@@ -35,29 +35,67 @@ internal static class ServiceQuiescence
                cgroupHasProcesses: false);
 }
 
+internal sealed class PreparedSmokeScript(string path) : IDisposable
+{
+    internal string Path { get; } = path;
+
+    public void Dispose()
+        => Durability.DurableDelete(Path);
+}
+
 internal static class SmokeScriptValidation
 {
-    internal static bool IsUsable(string path)
+    private const string TRUSTED_RUNTIME_DIRECTORY =
+        "/run/ec-deployment-attestation-smoke";
+
+    internal static PreparedSmokeScript PrepareTrustedCopy(string path)
     {
-        if (string.IsNullOrEmpty(path))
-            return true;
+        if (string.IsNullOrWhiteSpace(path))
+            throw new AgentException("Smoke script path is empty");
 
-        try
-        {
-            var info = new FileInfo(path);
-            if (!info.Exists || info.LinkTarget is not null)
-                return false;
+        path = Path.GetFullPath(path);
+        var parent = Path.GetDirectoryName(path)
+            ?? throw new AgentException($"Smoke script has no parent directory: {path}");
 
-            var mode = File.GetUnixFileMode(path);
-            return (mode & (
-                UnixFileMode.UserExecute |
-                UnixFileMode.GroupExecute |
-                UnixFileMode.OtherExecute)) != 0;
-        }
-        catch
-        {
-            return false;
-        }
+        // The original path is accepted only beneath an effective-UID-owned,
+        // non-group/other-writable directory chain. The final file itself is
+        // opened O_NOFOLLOW and read from that descriptor while owner, mode,
+        // identity and ctime/size remain stable.
+        Durability.ValidateExistingTrustedDirectoryChain(parent);
+        var bytes = Durability.ReadTrustedRegularFileBytes(
+            path,
+            "smoke script",
+            requireExecutable: true);
+
+        // Execute the verified bytes from a root/effective-UID-owned runtime
+        // namespace rather than the configurable source pathname. This removes
+        // the validation-to-exec replacement window entirely for non-root
+        // writers: changing the original after this point cannot change the
+        // program systemd-run starts.
+        Durability.EnsureTrustedDirectory(
+            TRUSTED_RUNTIME_DIRECTORY,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite |
+            UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead |
+            UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead |
+            UnixFileMode.OtherExecute);
+
+        var staged = Path.Combine(
+            TRUSTED_RUNTIME_DIRECTORY,
+            $"smoke-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        Durability.AtomicWrite(
+            staged,
+            bytes,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead |
+            UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead |
+            UnixFileMode.OtherExecute);
+
+        return new PreparedSmokeScript(staged);
     }
 }
 
@@ -210,10 +248,11 @@ internal sealed class SystemdController(AgentConfig config)
     public Task<bool> RunSmokeAsync()
         => HealthCheckRunner.RunAsync(async () =>
         {
-            if (!SmokeScriptValidation.IsUsable(_config.SmokeScript))
-                return false;
             if (string.IsNullOrEmpty(_config.SmokeScript))
                 return true;
+
+            using var prepared = SmokeScriptValidation.PrepareTrustedCopy(
+                _config.SmokeScript);
 
             var unit = $"ec-smoke-{Sanitize(_config.Service)}-{Environment.ProcessId}-{Guid.NewGuid():N}.service";
             var arguments = new[]
@@ -239,7 +278,7 @@ internal sealed class SystemdController(AgentConfig config)
                 $"--property=ReadOnlyPaths={_config.AppBinary}",
                 $"--setenv={ENV_PUBLIC_URL}={_config.PublicUrl}",
                 $"--setenv={ENV_LOCAL_URL}={_config.LocalUrl}",
-                _config.SmokeScript
+                prepared.Path
             };
 
             var result = await ProcessRunner.RunAsync(
