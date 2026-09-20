@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
-IFS=
+umask 077
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT LD_PRELOAD LD_LIBRARY_PATH
 SERVICE="id.exergism.org"
 APP_USER="idexergism"
 APP_DIR="/srv/id.exergism.org"
