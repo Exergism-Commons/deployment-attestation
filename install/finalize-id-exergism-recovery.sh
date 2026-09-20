@@ -18,6 +18,9 @@ FINALIZED_DIR="${INSTALL_STATE_ROOT}/${SERVICE}.finalized"
 INSTALL_LOCK="/run/lock/ec-deployment-attestation-install.lock"
 AGENT_COORDINATION_LOCK="/run/lock/ec-deployment-attestation-${SERVICE}.agent.lock"
 BOOT_ID_FILE="/proc/sys/kernel/random/boot_id"
+TARGET_START_FENCE_ROOT="/run/ec-deployment-attestation"
+TARGET_START_FENCE_MARKER="${TARGET_START_FENCE_ROOT}/${SERVICE}.target-start-fence"
+TARGET_RUNTIME_MASK="/run/systemd/system/${TARGET_UNIT}"
 
 path_exists_any() {
   [[ -e "$1" || -L "$1" ]]
@@ -284,6 +287,62 @@ PY
   return 0
 }
 
+ensure_target_start_fence_root() {
+  local owner mode
+  if path_exists_any "$TARGET_START_FENCE_ROOT"; then
+    [[ -d "$TARGET_START_FENCE_ROOT" && ! -L "$TARGET_START_FENCE_ROOT" ]] || {
+      echo "CRITICAL: target start-fence root is not a real directory." >&2
+      return 1
+    }
+    owner="$(stat -c '%u' -- "$TARGET_START_FENCE_ROOT")" || return 1
+    mode="$(stat -c '%a' -- "$TARGET_START_FENCE_ROOT")" || return 1
+    [[ "$owner" == 0 && "$mode" == 700 ]] || {
+      echo "CRITICAL: target start-fence root is not root-owned mode 0700." >&2
+      return 1
+    }
+    return 0
+  fi
+  install -d -o root -g root -m 0700 "$TARGET_START_FENCE_ROOT"
+}
+
+target_start_fence_active() {
+  local load
+  [[ -L "$TARGET_RUNTIME_MASK" ]] || return 1
+  [[ "$(readlink -- "$TARGET_RUNTIME_MASK")" == "/dev/null" ]] || return 1
+  load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)" || return 1
+  [[ "$load" == "masked" ]]
+}
+
+establish_target_start_fence() {
+  local marker_tmp
+  ensure_target_start_fence_root || return 1
+
+  # Respect any already-active runtime/admin mask as an effective start fence.
+  if target_start_fence_active; then
+    return 0
+  fi
+
+  if path_exists_any "$TARGET_RUNTIME_MASK"; then
+    echo "CRITICAL: unexpected runtime unit override prevents installing target start fence: $TARGET_RUNTIME_MASK" >&2
+    return 1
+  fi
+
+  if path_exists_any "$TARGET_START_FENCE_MARKER"; then
+    [[ -f "$TARGET_START_FENCE_MARKER" && ! -L "$TARGET_START_FENCE_MARKER" ]] || return 1
+    [[ "$(stat -c '%u:%a' -- "$TARGET_START_FENCE_MARKER")" == "0:600" ]] || return 1
+  else
+    marker_tmp="$(mktemp "$TARGET_START_FENCE_ROOT/.target-start-fence.XXXXXX")" || return 1
+    chown root:root "$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
+    chmod 0600 "$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
+    printf '%s\n' "$TARGET_UNIT" > "$marker_tmp" || { rm -f -- "$marker_tmp"; return 1; }
+    mv -T -- "$marker_tmp" "$TARGET_START_FENCE_MARKER" || { rm -f -- "$marker_tmp"; return 1; }
+  fi
+
+  systemctl mask --runtime "$TARGET_UNIT" >/dev/null 2>&1 || return 1
+  systemctl daemon-reload >/dev/null 2>&1 || return 1
+  target_start_fence_active
+}
+
 target_active_state() {
   local load active
   if ! load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)"; then
@@ -312,18 +371,26 @@ target_active_state() {
 
 quiesce_target_after_failed_validation() {
   local attempts=0
-  while true; do
-    # A failed/partial stop is not a terminal outcome here. Recovery owns this
-    # target activation, so keep the recovery/finalizer locks held and retry
-    # until quiescence is actually proven.
+  while ! establish_target_start_fence; do
+    # Never release finalizer/recovery locks without a manager-level fence that
+    # prevents queued or future starts from racing the final quiescence sample.
     systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
-    if target_quiescent; then
+    attempts=$((attempts + 1))
+    if (( attempts % 30 == 0 )); then
+      echo "CRITICAL: target start fence is not yet established; retrying while locks remain held." >&2
+    fi
+    sleep 1
+  done
+
+  while true; do
+    systemctl stop "$TARGET_UNIT" >/dev/null 2>&1 || true
+    if target_start_fence_active && target_quiescent && target_start_fence_active; then
       return 0
     fi
 
     attempts=$((attempts + 1))
     if (( attempts % 30 == 0 )); then
-      echo "CRITICAL: target is still not provably quiescent after failed recovery validation; retrying while locks remain held." >&2
+      echo "CRITICAL: target is still not provably fenced+quiescent after failed recovery validation; retrying while locks remain held." >&2
     fi
     sleep 1
   done
