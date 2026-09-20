@@ -60,7 +60,7 @@ jobs:
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             source_sha="$(git rev-list -n 1 "$TAG")"
           else
-            source_sha="$SOURCE_SHA"
+            source_sha="$GITHUB_SHA"
           fi
 
           echo "published=$published" >> "$GITHUB_OUTPUT"
