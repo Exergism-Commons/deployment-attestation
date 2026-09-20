@@ -61,6 +61,12 @@ internal static class AgentGitInvocation
                key.EndsWith(".smudge", StringComparison.OrdinalIgnoreCase) ||
                key.EndsWith(".process", StringComparison.OrdinalIgnoreCase);
     }
+
+    internal static bool IsUnsafeRepositoryConfigKey(string key)
+        => IsExecutableFilterConfigKey(key) ||
+           string.Equals(key, "include.path", StringComparison.OrdinalIgnoreCase) ||
+           (key.StartsWith("includeif.", StringComparison.OrdinalIgnoreCase) &&
+            key.EndsWith(".path", StringComparison.OrdinalIgnoreCase));
 }
 
 internal static class TrackedFileDurability
@@ -1574,6 +1580,7 @@ internal sealed class GitRepository(AgentConfig config)
 
         foreach (var root in metadataRoots)
             _ = GitMetadataDurability.Capture(root);
+        await AssertNoUnsafeMetadataConfigsAsync(metadataRoots);
 
         var protectedRoots = new HashSet<string>(
             metadataRoots.Select(Path.GetFullPath),
@@ -1595,24 +1602,62 @@ internal sealed class GitRepository(AgentConfig config)
     {
         var result = await GitAtAsync(
             repository,
-            ["config", "--local", "--name-only", "--get-regexp", "^filter\\."],
+            ["config", "--local", "--includes", "--name-only", "--list"],
             required: false);
-        if (result.ExitCode == 1 && string.IsNullOrWhiteSpace(result.StdOut))
-            return;
         if (!result.Success)
             throw new AgentException(
-                $"Could not inspect local Git filter configuration in {repository}: {result.StdErr.Trim()}");
+                $"Could not inspect local Git configuration in {repository}: {result.StdErr.Trim()}");
 
-        var unsafeKeys = result.StdOut
+        EnsureNoUnsafeRepositoryConfigKeys(repository, result.StdOut);
+    }
+
+    internal static void EnsureNoUnsafeRepositoryConfigKeys(
+        string displayPath,
+        string configKeys)
+    {
+        var unsafeKeys = configKeys
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(AgentGitInvocation.IsExecutableFilterConfigKey)
+            .Where(AgentGitInvocation.IsUnsafeRepositoryConfigKey)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (unsafeKeys.Length > 0)
             throw new AgentException(
-                $"Executable Git filters are not permitted in deployment metadata for {repository}: " +
+                $"Executable or externally included Git configuration is not permitted for {displayPath}: " +
                 string.Join(",", unsafeKeys));
+    }
+
+    private async Task AssertNoUnsafeMetadataConfigsAsync(IEnumerable<string> roots)
+    {
+        var configFiles = roots
+            .SelectMany(GitMetadataEnumeration.EnumerateFiles)
+            .Where(path =>
+            {
+                var name = Path.GetFileName(path);
+                return string.Equals(name, "config", StringComparison.Ordinal) ||
+                       string.Equals(name, "config.worktree", StringComparison.Ordinal);
+            })
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        foreach (var configFile in configFiles)
+        {
+            var result = await ProcessRunner.RunAsync(
+                COMMAND_GIT,
+                AgentGitInvocation.BuildArguments(
+                    _config.AppDirectory,
+                    ["config", "--file", configFile, "--name-only", "--list"]),
+                TimeSpan.FromSeconds(10),
+                environment: AgentGitEnvironment.Create(),
+                clearEnvironment: true);
+            if (!result.Success)
+                throw new AgentException(
+                    $"Could not inspect Git metadata configuration {configFile}: {result.StdErr.Trim()}");
+
+            EnsureNoUnsafeRepositoryConfigKeys(configFile, result.StdOut);
+        }
     }
 
     private async Task<RepositoryDurabilitySnapshot> VerifyRepositoryExactAsync(
