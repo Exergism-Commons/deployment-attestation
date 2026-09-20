@@ -333,11 +333,7 @@ expected_timer_active() {
 restore_rc=0
 
 unit_has_processes() {
-  local unit="$1" cgroup
-  if ! cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)"; then
-    echo "Could not determine ControlGroup for $unit" >&2
-    return 2
-  fi
+  local cgroup="$1"
   [[ -n "$cgroup" ]] || return 1
   python3 - "$cgroup" <<'PY'
 import pathlib
@@ -359,44 +355,46 @@ PY
 }
 
 unit_is_quiescent() {
-  local unit="$1" load active main_pid cgroup_rc
+  local unit="$1"
+  local load active main_pid cgroup cgroup_rc
+  local load_after active_after main_pid_after cgroup_after
+
   if ! load="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
     echo "Could not determine LoadState for $unit" >&2
     return 1
   fi
-  [[ "$load" == "not-found" ]] && return 0
+  if [[ "$load" == "not-found" ]]; then
+    load_after="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)" || return 1
+    [[ "$load_after" == "not-found" ]] || return 1
+    return 0
+  fi
   [[ -n "$load" ]] || {
     echo "Could not determine LoadState for $unit" >&2
     return 1
   }
 
-  if ! active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)"; then
-    echo "Could not determine ActiveState for $unit" >&2
-    return 1
-  fi
-  [[ -n "$active" ]] || {
-    echo "Could not determine ActiveState for $unit" >&2
-    return 1
-  }
+  active="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || return 1
+  main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
+  cgroup="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)" || return 1
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
-  if [[ "$unit" == *.timer ]]; then
-    return 0
-  fi
-  if ! main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)"; then
-    echo "Could not determine MainPID for $unit" >&2
-    return 1
-  fi
-  [[ -n "$main_pid" ]] || {
-    echo "Could not determine MainPID for $unit" >&2
-    return 1
-  }
   [[ "$main_pid" == 0 ]] || return 1
-  if unit_has_processes "$unit"; then
+
+  if unit_has_processes "$cgroup"; then
     return 1
   else
     cgroup_rc=$?
     (( cgroup_rc == 1 )) || return 1
   fi
+
+  load_after="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)" || return 1
+  active_after="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" || return 1
+  main_pid_after="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)" || return 1
+  cgroup_after="$(systemctl show "$unit" --property=ControlGroup --value 2>/dev/null)" || return 1
+
+  [[ "$load_after" == "$load" ]] || return 1
+  [[ "$active_after" == "inactive" || "$active_after" == "failed" ]] || return 1
+  [[ "$main_pid_after" == 0 ]] || return 1
+  [[ "$cgroup_after" == "$cgroup" ]] || return 1
   return 0
 }
 
