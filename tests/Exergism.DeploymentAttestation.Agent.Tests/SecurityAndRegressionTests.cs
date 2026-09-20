@@ -1764,4 +1764,51 @@ public sealed class SecurityAndRegressionTests
         CheckoutWriteExclusion.EnsureMutationTreeTrusted(root);
     }
 
+
+    [TestMethod]
+    public void TrustedRegularFileBytesRequireExecutableWhenRequested()
+    {
+        using var environment = TestEnvironment.Create();
+        var script = Path.Combine(environment.Root, "smoke-script");
+        File.WriteAllText(script, "#!/bin/sh\nexit 0\n");
+        File.SetUnixFileMode(
+            script,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        TestAssert.Throws<AgentException>(
+            () => Durability.ReadTrustedRegularFileBytes(
+                script,
+                "smoke script",
+                requireExecutable: true));
+
+        File.SetUnixFileMode(
+            script,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite |
+            UnixFileMode.UserExecute);
+
+        var bytes = Durability.ReadTrustedRegularFileBytes(
+            script,
+            "smoke script",
+            requireExecutable: true);
+        CollectionAssert.AreEqual(
+            System.Text.Encoding.UTF8.GetBytes("#!/bin/sh\nexit 0\n"),
+            bytes);
+    }
+
+    [TestMethod]
+    public void TrustedSmokeSourceRejectsWorldWritableParentAttributes()
+    {
+        TestAssert.Throws<AgentException>(
+            () => Durability.EnsureTrustedDirectoryAttributes(
+                ownerUid: Native.geteuid(),
+                mode: UnixFileMode.UserRead |
+                      UnixFileMode.UserWrite |
+                      UnixFileMode.UserExecute |
+                      UnixFileMode.OtherWrite |
+                      UnixFileMode.OtherExecute,
+                effectiveUid: Native.geteuid(),
+                path: "/untrusted-smoke-parent"));
+    }
+
 }
