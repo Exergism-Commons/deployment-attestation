@@ -19,8 +19,9 @@ if [[ -z "${EC_NATIVE_AGENT_BINARY:-}" ]]; then
   exit 1
 fi
 AGENT_SOURCE="$EC_NATIVE_AGENT_BINARY"
-AGENT_INSTALL_SOURCE="$AGENT_SOURCE"
+AGENT_INSTALL_SOURCE=""
 NATIVE_AGENT_STAGE=""
+TMP_MANIFEST=""
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
@@ -92,10 +93,108 @@ for command in curl git python3 sha256sum systemctl systemd-run systemd-analyze 
   }
 done
 
-if [[ ! -f "$AGENT_SOURCE" || -L "$AGENT_SOURCE" || ! -x "$AGENT_SOURCE" ]]; then
-  echo "EC_NATIVE_AGENT_BINARY must point to a real executable Native AOT binary." >&2
-  exit 1
-fi
+cleanup_installer_temporaries() {
+  if [[ -n "$TMP_MANIFEST" ]]; then
+    rm -f -- "$TMP_MANIFEST" || true
+    TMP_MANIFEST=""
+  fi
+  if [[ -n "$NATIVE_AGENT_STAGE" ]]; then
+    rm -rf -- "$NATIVE_AGENT_STAGE" || true
+    NATIVE_AGENT_STAGE=""
+  fi
+}
+trap cleanup_installer_temporaries EXIT
+
+# Bind EC_NATIVE_AGENT_BINARY immediately to one no-follow file descriptor and
+# publish only those verified bytes into a root-private staging directory. The
+# source pathname may live in a user-writable build tree, but replacing that
+# pathname after this point cannot change the candidate that preflight or
+# installation executes.
+NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
+chmod 0700 "$NATIVE_AGENT_STAGE"
+chown root:root "$NATIVE_AGENT_STAGE"
+AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
+
+python3 - "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:3]
+flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+source_fd = os.open(source, flags)
+
+def identity(st):
+    return (
+        st.st_dev,
+        st.st_ino,
+        st.st_mode,
+        st.st_size,
+        st.st_mtime_ns,
+        st.st_ctime_ns,
+    )
+
+try:
+    before = os.fstat(source_fd)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit("EC_NATIVE_AGENT_BINARY must be a regular file")
+    if before.st_mode & 0o111 == 0:
+        raise SystemExit("EC_NATIVE_AGENT_BINARY must be executable")
+
+    dest_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_CLOEXEC
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    dest_fd = os.open(destination, dest_flags, 0o500)
+    digest = hashlib.sha256()
+    try:
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(dest_fd, view)
+                view = view[written:]
+
+        os.fchmod(dest_fd, 0o500)
+        os.fchown(dest_fd, 0, 0)
+        os.fsync(dest_fd)
+    finally:
+        os.close(dest_fd)
+
+    after_copy = os.fstat(source_fd)
+    if identity(after_copy) != identity(before):
+        raise SystemExit("EC_NATIVE_AGENT_BINARY changed while being snapshotted")
+
+    os.lseek(source_fd, 0, os.SEEK_SET)
+    verify = hashlib.sha256()
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        verify.update(chunk)
+
+    after_verify = os.fstat(source_fd)
+    if identity(after_verify) != identity(before) or verify.digest() != digest.digest():
+        raise SystemExit("EC_NATIVE_AGENT_BINARY changed during snapshot verification")
+finally:
+    os.close(source_fd)
+
+stage_dir_fd = os.open(
+    os.path.dirname(destination),
+    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+)
+try:
+    os.fsync(stage_dir_fd)
+finally:
+    os.close(stage_dir_fd)
+PY
 
 exec 9>"$INSTALL_LOCK"
 flock -n 9 || {
@@ -249,8 +348,8 @@ fi
 rm -rf "$INSTALL_COMMITTED_DIR"
 durable_sync_paths "$INSTALL_STATE_ROOT"
 
-tmp_manifest="$(mktemp)"
-trap 'rm -f "$tmp_manifest"' EXIT
+TMP_MANIFEST="$(mktemp)"
+tmp_manifest="$TMP_MANIFEST"
 curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 \
   --proto '=https' --proto-redir '=https' -fsSL "$MANIFEST_URL" -o "$tmp_manifest"   || { echo "runtime-main does not publish DEPLOYMENT_MANIFEST.json; refusing to enable updater." >&2; exit 1; }
 python3 "$ROOT/agent/validate-release-manifest.py" "$ROOT/spec/release-manifest-v0.1.schema.json" "$tmp_manifest" || {
@@ -273,23 +372,10 @@ for arch in ("amd64", "arm64"):
     assert re.fullmatch(r"[0-9a-f]{64}", a.get("sha256", ""))
 PY
 rm -f "$tmp_manifest"
-trap - EXIT
+TMP_MANIFEST=""
 
-cleanup_native_stage() {
-  if [[ -n "$NATIVE_AGENT_STAGE" ]]; then
-    rm -rf -- "$NATIVE_AGENT_STAGE" || true
-    NATIVE_AGENT_STAGE=""
-  fi
-}
-
-# Pin the exact Native AOT candidate into a root-owned, process-private staging
-# directory. All preflight checks and installation consume this same copy, so a
-# later mutation/replacement of EC_NATIVE_AGENT_BINARY cannot change what gets
-# published.
-NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
-trap cleanup_native_stage EXIT
-AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
-install -o root -g root -m 0500 "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE"
+# AGENT_INSTALL_SOURCE was bound to a descriptor-verified byte snapshot at
+# installer admission, before any lengthy recovery/publication work.
 
 native_preflight_config="$ENV_FILE"
 if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
