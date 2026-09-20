@@ -873,6 +873,9 @@ internal static class Native
     internal static extern int fsync(int fd);
 
     [DllImport("libc", SetLastError = true)]
+    internal static extern int ioctl(int fd, ulong request, ref int value);
+
+    [DllImport("libc", SetLastError = true)]
     internal static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
 
     [DllImport("libc", SetLastError = true)]
