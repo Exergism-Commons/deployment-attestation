@@ -349,7 +349,6 @@ wait_target_healthy_active() {
   fi
   "$ARTIFACT_FENCE_AUDITOR" || {
     echo "Production resolver failed the live artifact-fence audit during recovery finalization." >&2
-    quiesce_target_after_failed_validation || true
     return 1
   }
 }
@@ -390,8 +389,17 @@ settle_target_after_inactive_baseline() {
 if [[ "$RECOVERY_MODE" == "normal" ]]; then
   if [[ "$target_was_active" == 1 ]]; then
     systemctl start "$TARGET_UNIT"
-    wait_target_healthy_active
+    if ! wait_target_healthy_active; then
+      # A target that recovery itself restored to the active state must never
+      # remain serving after any post-start validation failure (state, local
+      # probe, optional smoke, or artifact-fence validation).
+      quiesce_target_after_failed_validation || true
+      echo "CRITICAL: restored active target failed recovery finalization health validation; recovered marker retained." >&2
+      exit 1
+    fi
   else
+    # A later explicit start did not originate from recovery. Observe it but do
+    # not cancel/reverse it merely because finalization cannot validate it.
     settle_target_after_inactive_baseline
   fi
 fi
