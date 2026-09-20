@@ -81,7 +81,7 @@ internal sealed class DeploymentAgent
 
     private async Task BootstrapStateAsync()
     {
-        if (File.Exists(_config.CurrentStateFile))
+        if (Durability.PathExistsNoFollow(_config.CurrentStateFile))
             return;
 
         var activeState = await _systemd.ShowAsync(SYSTEMD_ACTIVE_STATE);
@@ -210,15 +210,18 @@ internal sealed class DeploymentAgent
 
     private async Task RollbackTransactionAsync()
     {
-        if (!File.Exists(_config.TransactionFile))
+        if (!Durability.PathExistsNoFollow(_config.TransactionFile))
             return;
 
         var tx = Protocol.ReadTransaction(_config.TransactionFile);
         var backupRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_config.BackupDirectory));
         var backup = Path.GetFullPath(tx.BackupBinary);
-        if (!IsUnder(backup, backupRoot) || !File.Exists(backup))
+        if (!IsUnder(backup, backupRoot) || !Durability.PathExistsNoFollow(backup))
             throw new AgentException("Rollback backup is outside the backup directory or missing");
-        if (Durability.Sha256(backup) != tx.OldBinarySha256)
+        var backupBytes = Durability.ReadTrustedRegularFileBytes(
+            backup,
+            "rollback backup");
+        if (Convert.ToHexStringLower(SHA256.HashData(backupBytes)) != tx.OldBinarySha256)
             throw new AgentException("Rollback backup digest mismatch");
 
         Warn($"Recovering transaction to {tx.OldSourceCommit}");
@@ -227,7 +230,7 @@ internal sealed class DeploymentAgent
         await _git.SwitchSourceAsync(tx.OldSourceCommit, fetchFirst: false);
 
         var rollbackPath = _config.AppBinary + ".rollback";
-        File.Copy(backup, rollbackPath, overwrite: true);
+        await File.WriteAllBytesAsync(rollbackPath, backupBytes);
         File.SetUnixFileMode(
             rollbackPath,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
@@ -281,7 +284,7 @@ internal sealed class DeploymentAgent
 
     private async Task RecoverTransactionAsync()
     {
-        if (!File.Exists(_config.TransactionFile))
+        if (!Durability.PathExistsNoFollow(_config.TransactionFile))
             return;
 
         var tx = Protocol.ReadTransaction(_config.TransactionFile);
