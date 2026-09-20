@@ -927,15 +927,17 @@ jobs:
           first_restore = recovery.index('restore_artifact "$key"')
           validate = recovery.index('"$VALIDATOR" || restore_rc=1')
           retire = recovery.index('mv -T -- "$INSTALL_RECOVERING_DIR" "$INSTALL_RECOVERED_DIR"')
+          direct_health_helper = recovery.index('wait_restored_target_healthy()')
+          direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR" || return 1', direct_health_helper)
           direct_start = recovery.index('if ! systemctl start "$TARGET_UNIT"')
-          direct_fence = recovery.index('"$ARTIFACT_FENCE_AUDITOR"', direct_start)
+          direct_health_call = recovery.index('|| ! wait_restored_target_healthy; then', direct_start)
           owned_fence_release = recovery.index('release_owned_target_start_fence || {', validate)
-          direct_fence_quiesce = recovery.index('fence_and_quiesce_target_after_failure', direct_fence)
+          direct_fence_quiesce = recovery.index('fence_and_quiesce_target_after_failure', direct_health_call)
           direct_restart = recovery.index('previously active resolver could not be restored healthy after direct recovery')
           timer_restore = recovery.index('# Restore timer activation only after the old generation is fully restored')
           assert dependent_quiesce_helper < preserve_boot_start < updater_quiesce_call < target_quiesce_call < hard_quiesce
           assert hard_quiesce < first_restore
-          assert validate < owned_fence_release < retire < direct_start < direct_fence < direct_fence_quiesce < direct_restart < timer_restore
+          assert validate < owned_fence_release < retire < direct_health_helper < direct_fence < direct_start < direct_health_call < direct_fence_quiesce < direct_restart < timer_restore
 
           timer_baseline = text.index('timer_was_active="$(capture_active_baseline "$TIMER_UNIT")"')
           pretxn_guard = text.index('trap restore_pretransaction_timer_on_exit EXIT')
@@ -953,10 +955,13 @@ jobs:
           phase_to_recovering = recovery.index('mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"')
           assert select_recovered < recovered_completion < phase_to_recovering
 
-          live_fence = text.index('verify_production_artifact_fence', text.index('systemctl start "$TARGET_UNIT"'))
-          timer_start = text.index('systemctl start "$TIMER_UNIT"', live_fence)
+          install_health_helper = text.index('wait_target_healthy()')
+          live_fence = text.index('verify_production_artifact_fence || return 1', install_health_helper)
+          target_start = text.index('systemctl start "$TARGET_UNIT"')
+          install_health_call = text.index('wait_target_healthy', target_start)
+          timer_start = text.index('systemctl start "$TIMER_UNIT"', install_health_call)
           final_commit = text.index('finalize_install_transaction', timer_start)
-          assert live_fence < timer_start < final_commit
+          assert install_health_helper < live_fence < target_start < install_health_call < timer_start < final_commit
 
           finalizer_text = Path('install/finalize-id-exergism-recovery.sh').read_text()
           finalizer_health = finalizer_text.index('wait_target_healthy_active()')
