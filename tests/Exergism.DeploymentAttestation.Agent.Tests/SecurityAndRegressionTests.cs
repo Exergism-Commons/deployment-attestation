@@ -1458,4 +1458,39 @@ public sealed class SecurityAndRegressionTests
             () => GitRepository.EnsureGitMetadataSnapshotsUnchanged(snapshots));
     }
 
+
+    [TestMethod]
+    public void GitMetadataSnapshotRejectsSymlinkedLooseRef()
+    {
+        using var environment = TestEnvironment.Create();
+        var metadataRoot = Path.Combine(environment.Root, "metadata-symlink");
+        var refs = Path.Combine(metadataRoot, "refs", "heads");
+        Directory.CreateDirectory(refs);
+
+        var external = Path.Combine(environment.Root, "external-ref");
+        File.WriteAllText(external, new string('a', 40) + "\n");
+        File.CreateSymbolicLink(Path.Combine(refs, "main"), external);
+
+        TestAssert.Throws<AgentException>(
+            () => GitMetadataDurability.Capture(metadataRoot));
+    }
+
+    [TestMethod]
+    public void CheckoutWriteExclusionDetectsWritableProcFdModes()
+    {
+        Assert.IsFalse(
+            CheckoutWriteExclusion.IsWritableDescriptor("flags:\t0100000"));
+        Assert.IsTrue(
+            CheckoutWriteExclusion.IsWritableDescriptor("flags:\t0100001"));
+        Assert.IsTrue(
+            CheckoutWriteExclusion.IsWritableDescriptor("flags:\t0100002"));
+    }
+
+    [TestMethod]
+    public void CheckoutWriteExclusionRejectsMalformedProcFdModes()
+    {
+        TestAssert.Throws<AgentException>(
+            () => CheckoutWriteExclusion.IsWritableDescriptor("flags:\tnot-octal"));
+    }
+
 }
