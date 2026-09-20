@@ -827,6 +827,9 @@ internal struct LinuxStatx
     [FieldOffset(0)]
     internal uint Mask;
 
+    [FieldOffset(16)]
+    internal uint LinkCount;
+
     [FieldOffset(20)]
     internal uint Uid;
 
