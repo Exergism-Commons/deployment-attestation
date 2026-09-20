@@ -35,10 +35,10 @@ static async Task<int> RunAsync(string[] args)
         if (coordination is null)
             return 0;
 
-        Durability.EnsureDirectory(
+        Durability.EnsureTrustedDirectory(
             config.StateDirectory,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        Durability.EnsureDirectory(
+        Durability.EnsureTrustedDirectory(
             config.BackupDirectory,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
