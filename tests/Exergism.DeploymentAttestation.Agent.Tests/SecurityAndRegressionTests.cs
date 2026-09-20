@@ -1625,4 +1625,28 @@ public sealed class SecurityAndRegressionTests
             AgentGitInvocation.IsExecutableFilterConfigKey("core.hooksPath"));
     }
 
+
+    [TestMethod]
+    public void GitConfigPolicyRejectsExecutableFiltersAndIncludes()
+    {
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureNoUnsafeRepositoryConfigKeys(
+                "/checkout/.git/config",
+                "filter.demo.process\nremote.origin.url\n"));
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureNoUnsafeRepositoryConfigKeys(
+                "/checkout/.git/config",
+                "include.path\nremote.origin.url\n"));
+
+        TestAssert.Throws<AgentException>(
+            () => GitRepository.EnsureNoUnsafeRepositoryConfigKeys(
+                "/checkout/.git/config",
+                "includeif.gitdir:/tmp/other.path\nremote.origin.url\n"));
+
+        GitRepository.EnsureNoUnsafeRepositoryConfigKeys(
+            "/checkout/.git/config",
+            "remote.origin.url\ncore.repositoryformatversion\n");
+    }
+
 }
