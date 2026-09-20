@@ -568,7 +568,6 @@ jobs:
           grep -Fq 'retrying while locks remain held' install/finalize-id-exergism-recovery.sh
           ! grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
           grep -Fq 'quiesce_target_after_failed_validation()' install/finalize-id-exergism-recovery.sh
-          grep -Fq 'quiesce_target_after_failed_validation || true' install/finalize-id-exergism-recovery.sh
           grep -Fq 'wait_timer_active()' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Timer did not reach a provably quiescent terminal state.' install/finalize-id-exergism-recovery.sh
           grep -Fq 'Could not re-check timer enablement after runtime restoration.' install/finalize-id-exergism-recovery.sh
