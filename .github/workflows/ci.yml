@@ -153,6 +153,8 @@ jobs:
           ! grep -Fq 'ROOT/agent/ec-deployment-agent.sh' install/install-id-exergism.sh
           grep -Fq 'NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"' install/install-id-exergism.sh
           grep -Fq 'AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"' install/install-id-exergism.sh
+          grep -Fq 'cleanup_installer_temporaries()' install/install-id-exergism.sh
+          ! grep -Fq 'cleanup_native_stage' install/install-id-exergism.sh
           grep -Fq 'source_fd = os.open(source, flags)' install/install-id-exergism.sh
           grep -Fq 'os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)' install/install-id-exergism.sh
           grep -Fq 'after_copy = os.fstat(source_fd)' install/install-id-exergism.sh
