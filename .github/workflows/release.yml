@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - VERSION
+      - .github/workflows/release.yml
   workflow_dispatch:
 
 permissions:
@@ -37,39 +38,66 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Refuse published release and clean stale draft
+      - name: Resolve release state
+        id: release_state
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
+          git fetch --tags --force
+
+          published=false
           if release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null)"; then
             is_draft="$(jq -r '.draft' <<<"$release_json")"
-            if [[ "$is_draft" != "true" ]]; then
-              echo "Published release $TAG already exists; bump VERSION instead of overwriting it." >&2
-              exit 1
+            if [[ "$is_draft" == "true" ]]; then
+              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+            else
+              published=true
             fi
-            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
           fi
 
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            source_sha="$(git rev-list -n 1 "$TAG")"
+          else
+            source_sha="$GITHUB_SHA"
+          fi
+
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout immutable release source
+        if: steps.release_state.outputs.published != 'true'
+        env:
+          SOURCE_SHA: ${{ steps.release_state.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$SOURCE_SHA"
+
       - name: Set up .NET 10
+        if: steps.release_state.outputs.published != 'true'
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           dotnet-version: 10.0.x
 
       - name: Install Native AOT toolchain
+        if: steps.release_state.outputs.published != 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
 
       - name: Build with AOT analyzers
+        if: steps.release_state.outputs.published != 'true'
         run: dotnet build src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release
 
       - name: Run unit tests
+        if: steps.release_state.outputs.published != 'true'
         run: dotnet test tests/Exergism.DeploymentAttestation.Agent.Tests/Exergism.DeploymentAttestation.Agent.Tests.csproj -c Release
 
       - name: Run managed self-test
+        if: steps.release_state.outputs.published != 'true'
         run: dotnet run --project src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release -- self-test
 
       - name: Publish linux-x64 Native AOT
+        if: steps.release_state.outputs.published != 'true'
         run: |
           set -euo pipefail
           dotnet publish src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj \
@@ -80,14 +108,18 @@ jobs:
           ! ldd artifacts/linux-x64/ec-deployment-agent 2>&1 | grep -E 'libhostfxr|libcoreclr|hostpolicy'
 
       - name: Run Native AOT self-test
+        if: steps.release_state.outputs.published != 'true'
         run: ./artifacts/linux-x64/ec-deployment-agent self-test
 
       - name: Validate Native AOT host config
+        if: steps.release_state.outputs.published != 'true'
         run: EC_ATTESTATION_CONFIG="$PWD/examples/id.exergism.org.env.example" ./artifacts/linux-x64/ec-deployment-agent validate-config
 
       - name: Assemble release assets
+        if: steps.release_state.outputs.published != 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_SHA: ${{ steps.release_state.outputs.source_sha }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/release
@@ -98,7 +130,7 @@ jobs:
           installer_sha256="$(sha256sum artifacts/release/install-id-exergism.sh | awk '{print $1}')"
           generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          python3 - "$TAG" "$GITHUB_SHA" "$generated_at" "$agent_sha256" "$installer_sha256" <<'PY'
+          python3 - "$TAG" "$SOURCE_SHA" "$generated_at" "$agent_sha256" "$installer_sha256" <<'PY'
           import json
           import pathlib
           import sys
@@ -151,29 +183,32 @@ jobs:
           - Root-owned, digest-verified privileged installer bootstrap.
           - Independent agent self-health and deployment attestation protocol v0.1.
 
-          Source commit: \`$GITHUB_SHA\`
+          Source commit: \`$SOURCE_SHA\`
 
           The release includes \`DEPLOYMENT_MANIFEST.json\` and \`SHA256SUMS\`; verify the installer and Native AOT binary before installing on a host.
           EOF
 
       - name: Create immutable tag
+        if: steps.release_state.outputs.published != 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_SHA: ${{ steps.release_state.outputs.source_sha }}
         run: |
           set -euo pipefail
           git fetch --tags --force
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             existing="$(git rev-list -n 1 "$TAG")"
-            [[ "$existing" == "$GITHUB_SHA" ]] || {
-              echo "Existing tag $TAG points to $existing, expected $GITHUB_SHA." >&2
+            [[ "$existing" == "$SOURCE_SHA" ]] || {
+              echo "Existing tag $TAG points to $existing, expected $SOURCE_SHA." >&2
               exit 1
             }
           else
-            git tag "$TAG" "$GITHUB_SHA"
+            git tag "$TAG" "$SOURCE_SHA"
             git push origin "refs/tags/$TAG"
           fi
 
       - name: Create draft GitHub release
+        if: steps.release_state.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
@@ -191,12 +226,17 @@ jobs:
             artifacts/release/SHA256SUMS
 
       - name: Verify draft assets and publish
+        if: steps.release_state.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          expected=DEPLOYMENT_MANIFEST.json\nSHA256SUMS\nec-deployment-agent-linux-x64\ninstall-id-exergism.sh'
+          expected="$(printf '%s\n' \
+            DEPLOYMENT_MANIFEST.json \
+            SHA256SUMS \
+            ec-deployment-agent-linux-x64 \
+            install-id-exergism.sh | sort)"
           actual="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
           [[ "$actual" == "$expected" ]] || {
             echo "Draft release asset set is incomplete or unexpected." >&2
