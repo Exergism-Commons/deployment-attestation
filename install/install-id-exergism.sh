@@ -6,7 +6,151 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The documented entrypoint is a user-writable checkout. Bash reads scripts
+# incrementally, so before doing any long-running privileged work bind the
+# already-open script inode, copy it from the Bash script descriptor into a
+# root-private /run directory, and immediately re-exec that immutable snapshot.
+# CWD is deliberately preserved across exec; the trusted second stage pins "."
+# as the repository root, so a parent rename/replacement cannot redirect it.
+if [[ -z "${EC_INSTALLER_TRUSTED_STAGE:-}" ]]; then
+  command -v python3 >/dev/null 2>&1 || {
+    echo "Required dependency not found: python3" >&2
+    exit 1
+  }
+  command -v mktemp >/dev/null 2>&1 || {
+    echo "Required dependency not found: mktemp" >&2
+    exit 1
+  }
+
+  bootstrap_stage="$(mktemp -d "/run/ec-deployment-attestation-installer.XXXXXX")"
+  chmod 0700 "$bootstrap_stage"
+  chown root:root "$bootstrap_stage"
+  bootstrap_script="$bootstrap_stage/install-id-exergism.sh"
+  bootstrap_digest="$bootstrap_stage/original-installer.sha256"
+
+  python3 - "/proc/$/fd/255" "$bootstrap_script" "$bootstrap_digest" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source_procfd, destination, digest_path = sys.argv[1:4]
+fd = os.open(source_procfd, os.O_RDONLY | os.O_CLOEXEC)
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit("installer source descriptor is not a regular file")
+
+    digest = hashlib.sha256()
+    offset = 0
+    out_fd = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+        0o500,
+    )
+    try:
+        while True:
+            chunk = os.pread(fd, 1024 * 1024, offset)
+            if not chunk:
+                break
+            offset += len(chunk)
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(out_fd, view)
+                view = view[written:]
+        os.fchmod(out_fd, 0o500)
+        os.fchown(out_fd, 0, 0)
+        os.fsync(out_fd)
+    finally:
+        os.close(out_fd)
+
+    after = os.fstat(fd)
+    identity = lambda st: (
+        st.st_dev, st.st_ino, st.st_mode, st.st_size,
+        st.st_mtime_ns, st.st_ctime_ns,
+    )
+    if identity(after) != identity(before):
+        raise SystemExit("installer changed while being snapshotted")
+
+    verify = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(fd, 1024 * 1024, offset)
+        if not chunk:
+            break
+        offset += len(chunk)
+        verify.update(chunk)
+    if verify.digest() != digest.digest() or identity(os.fstat(fd)) != identity(before):
+        raise SystemExit("installer changed during snapshot verification")
+finally:
+    os.close(fd)
+
+digest_fd = os.open(
+    digest_path,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+    0o400,
+)
+try:
+    os.write(digest_fd, digest.hexdigest().encode("ascii") + b"\n")
+    os.fchmod(digest_fd, 0o400)
+    os.fchown(digest_fd, 0, 0)
+    os.fsync(digest_fd)
+finally:
+    os.close(digest_fd)
+
+dir_fd = os.open(
+    os.path.dirname(destination),
+    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+
+  EC_INSTALLER_TRUSTED_STAGE="$bootstrap_stage" exec "$bootstrap_script"
+fi
+
+INSTALLER_TRUSTED_STAGE="$EC_INSTALLER_TRUSTED_STAGE"
+case "$INSTALLER_TRUSTED_STAGE" in
+  /run/ec-deployment-attestation-installer.*) ;;
+  *)
+    echo "Untrusted installer staging path." >&2
+    exit 1
+    ;;
+esac
+[[ -d "$INSTALLER_TRUSTED_STAGE" && ! -L "$INSTALLER_TRUSTED_STAGE" ]] || {
+  echo "Trusted installer staging directory is invalid." >&2
+  exit 1
+}
+[[ "$(stat -c '%u:%a' -- "$INSTALLER_TRUSTED_STAGE")" == "0:700" ]] || {
+  echo "Trusted installer staging directory must be root-owned mode 0700." >&2
+  exit 1
+}
+[[ "${BASH_SOURCE[0]}" == "$INSTALLER_TRUSTED_STAGE/install-id-exergism.sh" ]] || {
+  echo "Trusted installer did not re-execute from its staged pathname." >&2
+  exit 1
+}
+[[ -f "${BASH_SOURCE[0]}" && ! -L "${BASH_SOURCE[0]}" ]] || {
+  echo "Trusted installer snapshot is not a regular file." >&2
+  exit 1
+}
+[[ "$(stat -c '%u:%a' -- "${BASH_SOURCE[0]}")" == "0:500" ]] || {
+  echo "Trusted installer snapshot must be root-owned mode 0500." >&2
+  exit 1
+}
+[[ -f "$INSTALLER_TRUSTED_STAGE/original-installer.sha256" &&
+   ! -L "$INSTALLER_TRUSTED_STAGE/original-installer.sha256" ]] || {
+  echo "Trusted installer digest is missing." >&2
+  exit 1
+}
+EXPECTED_INSTALLER_SHA256="$(cat "$INSTALLER_TRUSTED_STAGE/original-installer.sha256")"
+[[ "$EXPECTED_INSTALLER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "Trusted installer digest is malformed." >&2
+  exit 1
+}
+
 SERVICE="id.exergism.org"
 TARGET_UNIT="id-exergism.service"
 AGENT_RUN_UNIT="ec-deployment-attestation@${SERVICE}.service"
@@ -99,31 +243,33 @@ cleanup_installer_temporaries() {
     rm -f -- "$TMP_MANIFEST" || true
     TMP_MANIFEST=""
   fi
-  if [[ -n "$NATIVE_AGENT_STAGE" ]]; then
-    rm -rf -- "$NATIVE_AGENT_STAGE" || true
+  if [[ -n "$INSTALLER_TRUSTED_STAGE" ]]; then
+    rm -rf -- "$INSTALLER_TRUSTED_STAGE" || true
+    INSTALLER_TRUSTED_STAGE=""
     NATIVE_AGENT_STAGE=""
+    REPO_INPUT_STAGE=""
   fi
 }
 trap cleanup_installer_temporaries EXIT
 
-# Bind EC_NATIVE_AGENT_BINARY immediately to one no-follow file descriptor and
-# publish only those verified bytes into a root-private staging directory. The
-# source pathname may live in a user-writable build tree, but replacing that
-# pathname after this point cannot change the candidate that preflight or
-# installation executes.
-NATIVE_AGENT_STAGE="$(mktemp -d "/run/ec-deployment-attestation-native.XXXXXX")"
-chmod 0700 "$NATIVE_AGENT_STAGE"
+# The trusted second stage inherits the caller's original CWD. Open "." itself
+# to bind the repository directory inode; unlike reopening a pathname, this
+# remains the same directory even if its parent renames/replaces the checkout.
+# Verify that its installer bytes are exactly the script snapshot that is now
+# executing, then snapshot every remaining repository input relative to that FD.
+NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"
+mkdir -m 0700 "$NATIVE_AGENT_STAGE"
 chown root:root "$NATIVE_AGENT_STAGE"
 AGENT_INSTALL_SOURCE="$NATIVE_AGENT_STAGE/ec-deployment-agent"
 REPO_INPUT_STAGE="$NATIVE_AGENT_STAGE/repo"
 
-python3 - "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE" "$ROOT" "$REPO_INPUT_STAGE" <<'PY'
+python3 - "$AGENT_SOURCE" "$AGENT_INSTALL_SOURCE" "$EXPECTED_INSTALLER_SHA256" "$REPO_INPUT_STAGE" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-agent_source, agent_destination, root, repo_stage = sys.argv[1:5]
+agent_source, agent_destination, expected_installer_sha256, repo_stage = sys.argv[1:5]
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 O_CLOEXEC = os.O_CLOEXEC
 
@@ -219,6 +365,7 @@ os.chmod(repo_stage, 0o700)
 os.chown(repo_stage, 0, 0)
 
 repo_inputs = (
+    ("install/install-id-exergism.sh", 0o500),
     ("install/validate-id-exergism-generation.sh", 0o500),
     ("install/verify-id-exergism-artifact-fence.sh", 0o500),
     ("agent/validate-release-manifest.py", 0o500),
@@ -236,8 +383,32 @@ repo_inputs = (
     ("packaging/id-exergism-artifact-fence.conf", 0o400),
 )
 
-root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+root_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | O_CLOEXEC)
 try:
+    installer_fd = open_repo_file_no_symlinks(
+        root_fd,
+        "install/install-id-exergism.sh",
+    )
+    try:
+        installer_hash = hashlib.sha256()
+        offset = 0
+        before = os.fstat(installer_fd)
+        while True:
+            chunk = os.pread(installer_fd, 1024 * 1024, offset)
+            if not chunk:
+                break
+            offset += len(chunk)
+            installer_hash.update(chunk)
+        after = os.fstat(installer_fd)
+        if identity(after) != identity(before):
+            raise SystemExit("repository installer changed during root binding")
+        if installer_hash.hexdigest() != expected_installer_sha256:
+            raise SystemExit(
+                "current working directory is not the repository that launched the trusted installer"
+            )
+    finally:
+        os.close(installer_fd)
+
     for relative, mode in repo_inputs:
         source_fd = open_repo_file_no_symlinks(root_fd, relative)
         try:
