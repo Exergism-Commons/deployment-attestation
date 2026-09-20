@@ -588,6 +588,28 @@ internal static class CheckoutWriteExclusion
         }
     }
 
+    internal static bool IsImmutableNoFollow(string path)
+    {
+        var fd = Native.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0)
+            throw new AgentException(
+                $"Could not open checkout path to inspect write exclusion: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+
+        try
+        {
+            EnsureDescriptorIsRegularOrDirectory(fd, path);
+            var flags = 0;
+            if (Native.ioctl(fd, FS_IOC_GETFLAGS, ref flags) != 0)
+                throw new AgentException(
+                    $"Filesystem does not expose inode flags required for checkout write exclusion: {path}; errno={System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}");
+            return (flags & FS_IMMUTABLE_FL) != 0;
+        }
+        finally
+        {
+            _ = Native.close(fd);
+        }
+    }
+
     private static void EnsureImmutableNoFollow(string path)
     {
         var fd = Native.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
@@ -1165,7 +1187,12 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var root in roots)
             _ = GitMetadataDurability.Capture(root);
 
-        foreach (var root in roots)
+        var restoreSeal = roots.ToDictionary(
+            root => root,
+            CheckoutWriteExclusion.IsImmutableNoFollow,
+            StringComparer.Ordinal);
+
+        foreach (var root in roots.Where(root => restoreSeal[root]))
             CheckoutWriteExclusion.SetTreeImmutable(root, immutable: false);
 
         Exception? cleanupFailure = null;
@@ -1190,7 +1217,7 @@ internal sealed class GitRepository(AgentConfig config)
 
         try
         {
-            foreach (var root in roots)
+            foreach (var root in roots.Where(root => restoreSeal[root]))
                 CheckoutWriteExclusion.SetTreeImmutable(root, immutable: true);
         }
         catch (Exception resealFailure)
