@@ -1710,6 +1710,7 @@ public sealed class SecurityAndRegressionTests
                      "core.alternateRefsCommand",
                      "core.sshCommand",
                      "core.gitProxy",
+                     "core.sharedRepository",
                      "diff.external",
                      "diff.demo.textconv",
                      "merge.demo.driver",
