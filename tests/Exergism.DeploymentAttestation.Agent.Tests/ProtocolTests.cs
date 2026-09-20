@@ -1,0 +1,226 @@
+using System.Text;
+using Exergism.DeploymentAttestation.Agent;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using static Exergism.DeploymentAttestation.Agent.AgentConstants;
+
+namespace Exergism.DeploymentAttestation.Agent.Tests;
+
+[TestClass]
+public sealed class ProtocolTests
+{
+    private const string VALID_MANIFEST = """
+    {
+      "schema_version": "0.1",
+      "repository": "Exergism-Commons/id",
+      "release_tag": "runtime-main",
+      "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_at": "2026-09-13T10:00:00Z",
+      "assets": {
+        "amd64": {
+          "name": "idresolver-linux-amd64",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    }
+    """;
+
+    [TestMethod]
+    public void AttestationReportsObservedDeployedCommit()
+    {
+        using var environment = TestEnvironment.Create();
+        var observed = new string('d', 40);
+        var expected = new string('a', 40);
+        var checks = new Dictionary<string, bool>(StringComparer.Ordinal)
+        {
+            [CHECK_SYSTEMD] = false
+        };
+
+        var attestation = Protocol.BuildAttestation(
+            environment.Config,
+            observed,
+            expected,
+            STATUS_UNHEALTHY,
+            checks,
+            new string('c', 64),
+            new string('e', 64),
+            new string('b', 64),
+            "2026-09-16T00:00:00Z",
+            "test");
+
+        using var document = System.Text.Json.JsonDocument.Parse(attestation);
+        Assert.AreEqual(
+            observed,
+            document.RootElement.GetProperty(JSON_DEPLOYED_COMMIT).GetString());
+        Assert.AreEqual(
+            expected,
+            document.RootElement.GetProperty(JSON_EXPECTED_COMMIT).GetString());
+    }
+
+    [TestMethod]
+    public void ManifestParsesExpectedArchitecture()
+    {
+        var snapshot = Protocol.ParseReleaseManifest(
+            Encoding.UTF8.GetBytes(VALID_MANIFEST), "Exergism-Commons/id", "runtime-main", "amd64");
+        Assert.AreEqual(new string('a', 40), snapshot.SourceCommit);
+        Assert.AreEqual(new string('b', 64), snapshot.AssetSha256);
+    }
+
+    [TestMethod]
+    public void ManifestRejectsUnexpectedProperty()
+    {
+        var invalid = VALID_MANIFEST.Replace(
+            $"\"{JSON_SCHEMA_VERSION}\": \"{SCHEMA_VERSION}\",",
+            $"\"{JSON_SCHEMA_VERSION}\": \"{SCHEMA_VERSION}\", \"unexpected\": true,",
+            StringComparison.Ordinal);
+        TestAssert.Throws<AgentException>(() => Protocol.ParseReleaseManifest(
+            Encoding.UTF8.GetBytes(invalid), "Exergism-Commons/id", "runtime-main", "amd64"));
+    }
+
+    [TestMethod]
+    public void StateAndTransactionRoundTrip()
+    {
+        using var environment = TestEnvironment.Create();
+        var state = new CurrentState(new string('a', 40), new string('b', 64), new string('c', 64), "runtime-main");
+        File.WriteAllBytes(environment.Config.CurrentStateFile, Protocol.WriteCurrentState(state));
+        Assert.AreEqual(state, Protocol.ReadCurrentState(environment.Config.CurrentStateFile));
+
+        var transaction = new DeploymentTransaction(
+            PHASE_ACTIVATING,
+            new string('a', 40),
+            new string('b', 64),
+            new string('c', 64),
+            Path.Combine(environment.Root, "backup"),
+            new string('d', 40),
+            new string('e', 64),
+            new string('f', 64));
+        File.WriteAllBytes(environment.Config.TransactionFile, Protocol.WriteTransaction(transaction));
+        Assert.AreEqual(transaction, Protocol.ReadTransaction(environment.Config.TransactionFile));
+    }
+
+    [TestMethod]
+    public void DurableStateRejectsEmptyTagAndInvalidTransactionContract()
+    {
+        using var environment = TestEnvironment.Create();
+
+        var emptyTagState = new CurrentState(
+            new string('a', 40),
+            new string('b', 64),
+            new string('c', 64),
+            string.Empty);
+        File.WriteAllBytes(
+            environment.Config.CurrentStateFile,
+            Protocol.WriteCurrentState(emptyTagState));
+        TestAssert.Throws<AgentException>(
+            () => Protocol.ReadCurrentState(environment.Config.CurrentStateFile));
+
+        var invalidPhase = new DeploymentTransaction(
+            "future-phase",
+            new string('a', 40),
+            new string('b', 64),
+            null,
+            Path.Combine(environment.Root, "backup"),
+            new string('d', 40),
+            new string('e', 64),
+            new string('f', 64));
+        File.WriteAllBytes(
+            environment.Config.TransactionFile,
+            Protocol.WriteTransaction(invalidPhase));
+        TestAssert.Throws<AgentException>(
+            () => Protocol.ReadTransaction(environment.Config.TransactionFile));
+
+        var missingNewManifest = invalidPhase with
+        {
+            Phase = PHASE_ACTIVATING,
+            NewReleaseManifestSha256 = null
+        };
+        File.WriteAllBytes(
+            environment.Config.TransactionFile,
+            Protocol.WriteTransaction(missingNewManifest));
+        TestAssert.Throws<AgentException>(
+            () => Protocol.ReadTransaction(environment.Config.TransactionFile));
+    }
+
+    [TestMethod]
+    public void CommittedRollbackJournalAllowsBootstrapNullManifest()
+    {
+        using var environment = TestEnvironment.Create();
+        var state = new CurrentState(
+            new string('a', 40),
+            new string('b', 64),
+            null,
+            "runtime-main");
+        var transaction = new DeploymentTransaction(
+            PHASE_COMMITTED,
+            new string('d', 40),
+            new string('e', 64),
+            new string('f', 64),
+            Path.Combine(environment.Root, "backup"),
+            state.SourceCommit,
+            state.BinarySha256,
+            null);
+
+        File.WriteAllBytes(
+            environment.Config.TransactionFile,
+            Protocol.WriteTransaction(transaction));
+
+        Assert.AreEqual(
+            transaction,
+            Protocol.ReadTransaction(environment.Config.TransactionFile));
+        Assert.IsTrue(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction,
+                "runtime-main"));
+    }
+
+    [TestMethod]
+    public void CommittedRecoveryRequiresExactDurableManifestBinding()
+    {
+        var manifest = new string('c', 64);
+        var state = new CurrentState(
+            new string('a', 40),
+            new string('b', 64),
+            manifest,
+            "runtime-main");
+        var transaction = new DeploymentTransaction(
+            PHASE_COMMITTED,
+            new string('d', 40),
+            new string('e', 64),
+            null,
+            "/tmp/backup",
+            state.SourceCommit,
+            state.BinarySha256,
+            manifest);
+
+        Assert.IsTrue(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction,
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state with { ReleaseManifestSha256 = new string('f', 64) },
+                transaction,
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction with { NewReleaseManifestSha256 = null },
+                "runtime-main"));
+        Assert.IsFalse(
+            DeploymentAgent.CommittedTransactionMatchesState(
+                state,
+                transaction,
+                "runtime-canary"));
+    }
+
+    [TestMethod]
+    public void MountInfoParserPreservesReadOnlyOptions()
+    {
+        var mounts = RuntimeInspector.ParseMountInfo(
+            "29 23 8:1 / / rw,relatime - ext4 /dev/root rw\n" +
+            "30 29 8:1 /srv /srv/id.exergism.org ro,relatime - ext4 /dev/root rw\n");
+        Assert.AreEqual(2, mounts.Count);
+        Assert.IsTrue(mounts[1].Options.Contains("ro"));
+    }
+}
