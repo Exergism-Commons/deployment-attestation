@@ -221,19 +221,27 @@ actual_enabled="$(enabled_state)" || {
 }
 
 target_quiescent() {
-  local load active main_pid cgroup
+  local load active main_pid cgroup scan_rc
+  local load_after active_after main_pid_after cgroup_after
+
   if ! load="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)"; then
     return 1
   fi
-  [[ "$load" == "not-found" ]] && return 0
-  [[ -n "$load" ]] || return 1
-  if ! active="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)"      || ! main_pid="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)"      || ! cgroup="$(systemctl show "$TARGET_UNIT" --property=ControlGroup --value 2>/dev/null)"; then
-    return 1
+  if [[ "$load" == "not-found" ]]; then
+    load_after="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)" || return 1
+    [[ "$load_after" == "not-found" ]] || return 1
+    return 0
   fi
+  [[ -n "$load" ]] || return 1
+
+  active="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)" || return 1
+  main_pid="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)" || return 1
+  cgroup="$(systemctl show "$TARGET_UNIT" --property=ControlGroup --value 2>/dev/null)" || return 1
   [[ "$active" == "inactive" || "$active" == "failed" ]] || return 1
   [[ "$main_pid" == 0 ]] || return 1
-  [[ -z "$cgroup" ]] && return 0
-  python3 - "$cgroup" <<'PY'
+
+  if [[ -n "$cgroup" ]]; then
+    if python3 - "$cgroup" <<'PY'
 import pathlib, sys
 root = pathlib.Path("/sys/fs/cgroup") / sys.argv[1].lstrip("/")
 if not root.exists():
@@ -248,6 +256,26 @@ for procs in root.rglob("cgroup.procs"):
         raise SystemExit(2)
 raise SystemExit(0)
 PY
+    then
+      scan_rc=0
+    else
+      scan_rc=$?
+    fi
+    (( scan_rc == 0 )) || return 1
+  fi
+
+  # The process scan and systemd properties are sampled separately. Re-read
+  # terminal state, PID and cgroup before accepting the target as quiescent.
+  load_after="$(systemctl show "$TARGET_UNIT" --property=LoadState --value 2>/dev/null)" || return 1
+  active_after="$(systemctl show "$TARGET_UNIT" --property=ActiveState --value 2>/dev/null)" || return 1
+  main_pid_after="$(systemctl show "$TARGET_UNIT" --property=MainPID --value 2>/dev/null)" || return 1
+  cgroup_after="$(systemctl show "$TARGET_UNIT" --property=ControlGroup --value 2>/dev/null)" || return 1
+
+  [[ "$load_after" == "$load" ]] || return 1
+  [[ "$active_after" == "inactive" || "$active_after" == "failed" ]] || return 1
+  [[ "$main_pid_after" == 0 ]] || return 1
+  [[ "$cgroup_after" == "$cgroup" ]] || return 1
+  return 0
 }
 
 target_active_state() {
