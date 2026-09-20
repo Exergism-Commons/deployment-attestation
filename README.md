@@ -48,9 +48,16 @@ INSTALLER_SHA256="<reviewed lowercase SHA-256 of install/install-id-exergism.sh>
 AGENT="/path/to/reviewed/ec-deployment-agent"
 AGENT_SHA256="<reviewed lowercase SHA-256 of the Native AOT agent>"
 
-STAGE="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
+sudo install -d -o root -g root -m 0700 /var/lib/ec-deployment-attestation
+sudo install -d -o root -g root -m 0700 /var/lib/ec-deployment-attestation/bootstrap
+STAGE="$(sudo mktemp -d /var/lib/ec-deployment-attestation/bootstrap/installer.XXXXXX)"
 sudo chmod 0700 "$STAGE"
 sudo chown root:root "$STAGE"
+if findmnt -n -o OPTIONS -T "$STAGE" | tr ',' '\n' | grep -Fxq noexec; then
+  echo "Trusted installer stage filesystem is mounted noexec." >&2
+  sudo rm -rf -- "$STAGE"
+  exit 1
+fi
 sudo install -o root -g root -m 0500 \
   "$SOURCE_ROOT/install/install-id-exergism.sh" \
   "$STAGE/install-id-exergism.sh"
@@ -70,7 +77,7 @@ sudo env -i \
   "$STAGE/install-id-exergism.sh"
 ```
 
-The privileged installer refuses to run unless it is executing from that root-owned private stage and its staged bytes match `EC_INSTALLER_SHA256`. It then authenticates every repository-sourced helper/configuration input against the SHA-256 table embedded in those reviewed installer bytes before installation.
+The privileged installer refuses to run unless it is executing from that root-owned private executable stage, the stage filesystem permits execution, and its staged bytes match `EC_INSTALLER_SHA256`. Keeping executable bootstrap bytes out of `/run` allows hardened hosts to mount `/run` with `noexec`. It then authenticates every repository-sourced helper/configuration input against the SHA-256 table embedded in those reviewed installer bytes before installation.
 
 The host MUST NOT hold a GitHub token capable of mutating EC repositories. It signs an attestation with a service-specific HMAC key and sends it to a receiver. Every observation contains a signed `observation_id`; receiver-side deduplication is mandatory so transport retries cannot increment incident thresholds twice. The receiver owns the GitHub integration and can publish Deployment/Check status or open incidents.
 

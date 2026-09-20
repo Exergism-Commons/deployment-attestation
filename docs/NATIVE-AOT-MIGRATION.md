@@ -41,7 +41,7 @@ The repository has one deployment-agent implementation: the Native AOT executabl
 
 A reviewed architecture-specific binary is mandatory, and the privileged installer must itself be staged and verified before execution. Do **not** run the installer directly from a user-writable checkout.
 
-Obtain the reviewed SHA-256 values for both the installer and Native AOT binary through a channel independent of the local checkout, then use the same trusted staging boundary as the main README:
+Obtain the reviewed SHA-256 values for both the installer and Native AOT binary through a channel independent of the local checkout, then use the same root-only executable staging boundary as the main README. Do not stage executable bootstrap bytes under `/run`; hardened hosts may mount it `noexec`:
 
 ```sh
 SOURCE_ROOT="$PWD"
@@ -49,9 +49,16 @@ INSTALLER_SHA256="<reviewed lowercase SHA-256 of install/install-id-exergism.sh>
 AGENT="/path/to/reviewed/ec-deployment-agent"
 AGENT_SHA256="<reviewed lowercase SHA-256 of the Native AOT agent>"
 
-STAGE="$(sudo mktemp -d /run/ec-deployment-attestation-installer.XXXXXX)"
+sudo install -d -o root -g root -m 0700 /var/lib/ec-deployment-attestation
+sudo install -d -o root -g root -m 0700 /var/lib/ec-deployment-attestation/bootstrap
+STAGE="$(sudo mktemp -d /var/lib/ec-deployment-attestation/bootstrap/installer.XXXXXX)"
 sudo chmod 0700 "$STAGE"
 sudo chown root:root "$STAGE"
+if findmnt -n -o OPTIONS -T "$STAGE" | tr ',' '\n' | grep -Fxq noexec; then
+  echo "Trusted installer stage filesystem is mounted noexec." >&2
+  sudo rm -rf -- "$STAGE"
+  exit 1
+fi
 sudo install -o root -g root -m 0500 \
   "$SOURCE_ROOT/install/install-id-exergism.sh" \
   "$STAGE/install-id-exergism.sh"
