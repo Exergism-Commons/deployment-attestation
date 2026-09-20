@@ -1701,4 +1701,66 @@ public sealed class SecurityAndRegressionTests
             path: "/var/lib/ec-deployment-attestation");
     }
 
+
+    [TestMethod]
+    public void GitConfigPolicyRejectsAlternateRefsAndCommandDrivers()
+    {
+        foreach (var key in new[]
+                 {
+                     "core.alternateRefsCommand",
+                     "core.sshCommand",
+                     "core.gitProxy",
+                     "diff.external",
+                     "diff.demo.textconv",
+                     "merge.demo.driver",
+                     "submodule.child.update"
+                 })
+        {
+            Assert.IsTrue(
+                AgentGitInvocation.IsUnsafeRepositoryConfigKey(key),
+                $"Expected unsafe Git config key: {key}");
+            TestAssert.Throws<AgentException>(
+                () => GitRepository.EnsureNoUnsafeRepositoryConfigKeys(
+                    "/checkout/.git/config",
+                    key + "\n"));
+        }
+    }
+
+    [TestMethod]
+    public void CheckoutMutationTrustRejectsGroupWritableFile()
+    {
+        using var environment = TestEnvironment.Create();
+        var root = Path.Combine(environment.Root, "trusted-mutation-tree");
+        Directory.CreateDirectory(root);
+        var file = Path.Combine(root, "config");
+        File.WriteAllText(file, "safe");
+        File.SetUnixFileMode(
+            root,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.SetUnixFileMode(
+            file,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupWrite);
+
+        TestAssert.Throws<AgentException>(
+            () => CheckoutWriteExclusion.EnsureMutationTreeTrusted(root));
+    }
+
+    [TestMethod]
+    public void CheckoutMutationTrustAcceptsOwnerOnlyTree()
+    {
+        using var environment = TestEnvironment.Create();
+        var root = Path.Combine(environment.Root, "owner-only-mutation-tree");
+        Directory.CreateDirectory(root);
+        var file = Path.Combine(root, "config");
+        File.WriteAllText(file, "safe");
+        File.SetUnixFileMode(
+            root,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.SetUnixFileMode(
+            file,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        CheckoutWriteExclusion.EnsureMutationTreeTrusted(root);
+    }
+
 }
