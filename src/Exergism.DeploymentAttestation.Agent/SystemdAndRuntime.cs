@@ -465,7 +465,7 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
     {
         var result = await ProcessRunner.RunAsync(
             COMMAND_NSENTER,
-            ["--target", pid.ToString(), "--mount", "--root", "--", "cat", "/proc/self/mountinfo"],
+            BuildMountInfoNsenterArguments(pid),
             TimeSpan.FromSeconds(5));
         if (!result.Success)
             throw new AgentException("Could not inspect production mount namespace");
@@ -477,6 +477,24 @@ internal sealed class RuntimeInspector(AgentConfig config, SystemdController sys
         var pidAfter = await _systemd.MainPidAsync();
         if (pidAfter != pid)
             throw new AgentException("Production resolver changed PID during artifact-fence audit");
+    }
+
+    internal static string[] BuildMountInfoNsenterArguments(int pid)
+    {
+        if (pid <= 0)
+            throw new AgentException("Production resolver PID must be positive");
+
+        // A mount namespace does not include the process root directory.
+        // Adopt both so absolute mount points are interpreted exactly as the
+        // resolver sees them inside systemd's filesystem sandbox.
+        return
+        [
+            "--target", pid.ToString(),
+            "--mount",
+            "--root",
+            "--",
+            "cat", "/proc/self/mountinfo"
+        ];
     }
 
     internal static List<MountEntry> ParseMountInfo(string text)
