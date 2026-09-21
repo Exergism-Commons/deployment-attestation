@@ -884,6 +884,9 @@ jobs:
           grep -Fq 'if [[ -x "$SMOKE" ]]; then' install/validate-id-exergism-generation.sh
           grep -Fq 'ReadOnlyPaths=/srv/id.exergism.org' packaging/id-exergism-artifact-fence.conf
           grep -Fq 'ReadOnlyPaths=/usr/local/bin/idresolver' packaging/id-exergism-artifact-fence.conf
+          grep -Fq 'nsenter --target "$pid" --mount --root -- python3' install/verify-id-exergism-artifact-fence.sh
+          ! grep -Fq 'nsenter --target "$pid" --mount -- python3' install/verify-id-exergism-artifact-fence.sh
+          grep -Fq '66e8acd18d064b8bc35f9c0e6d4a38fd4f00e552b95f0a08514477598a94a755' install/install-id-exergism.sh
           grep -Fq '90-ec-deployment-attestation-artifact-fence.conf' install/install-id-exergism.sh
 
       - name: Validate recovery publication ordering
