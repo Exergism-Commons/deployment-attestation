@@ -373,6 +373,84 @@ public sealed class SecurityAndRegressionTests
 
 
     [TestMethod]
+    public void PublishedWorktreePermissionsNormalizeRestrictiveUmaskModes()
+    {
+        using var environment = TestEnvironment.Create();
+        var directory = Path.Combine(environment.Root, "published");
+        Directory.CreateDirectory(directory);
+        File.SetUnixFileMode(
+            directory,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite |
+            UnixFileMode.UserExecute);
+
+        var regular = Path.Combine(directory, "registry.json");
+        File.WriteAllText(regular, "{}");
+        File.SetUnixFileMode(
+            regular,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite);
+
+        var executable = Path.Combine(directory, "setup.sh");
+        File.WriteAllText(executable, "#!/bin/sh\n");
+        File.SetUnixFileMode(
+            executable,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite |
+            UnixFileMode.UserExecute);
+
+        PublishedWorktreePermissions.ApplyDirectoryMode(directory);
+        PublishedWorktreePermissions.ApplyFileMode(
+            regular,
+            "resolver/registry.json",
+            GIT_MODE_FILE);
+        PublishedWorktreePermissions.ApplyFileMode(
+            executable,
+            "deploy/setup.sh",
+            GIT_MODE_EXECUTABLE);
+
+        Assert.AreEqual(
+            PublishedWorktreePermissions.DIRECTORY_MODE,
+            File.GetUnixFileMode(directory));
+        Assert.AreEqual(
+            PublishedWorktreePermissions.REGULAR_FILE_MODE,
+            File.GetUnixFileMode(regular));
+        Assert.AreEqual(
+            PublishedWorktreePermissions.EXECUTABLE_FILE_MODE,
+            File.GetUnixFileMode(executable));
+    }
+
+    [TestMethod]
+    public void PublishedWorktreePermissionsRejectRootOnlyRegularFile()
+    {
+        var rootOnly =
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite;
+
+        TestAssert.Throws<AgentException>(() =>
+            PublishedWorktreePermissions.EnsureFileMode(
+                "resolver/registry.json",
+                GIT_MODE_FILE,
+                rootOnly));
+    }
+
+    [TestMethod]
+    public void AgentDiagnosticsPreserveOriginalAndRollbackFailures()
+    {
+        var exception = new AgentException(
+            "Source switch/durability failed and rollback failed",
+            new AggregateException(
+                new InvalidOperationException("candidate source failure"),
+                new IOException("rollback service failure")));
+
+        var diagnostic = AgentExceptionDiagnostics.Format(exception);
+
+        StringAssert.Contains(diagnostic, "Source switch/durability failed and rollback failed");
+        StringAssert.Contains(diagnostic, "candidate source failure");
+        StringAssert.Contains(diagnostic, "rollback service failure");
+    }
+
+    [TestMethod]
     public async Task RollbackAttestationRunsBeforeDeploymentFailureIsPropagated()
     {
         var order = new List<string>();
