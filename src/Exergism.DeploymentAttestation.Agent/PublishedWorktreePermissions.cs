@@ -54,7 +54,7 @@ internal static class PublishedWorktreePermissions
         var expected = ExpectedFileMode(gitMode);
         if (actual != expected)
             throw new AgentException(
-                $"Published file mode mismatch: {relativePath}; actual={(int)actual:o} expected={(int)expected:o}");
+                $"Published file mode mismatch: {relativePath}; actual={Octal(actual)} expected={Octal(expected)}");
     }
 
     internal static void EnsureDirectoryMode(
@@ -63,6 +63,9 @@ internal static class PublishedWorktreePermissions
     {
         if (actual != DIRECTORY_MODE)
             throw new AgentException(
-                $"Published directory mode mismatch: {path}; actual={(int)actual:o} expected={(int)DIRECTORY_MODE:o}");
+                $"Published directory mode mismatch: {path}; actual={Octal(actual)} expected={Octal(DIRECTORY_MODE)}");
     }
+
+    private static string Octal(UnixFileMode mode)
+        => Convert.ToString((int)mode, 8);
 }
