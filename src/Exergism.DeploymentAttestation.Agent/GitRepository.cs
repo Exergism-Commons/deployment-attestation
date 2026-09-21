@@ -1463,7 +1463,9 @@ internal sealed class GitRepository(AgentConfig config)
     public async Task<string> HeadAsync()
         => (await GitAsync([GIT_SUBCOMMAND_REV_PARSE, "HEAD"])).StdOut.Trim();
 
-    public async Task VerifySourceTreeExactAsync(string commit)
+    public async Task VerifySourceTreeExactAsync(
+        string commit,
+        bool requirePublishedModes = true)
     {
         var metadataBindings = new Dictionary<string, HashSet<string>>(
             StringComparer.Ordinal);
@@ -1478,7 +1480,8 @@ internal sealed class GitRepository(AgentConfig config)
         var verified = await VerifyRepositoryExactAsync(
             _config.AppDirectory,
             commit,
-            expectedMetadataBindings: metadataBindings);
+            expectedMetadataBindings: metadataBindings,
+            requirePublishedModes: requirePublishedModes);
         await RevalidateRepositorySnapshotAsync(verified);
 
         CheckoutWriteExclusion.SealVerifiedState(verified, metadataBeforeSeal);
@@ -1501,10 +1504,29 @@ internal sealed class GitRepository(AgentConfig config)
         var sealedVerified = await VerifyRepositoryExactAsync(
             _config.AppDirectory,
             commit,
-            expectedMetadataBindings: metadataBindings);
+            expectedMetadataBindings: metadataBindings,
+            requirePublishedModes: requirePublishedModes);
         await RevalidateRepositorySnapshotAsync(sealedVerified);
         EnsureGitMetadataSnapshotsUnchanged(sealedMetadata);
         CheckoutWriteExclusion.EnsureVerifiedStateSealed(sealedVerified, sealedMetadata);
+    }
+
+    public async Task NormalizeVerifiedPublishedPermissionsAsync(string commit)
+    {
+        await VerifySourceTreeExactAsync(
+            commit,
+            requirePublishedModes: false);
+        await PrepareCheckoutMutationAsync(commit);
+        await NormalizePublishedPermissionsAsync(
+            _config.AppDirectory,
+            commit);
+
+        if (await HeadAsync() != commit)
+            throw new AgentException(
+                "Source HEAD mismatch after published-permission migration");
+
+        await VerifySourceTreeExactAsync(commit);
+        await FsyncCheckoutAsync(commit);
     }
 
     public async Task SwitchSourceAsync(string commit, bool fetchFirst)
@@ -1520,11 +1542,69 @@ internal sealed class GitRepository(AgentConfig config)
         await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
         await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
         await SyncSubmodulesAsync(commit);
+        await NormalizePublishedPermissionsAsync(_config.AppDirectory, commit);
 
         if (await HeadAsync() != commit)
             throw new AgentException("Source HEAD mismatch after switch");
         await VerifySourceTreeExactAsync(commit);
         await FsyncCheckoutAsync(commit);
+    }
+
+    private async Task NormalizePublishedPermissionsAsync(
+        string repository,
+        string commit)
+    {
+        repository = Path.GetFullPath(repository);
+        var entries = await ReadTreeAsync(repository, commit);
+        var directories = new HashSet<string>(StringComparer.Ordinal)
+        {
+            repository
+        };
+        var files = new List<(string Path, string RelativePath, string GitMode)>();
+        var submodules = new List<(string Path, string Commit)>();
+
+        foreach (var entry in entries)
+        {
+            var path = GitTreePath.Resolve(repository, entry.RelativePath);
+            AddParentChain(directories, path, repository);
+
+            if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
+            {
+                directories.Add(path);
+                submodules.Add((path, entry.ObjectId));
+                continue;
+            }
+
+            if (entry.Kind != GIT_OBJECT_BLOB)
+                throw new AgentException(
+                    $"Unexpected tree object while normalizing published permissions {entry.Kind}: {entry.RelativePath}");
+
+            if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
+            {
+                files.Add((path, entry.RelativePath, entry.Mode));
+                continue;
+            }
+
+            if (entry.Mode != GIT_MODE_SYMLINK)
+                throw new AgentException(
+                    $"Unsupported Git mode while normalizing published permissions {entry.Mode}: {entry.RelativePath}");
+        }
+
+        foreach (var directory in directories
+                     .OrderBy(path => path.Count(character => character == Path.DirectorySeparatorChar))
+                     .ThenBy(path => path, StringComparer.Ordinal))
+            PublishedWorktreePermissions.ApplyDirectoryMode(directory);
+
+        foreach (var file in files.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+            PublishedWorktreePermissions.ApplyFileMode(
+                file.Path,
+                file.RelativePath,
+                file.GitMode);
+
+        foreach (var submodule in submodules.OrderBy(submodule => submodule.Path, StringComparer.Ordinal))
+            await NormalizePublishedPermissionsAsync(
+                submodule.Path,
+                submodule.Commit);
     }
 
     public async Task FsyncCheckoutAsync(string commit)
@@ -1746,7 +1826,8 @@ internal sealed class GitRepository(AgentConfig config)
         string repository,
         string commit,
         RepositoryDurabilitySnapshot? verified = null,
-        IReadOnlyDictionary<string, HashSet<string>>? expectedMetadataBindings = null)
+        IReadOnlyDictionary<string, HashSet<string>>? expectedMetadataBindings = null,
+        bool requirePublishedModes = true)
     {
         verified ??= new RepositoryDurabilitySnapshot(
             new Dictionary<string, FileSnapshot>(StringComparer.Ordinal),
@@ -1810,9 +1891,21 @@ internal sealed class GitRepository(AgentConfig config)
             else if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
                 var verifiedFile = TrackedFileDurability.ReadVerifiedRegularFile(fullPath, entry.RelativePath);
-                var executable = (verifiedFile.Mode & UnixFileMode.UserExecute) != 0;
-                if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
-                    throw new AgentException($"Executable bit mismatch: {entry.RelativePath}");
+                if (requirePublishedModes)
+                {
+                    PublishedWorktreePermissions.EnsureFileMode(
+                        entry.RelativePath,
+                        entry.Mode,
+                        verifiedFile.Mode);
+                }
+                else
+                {
+                    var executable =
+                        (verifiedFile.Mode & UnixFileMode.UserExecute) != 0;
+                    if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
+                        throw new AgentException(
+                            $"Executable bit mismatch: {entry.RelativePath}");
+                }
                 data = verifiedFile.Data;
                 verified.Files[Path.GetFullPath(fullPath)] = verifiedFile.Snapshot;
             }
@@ -1850,6 +1943,12 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var directory in expectedDirectories)
         {
             var fullDirectory = Path.GetFullPath(directory);
+            if (requirePublishedModes)
+            {
+                PublishedWorktreePermissions.EnsureDirectoryMode(
+                    fullDirectory,
+                    File.GetUnixFileMode(fullDirectory));
+            }
             verified.Directories[fullDirectory] =
                 Durability.ReadDirectorySnapshotNoFollow(fullDirectory, fullDirectory);
         }
@@ -1861,7 +1960,8 @@ internal sealed class GitRepository(AgentConfig config)
                 subPath,
                 submodule.Value,
                 verified,
-                expectedMetadataBindings);
+                expectedMetadataBindings,
+                requirePublishedModes);
         }
 
         await EnsureRepositoryMetadataBindingAsync(
