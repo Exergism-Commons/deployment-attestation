@@ -1520,11 +1520,69 @@ internal sealed class GitRepository(AgentConfig config)
         await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
         await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
         await SyncSubmodulesAsync(commit);
+        await NormalizePublishedPermissionsAsync(_config.AppDirectory, commit);
 
         if (await HeadAsync() != commit)
             throw new AgentException("Source HEAD mismatch after switch");
         await VerifySourceTreeExactAsync(commit);
         await FsyncCheckoutAsync(commit);
+    }
+
+    private async Task NormalizePublishedPermissionsAsync(
+        string repository,
+        string commit)
+    {
+        repository = Path.GetFullPath(repository);
+        var entries = await ReadTreeAsync(repository, commit);
+        var directories = new HashSet<string>(StringComparer.Ordinal)
+        {
+            repository
+        };
+        var files = new List<(string Path, string RelativePath, string GitMode)>();
+        var submodules = new List<(string Path, string Commit)>();
+
+        foreach (var entry in entries)
+        {
+            var path = GitTreePath.Resolve(repository, entry.RelativePath);
+            AddParentChain(directories, path, repository);
+
+            if (entry.Mode == GIT_MODE_GITLINK && entry.Kind == GIT_OBJECT_COMMIT)
+            {
+                directories.Add(path);
+                submodules.Add((path, entry.ObjectId));
+                continue;
+            }
+
+            if (entry.Kind != GIT_OBJECT_BLOB)
+                throw new AgentException(
+                    $"Unexpected tree object while normalizing published permissions {entry.Kind}: {entry.RelativePath}");
+
+            if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
+            {
+                files.Add((path, entry.RelativePath, entry.Mode));
+                continue;
+            }
+
+            if (entry.Mode != GIT_MODE_SYMLINK)
+                throw new AgentException(
+                    $"Unsupported Git mode while normalizing published permissions {entry.Mode}: {entry.RelativePath}");
+        }
+
+        foreach (var directory in directories
+                     .OrderBy(path => path.Count(character => character == Path.DirectorySeparatorChar))
+                     .ThenBy(path => path, StringComparer.Ordinal))
+            PublishedWorktreePermissions.ApplyDirectoryMode(directory);
+
+        foreach (var file in files.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+            PublishedWorktreePermissions.ApplyFileMode(
+                file.Path,
+                file.RelativePath,
+                file.GitMode);
+
+        foreach (var submodule in submodules.OrderBy(submodule => submodule.Path, StringComparer.Ordinal))
+            await NormalizePublishedPermissionsAsync(
+                submodule.Path,
+                submodule.Commit);
     }
 
     public async Task FsyncCheckoutAsync(string commit)
@@ -1810,9 +1868,10 @@ internal sealed class GitRepository(AgentConfig config)
             else if (entry.Mode is GIT_MODE_FILE or GIT_MODE_EXECUTABLE)
             {
                 var verifiedFile = TrackedFileDurability.ReadVerifiedRegularFile(fullPath, entry.RelativePath);
-                var executable = (verifiedFile.Mode & UnixFileMode.UserExecute) != 0;
-                if (executable != (entry.Mode == GIT_MODE_EXECUTABLE))
-                    throw new AgentException($"Executable bit mismatch: {entry.RelativePath}");
+                PublishedWorktreePermissions.EnsureFileMode(
+                    entry.RelativePath,
+                    entry.Mode,
+                    verifiedFile.Mode);
                 data = verifiedFile.Data;
                 verified.Files[Path.GetFullPath(fullPath)] = verifiedFile.Snapshot;
             }
@@ -1850,6 +1909,9 @@ internal sealed class GitRepository(AgentConfig config)
         foreach (var directory in expectedDirectories)
         {
             var fullDirectory = Path.GetFullPath(directory);
+            PublishedWorktreePermissions.EnsureDirectoryMode(
+                fullDirectory,
+                File.GetUnixFileMode(fullDirectory));
             verified.Directories[fullDirectory] =
                 Durability.ReadDirectorySnapshotNoFollow(fullDirectory, fullDirectory);
         }
