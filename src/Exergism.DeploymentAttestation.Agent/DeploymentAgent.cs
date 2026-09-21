@@ -709,7 +709,7 @@ internal sealed class DeploymentAgent
                     await AttestationSourceValidation.VerifyFinalExactAsync(
                         observedSourceCommit,
                         state.SourceCommit,
-                        _git.VerifySourceTreeExactAsync);
+                        commit => _git.VerifySourceTreeExactAsync(commit));
 
                 checks[CHECK_SOURCE_TREE] = finalSourceTreeExact;
                 if (!finalSourceTreeExact)
