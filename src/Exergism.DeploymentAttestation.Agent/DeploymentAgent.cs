@@ -57,6 +57,7 @@ internal sealed class DeploymentAgent
     {
         if (action == AgentAction.Recover)
         {
+            await MigrateRecordedPublishedPermissionsAsync();
             await RecoverTransactionAsync();
             return AgentExecutionResult.SUCCESS;
         }
@@ -64,6 +65,7 @@ internal sealed class DeploymentAgent
         if (action == AgentAction.Run || action == AgentAction.Update)
         {
             await BootstrapStateAsync();
+            await MigrateRecordedPublishedPermissionsAsync();
             await RecoverTransactionAsync();
             await UpdateReleaseAsync();
             return AgentExecutionResult.SUCCESS;
@@ -72,11 +74,56 @@ internal sealed class DeploymentAgent
         if (action == AgentAction.Attest)
         {
             await BootstrapStateAsync();
+            await MigrateRecordedPublishedPermissionsAsync();
             await RecoverTransactionAsync();
             return AgentExecutionResult.FromAttestation(await AttestAsync());
         }
 
         throw new AgentException("Unsupported agent action");
+    }
+
+    private async Task MigrateRecordedPublishedPermissionsAsync()
+    {
+        if (!Durability.PathExistsNoFollow(_config.CurrentStateFile))
+            return;
+
+        var state = Protocol.ReadCurrentState(_config.CurrentStateFile);
+
+        string head;
+        string runtime;
+        try
+        {
+            head = await _git.HeadAsync();
+            runtime = Durability.Sha256(_config.AppBinary);
+        }
+        catch
+        {
+            // A transaction may intentionally have only one half of the pair
+            // switched. Recovery owns that state; do not mutate it as a
+            // baseline-permission migration.
+            return;
+        }
+
+        if (!string.Equals(head, state.SourceCommit, StringComparison.Ordinal) ||
+            !string.Equals(runtime, state.BinarySha256, StringComparison.Ordinal))
+            return;
+
+        try
+        {
+            await _git.VerifySourceTreeExactAsync(state.SourceCommit);
+            return;
+        }
+        catch (AgentException)
+        {
+            // v0.1.6 and older verified bytes plus Git's executable bit but did
+            // not require service-readable publication modes. Prove the old
+            // invariant before changing metadata, then normalize and re-verify
+            // under the strict v0.1.7 contract.
+        }
+
+        await _git.NormalizeVerifiedPublishedPermissionsAsync(
+            state.SourceCommit);
+        Log($"Migrated published checkout permissions for {state.SourceCommit}");
     }
 
     private async Task BootstrapStateAsync()
