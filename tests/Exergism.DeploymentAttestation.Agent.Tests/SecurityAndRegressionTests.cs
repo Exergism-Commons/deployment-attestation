@@ -421,6 +421,84 @@ public sealed class SecurityAndRegressionTests
     }
 
     [TestMethod]
+    public async Task LegacyPublishedModesCanBeSafelyMigratedToStrictContract()
+    {
+        using var environment = TestEnvironment.Create();
+        var checkout = environment.Config.AppDirectory;
+
+        async Task GitAsync(params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync(
+                "git",
+                args,
+                workingDirectory: checkout);
+            Assert.IsTrue(result.Success, result.StdErr);
+        }
+
+        await GitAsync("init");
+        await GitAsync("config", "user.name", "Regression Test");
+        await GitAsync("config", "user.email", "regression@example.test");
+
+        var resolverDirectory = Path.Combine(checkout, "resolver");
+        var deployDirectory = Path.Combine(checkout, "deploy");
+        Directory.CreateDirectory(resolverDirectory);
+        Directory.CreateDirectory(deployDirectory);
+
+        var registry = Path.Combine(resolverDirectory, "registry.json");
+        var executable = Path.Combine(deployDirectory, "setup.sh");
+        File.WriteAllText(registry, "{}");
+        File.WriteAllText(executable, "#!/bin/sh\n");
+        File.SetUnixFileMode(
+            executable,
+            PublishedWorktreePermissions.EXECUTABLE_FILE_MODE);
+
+        await GitAsync("add", ".");
+        await GitAsync("commit", "-m", "published fixture");
+
+        var head = await ProcessRunner.RunAsync(
+            "git",
+            new[] { "rev-parse", "HEAD" },
+            workingDirectory: checkout);
+        Assert.IsTrue(head.Success, head.StdErr);
+        var commit = head.StdOut.Trim();
+
+        File.SetUnixFileMode(
+            registry,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite);
+        File.SetUnixFileMode(
+            executable,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite |
+            UnixFileMode.UserExecute);
+
+        var repository = new GitRepository(environment.Config);
+
+        await TestAssert.ThrowsAsync<AgentException>(
+            () => repository.VerifySourceTreeExactAsync(commit));
+
+        try
+        {
+            await repository.NormalizeVerifiedPublishedPermissionsAsync(commit);
+            await repository.VerifySourceTreeExactAsync(commit);
+
+            Assert.AreEqual(
+                PublishedWorktreePermissions.REGULAR_FILE_MODE,
+                File.GetUnixFileMode(registry));
+            Assert.AreEqual(
+                PublishedWorktreePermissions.EXECUTABLE_FILE_MODE,
+                File.GetUnixFileMode(executable));
+            Assert.AreEqual(
+                PublishedWorktreePermissions.DIRECTORY_MODE,
+                File.GetUnixFileMode(resolverDirectory));
+        }
+        finally
+        {
+            CheckoutWriteExclusion.SetTreeImmutable(checkout, immutable: false);
+        }
+    }
+
+    [TestMethod]
     public void PublishedWorktreePermissionsRejectRootOnlyRegularFile()
     {
         var rootOnly =
