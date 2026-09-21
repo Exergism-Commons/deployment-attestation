@@ -45,7 +45,7 @@ internal sealed class PreparedSmokeScript(string path) : IDisposable
 
 internal static class SmokeScriptValidation
 {
-    internal const string TRUSTED_RUNTIME_DIRECTORY =
+    internal static readonly string TRUSTED_RUNTIME_DIRECTORY =
         "/usr/local/libexec/ec-deployment-attestation-smoke";
 
     internal static PreparedSmokeScript PrepareTrustedCopy(string path)
