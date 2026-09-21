@@ -1813,6 +1813,12 @@ public sealed class SecurityAndRegressionTests
 
 
     [TestMethod]
+    public void SmokeSnapshotStagingUsesTrustedExecutableHierarchy()
+        => Assert.AreEqual(
+            "/usr/local/libexec/ec-deployment-attestation-smoke",
+            SmokeScriptValidation.TRUSTED_RUNTIME_DIRECTORY);
+
+    [TestMethod]
     public void ArtifactFenceMountAuditAdoptsTargetRoot()
     {
         var args = RuntimeInspector.BuildMountInfoNsenterArguments(1234);

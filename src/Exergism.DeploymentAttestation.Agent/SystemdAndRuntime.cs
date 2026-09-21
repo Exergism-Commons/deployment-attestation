@@ -45,8 +45,8 @@ internal sealed class PreparedSmokeScript(string path) : IDisposable
 
 internal static class SmokeScriptValidation
 {
-    private const string TRUSTED_RUNTIME_DIRECTORY =
-        "/run/ec-deployment-attestation-smoke";
+    internal static readonly string TRUSTED_RUNTIME_DIRECTORY =
+        "/usr/local/libexec/ec-deployment-attestation-smoke";
 
     internal static PreparedSmokeScript PrepareTrustedCopy(string path)
     {
@@ -67,11 +67,15 @@ internal static class SmokeScriptValidation
             "smoke script",
             requireExecutable: true);
 
-        // Execute the verified bytes from a root/effective-UID-owned runtime
-        // namespace rather than the configurable source pathname. This removes
-        // the validation-to-exec replacement window entirely for non-root
-        // writers: changing the original after this point cannot change the
-        // program systemd-run starts.
+        // Execute the verified bytes from a root/effective-UID-owned executable
+        // directory rather than the configurable source pathname. Do not stage
+        // this under /run: production hosts may mount /run with noexec, which
+        // makes systemd-run reject an otherwise valid verified smoke snapshot.
+        // Using /usr/local/libexec also keeps the snapshot on the same trusted
+        // executable hierarchy as the installed agent. This removes the
+        // validation-to-exec replacement window entirely for non-root writers:
+        // changing the original after this point cannot change the program
+        // systemd-run starts.
         Durability.EnsureTrustedDirectory(
             TRUSTED_RUNTIME_DIRECTORY,
             UnixFileMode.UserRead |
