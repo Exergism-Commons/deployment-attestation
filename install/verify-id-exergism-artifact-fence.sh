@@ -104,7 +104,7 @@ verify_source_process_binding "$pid" || {
 # Audit the live process mount namespace, not merely the unit-file settings.
 # Every mount at/below the source tree and the deepest mount covering the
 # runtime must be read-only.
-nsenter --target "$pid" --mount -- python3 - "$APP_DIR" "$APP_BIN" <<'PY'
+nsenter --target "$pid" --mount --root -- python3 - "$APP_DIR" "$APP_BIN" <<'PY'
 import os
 import re
 import sys
