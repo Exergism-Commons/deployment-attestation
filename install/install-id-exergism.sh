@@ -205,7 +205,7 @@ def open_repo_file_no_symlinks(root_fd, relative):
 
 repo_inputs = (
     ("install/validate-id-exergism-generation.sh", 0o500, "3964e637b5950eae6f17a77fef7119f342f8fa41767fafe0359c085981943f4d"),
-    ("install/verify-id-exergism-artifact-fence.sh", 0o500, "6001cc876a7e2a9d390f7aa62ed86d5a355af005798faee8de9d6744c515e3a9"),
+    ("install/verify-id-exergism-artifact-fence.sh", 0o500, "66e8acd18d064b8bc35f9c0e6d4a38fd4f00e552b95f0a08514477598a94a755"),
     ("agent/validate-release-manifest.py", 0o500, "1d9c3f889e89b8ff5acb8659504655e7237ad32f5e3e4c4bd29fb719150ab481"),
     ("spec/release-manifest-v0.1.schema.json", 0o400, "53338bbdbb822c8a94bfbc45246af56017165a0af14d1fea818c6fc9d23120b2"),
     ("install/finalize-id-exergism-recovery.sh", 0o500, "2667cc94cf281f94ba91e2910ef6da760c05bf70bd36a58332496f5c9a4326f9"),
