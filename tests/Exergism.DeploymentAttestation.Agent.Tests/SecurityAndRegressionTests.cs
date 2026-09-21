@@ -1813,16 +1813,10 @@ public sealed class SecurityAndRegressionTests
 
 
     [TestMethod]
-    public void SmokeSnapshotStagingAvoidsRunNoexecMount()
-    {
-        Assert.IsFalse(
-            SmokeScriptValidation.TRUSTED_RUNTIME_DIRECTORY.StartsWith(
-                "/run/",
-                StringComparison.Ordinal));
-        Assert.AreEqual(
+    public void SmokeSnapshotStagingUsesTrustedExecutableHierarchy()
+        => Assert.AreEqual(
             "/usr/local/libexec/ec-deployment-attestation-smoke",
             SmokeScriptValidation.TRUSTED_RUNTIME_DIRECTORY);
-    }
 
     [TestMethod]
     public void ArtifactFenceMountAuditAdoptsTargetRoot()
