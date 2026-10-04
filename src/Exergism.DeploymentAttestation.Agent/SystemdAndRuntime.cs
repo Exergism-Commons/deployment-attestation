@@ -129,13 +129,13 @@ internal sealed class SystemdController(AgentConfig config)
             : throw new AgentException("Target service has no live MainPID");
     }
 
-    public Task<bool> IsActiveAsync()
+    public Task<bool> IsActiveAsync(TimeSpan? timeout = null)
         => HealthCheckRunner.RunAsync(async () =>
         {
             var result = await ProcessRunner.RunAsync(
                 COMMAND_SYSTEMCTL,
                 [SYSTEMD_COMMAND_IS_ACTIVE, SYSTEMD_FLAG_QUIET, _config.ServiceUnit],
-                TimeSpan.FromSeconds(10));
+                timeout ?? TimeSpan.FromSeconds(10));
             return result.Success;
         });
 
