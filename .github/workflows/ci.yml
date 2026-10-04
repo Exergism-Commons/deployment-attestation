@@ -15,6 +15,7 @@ jobs:
 
       - name: Validate shell syntax
         run: |
+          bash -n .github/scripts/test-agent.sh
           bash -n examples/id.exergism.org-smoke.sh
           bash -n install/install-id-exergism.sh
           bash -n install/recover-id-exergism-install.sh

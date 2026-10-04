@@ -27,8 +27,8 @@ jobs:
       - name: Build with AOT analyzers
         run: dotnet build src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release
 
-      - name: Run unit tests
-        run: dotnet test tests/Exergism.DeploymentAttestation.Agent.Tests/Exergism.DeploymentAttestation.Agent.Tests.csproj -c Release
+      - name: Run unit and privileged checkout tests
+        run: bash .github/scripts/test-agent.sh
 
       - name: Run managed self-test
         run: dotnet run --project src/Exergism.DeploymentAttestation.Agent/Exergism.DeploymentAttestation.Agent.csproj -c Release -- self-test

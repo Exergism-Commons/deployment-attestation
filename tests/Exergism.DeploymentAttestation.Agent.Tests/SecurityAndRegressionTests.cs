@@ -421,7 +421,10 @@ public sealed class SecurityAndRegressionTests
     }
 
     [TestMethod]
-    public async Task LegacyPublishedModesCanBeSafelyMigratedToStrictContract()
+    [TestCategory("PrivilegedLinux")]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task LegacyPublishedModesCanBeSafelyMigratedToStrictContract(bool groupReadable)
     {
         using var environment = TestEnvironment.Create();
         var checkout = environment.Config.AppDirectory;
@@ -462,15 +465,17 @@ public sealed class SecurityAndRegressionTests
         Assert.IsTrue(head.Success, head.StdErr);
         var commit = head.StdOut.Trim();
 
-        File.SetUnixFileMode(
-            registry,
-            UnixFileMode.UserRead |
-            UnixFileMode.UserWrite);
-        File.SetUnixFileMode(
-            executable,
-            UnixFileMode.UserRead |
-            UnixFileMode.UserWrite |
-            UnixFileMode.UserExecute);
+        var legacyFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        var legacyDirectoryMode = legacyFileMode | UnixFileMode.UserExecute;
+        if (groupReadable)
+        {
+            legacyFileMode |= UnixFileMode.GroupRead;
+            legacyDirectoryMode |= UnixFileMode.GroupRead | UnixFileMode.GroupExecute;
+        }
+        File.SetUnixFileMode(registry, legacyFileMode);
+        File.SetUnixFileMode(executable, legacyDirectoryMode);
+        foreach (var directory in new[] { checkout, resolverDirectory, deployDirectory })
+            File.SetUnixFileMode(directory, legacyDirectoryMode);
 
         var repository = new GitRepository(environment.Config);
 
@@ -488,9 +493,13 @@ public sealed class SecurityAndRegressionTests
             Assert.AreEqual(
                 PublishedWorktreePermissions.EXECUTABLE_FILE_MODE,
                 File.GetUnixFileMode(executable));
+            foreach (var directory in new[] { checkout, resolverDirectory, deployDirectory })
+                Assert.AreEqual(
+                    PublishedWorktreePermissions.DIRECTORY_MODE,
+                    File.GetUnixFileMode(directory));
             Assert.AreEqual(
-                PublishedWorktreePermissions.DIRECTORY_MODE,
-                File.GetUnixFileMode(resolverDirectory));
+                CheckoutSealState.FullySealed,
+                CheckoutWriteExclusion.InspectTreeSealState(checkout));
         }
         finally
         {
