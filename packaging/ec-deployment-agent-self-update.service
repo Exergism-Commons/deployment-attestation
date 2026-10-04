@@ -1,0 +1,17 @@
+[Unit]
+Description=Opt-in update of the Deployment Attestation package
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/ec-deployment-attestation/self-update.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ec-deployment-agent self-update
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=infinity
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+

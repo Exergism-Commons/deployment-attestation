@@ -22,7 +22,8 @@ jobs:
           bash -n install/finalize-id-exergism-recovery.sh
           bash -n install/validate-id-exergism-generation.sh
           bash -n install/verify-id-exergism-artifact-fence.sh
-          python3 -m py_compile agent/validate-release-manifest.py
+          python3 -m py_compile agent/validate-release-manifest.py install/self-update-agent.py
+          sudo -- /usr/bin/python3 -I tests/test_self_update.py
 
       - name: Validate timer-aware quiescence helpers
         shell: bash
@@ -694,6 +695,10 @@ jobs:
               'packaging/ec-deployment-attestation@.service',
               'packaging/ec-deployment-attestation@.timer',
               'packaging/id-exergism-artifact-fence.conf',
+              'install/self-update-agent.py',
+              'packaging/ec-deployment-agent-self-update.service',
+              'packaging/ec-deployment-agent-self-update.timer',
+              'packaging/self-update.json',
           }
           assert {path for path, _, _ in entries} == expected_paths
           for item, mode, expected_sha256 in entries:
@@ -708,7 +713,7 @@ jobs:
           grep -Fq 'recovery_agent="$AGENT_INSTALL_SOURCE"' install/install-id-exergism.sh
           ! grep -Fq 'recovery_agent="$AGENT"' install/install-id-exergism.sh
           grep -Fq 'EC_ATTESTATION_CONFIG="$ENV_FILE" "$recovery_agent" recover' install/install-id-exergism.sh
-          grep -Fq 'install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"' install/install-id-exergism.sh
+          grep -Fq 'atomic_install_root_file "$AGENT_INSTALL_SOURCE" "$AGENT" 0755' install/install-id-exergism.sh
           grep -Fq '"$AGENT_INSTALL_SOURCE" self-test' install/install-id-exergism.sh
           grep -Fq 'f"{label} must be a regular file"' install/install-id-exergism.sh
           grep -Fq 'f"{label} must be executable"' install/install-id-exergism.sh
@@ -799,7 +804,7 @@ jobs:
           grep -Fq '"$RECOVERY_FINALIZER"' install/recover-id-exergism-install.sh
           grep -Fq '"$TXN_PHASE" == "validated" || "$TXN_PHASE" == "recovered"' install/recover-id-exergism-install.sh
           grep -Fq 'mv -T -- "$TXN_DIR" "$INSTALL_RECOVERING_DIR"' install/recover-id-exergism-install.sh
-          grep -Fq '[[ "$schema_version" == 2 ]]' install/recover-id-exergism-install.sh
+          grep -Fq '[[ "$schema_version" == 2 || "$schema_version" == 3 ]]' install/recover-id-exergism-install.sh
           grep -Fq 'origin_boot_id=' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="normal"' install/recover-id-exergism-install.sh
           grep -Fq 'RECOVERY_MODE="boot"' install/recover-id-exergism-install.sh

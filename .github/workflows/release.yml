@@ -127,15 +127,17 @@ jobs:
           install -m 0755 install/install-id-exergism.sh artifacts/release/install-id-exergism.sh
 
           agent_sha256="$(sha256sum artifacts/release/ec-deployment-agent-linux-x64 | awk '{print $1}')"
+          install -m 0755 install/self-update-agent.py artifacts/release/ec-deployment-agent-self-update.py
+          helper_sha256="$(sha256sum artifacts/release/ec-deployment-agent-self-update.py | awk '{print $1}')"
           installer_sha256="$(sha256sum artifacts/release/install-id-exergism.sh | awk '{print $1}')"
           generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          python3 - "$TAG" "$SOURCE_SHA" "$generated_at" "$agent_sha256" "$installer_sha256" <<'PY'
+          python3 - "$TAG" "$SOURCE_SHA" "$generated_at" "$agent_sha256" "$installer_sha256" "$helper_sha256" <<'PY'
           import json
           import pathlib
           import sys
 
-          tag, source_commit, generated_at, agent_sha256, installer_sha256 = sys.argv[1:]
+          tag, source_commit, generated_at, agent_sha256, installer_sha256, helper_sha256 = sys.argv[1:]
           document = {
               "schema_version": "0.1",
               "repository": "Exergism-Commons/deployment-attestation",
@@ -146,6 +148,10 @@ jobs:
                   "amd64": {
                       "name": "ec-deployment-agent-linux-x64",
                       "sha256": agent_sha256,
+                  },
+                  "self_update_helper": {
+                      "name": "ec-deployment-agent-self-update.py",
+                      "sha256": helper_sha256,
                   },
                   "installer": {
                       "name": "install-id-exergism.sh",
@@ -168,6 +174,7 @@ jobs:
             sha256sum \
               ec-deployment-agent-linux-x64 \
               install-id-exergism.sh \
+              ec-deployment-agent-self-update.py \
               DEPLOYMENT_MANIFEST.json > SHA256SUMS
           )
 
@@ -222,6 +229,7 @@ jobs:
             --notes-file artifacts/release/RELEASE_NOTES.md \
             artifacts/release/ec-deployment-agent-linux-x64 \
             artifacts/release/install-id-exergism.sh \
+            artifacts/release/ec-deployment-agent-self-update.py \
             artifacts/release/DEPLOYMENT_MANIFEST.json \
             artifacts/release/SHA256SUMS
 
@@ -236,7 +244,8 @@ jobs:
             DEPLOYMENT_MANIFEST.json \
             SHA256SUMS \
             ec-deployment-agent-linux-x64 \
-            install-id-exergism.sh | sort)"
+            install-id-exergism.sh \
+            ec-deployment-agent-self-update.py | sort)"
           actual="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
           [[ "$actual" == "$expected" ]] || {
             echo "Draft release asset set is incomplete or unexpected." >&2

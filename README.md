@@ -38,6 +38,15 @@ After starting a service during bootstrap, activation, rollback or committed rec
 
 The Native AOT agent is the sole deployment/attestation agent implementation. The installer requires an explicit reviewed `EC_NATIVE_AGENT_BINARY` and its lowercase `EC_NATIVE_AGENT_SHA256`, pins the exact reviewed bytes into root-owned staging, validates them, and installs the snapshot as `/usr/local/libexec/ec-deployment-agent`. The agent maintains independent self-health in `agent-health.json`; `ec-deployment-agent health` evaluates freshness, the last completed cycle, timer state, transaction state and attestation delivery without recursively trusting the target-service attestation, while `ec-deployment-agent status` emits the same self-health document for observability without using health as an exit gate.
 
+### Opt-in package self-updates
+
+Agent and helper can follow the latest stable release together using the existing
+installer transaction. This is **disabled by default** and needs both an explicit
+root-owned opt-in policy and activation of its own daily systemd timer.
+Installing/reinstalling preserves the policy and does not enable that timer.
+See [SELF-UPDATE.md](docs/SELF-UPDATE.md) for enable/disable commands, recovery and
+publisher trust. Service deployment cadence stays independent.
+
 ### Privileged installer bootstrap
 
 Never run `sudo ./install/install-id-exergism.sh` from a user-writable checkout. Bash parses shell input incrementally, so a mutable script cannot safely establish its own privilege boundary.

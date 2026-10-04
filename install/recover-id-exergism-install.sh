@@ -18,6 +18,10 @@ AGENT_RUN_UNIT="ec-deployment-attestation@${SERVICE}.service"
 TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
+SELF_UPDATE_HELPER="/usr/local/libexec/ec-deployment-agent-self-update"
+SELF_UPDATE_SERVICE_UNIT="/etc/systemd/system/ec-deployment-agent-self-update.service"
+SELF_UPDATE_TIMER_UNIT="/etc/systemd/system/ec-deployment-agent-self-update.timer"
+SELF_UPDATE_POLICY="/etc/ec-deployment-attestation/self-update.json"
 SMOKE="/usr/local/libexec/id.exergism.org-smoke.sh"
 VALIDATOR="/usr/local/libexec/ec-id-generation-validator"
 RECOVERY_FINALIZER="/usr/local/libexec/ec-deployment-install-recovery-finalize"
@@ -208,7 +212,7 @@ read_value() {
 }
 
 schema_version="$(read_value schema_version)"
-[[ "$schema_version" == 2 ]] || {
+[[ "$schema_version" == 2 || "$schema_version" == 3 ]] || {
   echo "Unsupported installer recovery journal schema: $schema_version" >&2
   exit 1
 }
@@ -238,6 +242,10 @@ target_was_active="$(read_value target_was_active)"
 
 artifact_path() {
   case "$1" in
+    self_update_helper) printf '%s\n' "$SELF_UPDATE_HELPER" ;;
+    self_update_service) printf '%s\n' "$SELF_UPDATE_SERVICE_UNIT" ;;
+    self_update_timer) printf '%s\n' "$SELF_UPDATE_TIMER_UNIT" ;;
+    self_update_policy) printf '%s\n' "$SELF_UPDATE_POLICY" ;;
     agent) printf '%s\n' "$AGENT" ;;
     smoke) printf '%s\n' "$SMOKE" ;;
     service_unit) printf '%s\n' "$AGENT_SERVICE_UNIT" ;;
@@ -279,7 +287,7 @@ restore_artifact() {
 
 persist_restored_generation() {
   local timer_wants="/etc/systemd/system/timers.target.wants"
-  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
+  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     "$SELF_UPDATE_HELPER" "$SELF_UPDATE_SERVICE_UNIT" "$SELF_UPDATE_TIMER_UNIT" "$SELF_UPDATE_POLICY"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
   durable_sync_ancestor_chain     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR" "$timer_wants"
 }
 
@@ -593,6 +601,11 @@ systemctl --runtime disable "$TIMER_UNIT" >/dev/null 2>&1 || {
 for key in agent smoke service_unit timer_unit env fence; do
   restore_artifact "$key" || restore_rc=1
 done
+if [[ "$schema_version" == 3 ]]; then
+  for key in self_update_helper self_update_service self_update_timer self_update_policy; do
+    restore_artifact "$key" || restore_rc=1
+  done
+fi
 
 persist_restored_generation || restore_rc=1
 systemctl daemon-reload || restore_rc=1

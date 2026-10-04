@@ -2,7 +2,7 @@ namespace Exergism.DeploymentAttestation.Agent;
 
 internal static class AgentConstants
 {
-    internal const string AGENT_VERSION = "0.2.0-aot-pre2";
+    internal static readonly string AGENT_VERSION = PackageSelfUpdate.Version;
     internal const string SCHEMA_VERSION = "0.1";
 
     internal const string ACTION_RUN = "run";

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Privileged policy/staging admission and snapshot guards.
+sudo -- /usr/bin/python3 -I tests/test_self_update.py
+
 project='tests/Exergism.DeploymentAttestation.Agent.Tests/Exergism.DeploymentAttestation.Agent.Tests.csproj'
 dotnet="$(readlink -f "$(command -v dotnet)")"
 

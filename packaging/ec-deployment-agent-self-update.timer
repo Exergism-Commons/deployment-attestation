@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for Deployment Attestation stable releases (explicit opt-in)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=ec-deployment-agent-self-update.service
+
+[Install]
+WantedBy=timers.target
+
