@@ -146,16 +146,14 @@ internal sealed class DeploymentAgent
                 if (pid is not null)
                     throw new AgentException("Bootstrap refused: non-active service still has a live MainPID");
                 await _systemd.StartAsync();
-                if (!await _systemd.IsActiveAsync())
-                    throw new AgentException("Bootstrap refused: target service did not become active");
-                await _runtime.VerifyLiveRuntimeInvariantsAsync();
                 break;
             default:
                 throw new AgentException($"Bootstrap refused: target service is in transitional state {activeState}");
         }
 
-        if (!await ProbeAsync(_config.LocalUrl, TimeSpan.FromSeconds(15)))
-            throw new AgentException("Bootstrap refused: local health check failed");
+        if (!await WaitForServiceStartupAsync())
+            throw new AgentException("Bootstrap refused: target service did not become locally healthy within 30 seconds");
+        await _runtime.VerifyLiveRuntimeInvariantsAsync();
         if (!await _systemd.RunSmokeAsync())
             throw new AgentException("Bootstrap refused: semantic smoke check failed");
         await _runtime.VerifyLiveRuntimeInvariantsAsync();
@@ -256,10 +254,8 @@ internal sealed class DeploymentAgent
     private async Task ResumeCommittedServiceAsync(string commit, string binary)
     {
         await _systemd.StartAsync();
-        if (!await _systemd.IsActiveAsync())
-            throw new AgentException("Committed service did not become active");
-        if (!await ProbeAsync(_config.LocalUrl, TimeSpan.FromSeconds(15)))
-            throw new AgentException("Committed service failed local health check");
+        if (!await WaitForServiceStartupAsync())
+            throw new AgentException("Committed service did not become locally healthy within 30 seconds");
         if (!await _systemd.RunSmokeAsync())
             throw new AgentException("Committed service failed semantic smoke check");
         await PostStartIntegrityAsync(commit, binary);
@@ -302,10 +298,10 @@ internal sealed class DeploymentAgent
         try
         {
             await _systemd.StartAsync();
-            if (!await _systemd.IsActiveAsync() ||
-                !await ProbeAsync(_config.LocalUrl, TimeSpan.FromSeconds(15)) ||
-                !await _systemd.RunSmokeAsync())
-                throw new AgentException("Rollback service health validation failed");
+            if (!await WaitForServiceStartupAsync())
+                throw new AgentException("Rollback service did not become locally healthy within 30 seconds");
+            if (!await _systemd.RunSmokeAsync())
+                throw new AgentException("Rollback service semantic smoke check failed");
             await PostStartIntegrityAsync(tx.OldSourceCommit, tx.OldBinarySha256);
         }
         catch
@@ -489,10 +485,10 @@ internal sealed class DeploymentAgent
         try
         {
             await _systemd.StartAsync();
-            if (!await _systemd.IsActiveAsync() ||
-                !await ProbeAsync(_config.LocalUrl, TimeSpan.FromSeconds(15)) ||
-                !await _systemd.RunSmokeAsync())
-                throw new AgentException("Candidate failed health validation");
+            if (!await WaitForServiceStartupAsync())
+                throw new AgentException("Candidate did not become locally healthy within 30 seconds");
+            if (!await _systemd.RunSmokeAsync())
+                throw new AgentException("Candidate semantic smoke check failed");
             await PostStartIntegrityAsync(release.SourceCommit, release.AssetSha256);
         }
         catch (Exception ex)
@@ -912,6 +908,13 @@ internal sealed class DeploymentAgent
 
         throw new AgentException($"Download failed: {name}", last);
     }
+
+    private Task<bool> WaitForServiceStartupAsync()
+        => ServiceStartupReadiness.WaitAsync(
+            timeout => _systemd.IsActiveAsync(timeout),
+            timeout => ProbeAsync(_config.LocalUrl, timeout),
+            TimeSpan.FromSeconds(30),
+            TimeSpan.FromMilliseconds(250));
 
     private async Task<bool> ProbeAsync(Uri uri, TimeSpan timeout)
     {
