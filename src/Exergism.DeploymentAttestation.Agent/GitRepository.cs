@@ -1531,13 +1531,18 @@ internal sealed class GitRepository(AgentConfig config)
 
     public async Task SwitchSourceAsync(string commit, bool fetchFirst)
     {
-        await PrepareCheckoutMutationAsync(commit);
-
         if (fetchFirst)
         {
+            // The target tree is not necessarily present yet. Validate and
+            // unseal the current checkout before fetching any target metadata.
+            await PrepareCheckoutMutationAsync(await HeadAsync());
             await GitRequiredAsync([GIT_SUBCOMMAND_FETCH, "--force", "--depth", "1", "origin", commit]);
-            await GitRequiredAsync([GIT_SUBCOMMAND_CHECKOUT, "--detach", "FETCH_HEAD"]);
         }
+
+        // Only traverse the target hierarchy after its objects are available.
+        await PrepareCheckoutMutationAsync(commit);
+        if (fetchFirst)
+            await GitRequiredAsync([GIT_SUBCOMMAND_CHECKOUT, "--detach", commit]);
 
         await GitRequiredAsync([GIT_SUBCOMMAND_RESET, "--hard", commit]);
         await GitRequiredAsync([GIT_SUBCOMMAND_CLEAN, "-ffdx"]);
