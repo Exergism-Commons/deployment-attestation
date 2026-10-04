@@ -108,3 +108,9 @@ test failure, and the production seal is never bypassed for testing.
 The migration regression covers both legacy `0600`/`0700` and group-readable
 `0640`/`0750` modes, verifies the exact published `0644`/`0755` contract, and
 checks that the resulting checkout is fully sealed.
+
+Bootstrap regressions exercise first adoption without a recorded current state
+for both legacy modes, including the exact source/runtime preparation used by
+bootstrap. They also check that altered source bytes, a non-executable runtime,
+and a mismatched revision are rejected before publication modes are changed.
+State is written only after the subsequent live-runtime and strict-source checks.

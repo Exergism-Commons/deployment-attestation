@@ -166,21 +166,31 @@ internal sealed class DeploymentAgent
         else
             commit = await _git.HeadAsync();
 
-        RequireCommit(commit, "Cannot bootstrap deployment revision");
-        if (await _git.HeadAsync() != commit)
-            throw new AgentException("Bootstrap refused: checkout differs");
-
-        await _git.VerifySourceTreeExactAsync(commit);
-        var binary = Durability.Sha256(_config.AppBinary);
-        RequireDigest(binary, "Bootstrap refused: runtime digest invalid");
-        await _git.FsyncCheckoutAsync(commit);
-        VerifyRuntimeExact(binary);
+        var binary = await PrepareBootstrapArtifactsAsync(commit);
         await _runtime.VerifyLiveRuntimeInvariantsAsync();
         await _git.VerifySourceTreeExactAsync(commit);
         if (Durability.Sha256(_config.AppBinary) != binary)
             throw new AgentException("Bootstrap refused: runtime changed before state commit");
 
         WriteCurrentState(new CurrentState(commit, binary, null, _config.ReleaseTag));
+    }
+
+    internal async Task<string> PrepareBootstrapArtifactsAsync(string commit)
+    {
+        RequireCommit(commit, "Cannot bootstrap deployment revision");
+        if (await _git.HeadAsync() != commit)
+            throw new AgentException("Bootstrap refused: checkout differs");
+
+        var binary = Durability.Sha256(_config.AppBinary);
+        RequireDigest(binary, "Bootstrap refused: runtime digest invalid");
+        VerifyRuntimeExact(binary);
+
+        // First adoption has no recorded state to migrate. Prove the legacy
+        // byte-exact source contract before changing its publication modes;
+        // normalization then seals, strictly verifies, and fsyncs the checkout.
+        await _git.NormalizeVerifiedPublishedPermissionsAsync(commit);
+        VerifyRuntimeExact(binary);
+        return binary;
     }
 
     private async Task<bool> VerifyBaselineAsync()
