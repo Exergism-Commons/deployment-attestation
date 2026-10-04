@@ -904,7 +904,7 @@ jobs:
           native_stage = text.index('agent_fd = os.open(agent_source, os.O_RDONLY | O_CLOEXEC | O_NOFOLLOW)')
           native_preflight = text.index('EC_ATTESTATION_CONFIG="$native_preflight_config" "$AGENT_INSTALL_SOURCE" validate-config')
           native_self_test = text.index('"$AGENT_INSTALL_SOURCE" self-test', native_preflight)
-          agent_replace = text.index('install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"')
+          agent_replace = text.index('atomic_install_root_file "$AGENT_INSTALL_SOURCE" "$AGENT" 0755')
           assert native_stage < native_preflight < native_self_test < agent_replace
 
           validator = text.index('atomic_install_root_file "$REPO_INPUT_STAGE/install/validate-id-exergism-generation.sh" "$VALIDATOR" 0755')

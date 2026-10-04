@@ -20,7 +20,7 @@ static async Task<int> RunAsync(string[] args)
             return 0;
         }
         if (action == AgentAction.SelfUpdate)
-            return await PackageSelfUpdate.RunAsync();
+            return await PackageSelfUpdate.RunAsync(args.Length == 3 ? args[2] : null);
 
         var configPath = Environment.GetEnvironmentVariable(ENV_ATTESTATION_CONFIG) ?? DEFAULT_CONFIG_PATH;
         var config = AgentConfig.Load(configPath);

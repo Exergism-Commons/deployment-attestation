@@ -245,7 +245,6 @@ artifact_path() {
     self_update_helper) printf '%s\n' "$SELF_UPDATE_HELPER" ;;
     self_update_service) printf '%s\n' "$SELF_UPDATE_SERVICE_UNIT" ;;
     self_update_timer) printf '%s\n' "$SELF_UPDATE_TIMER_UNIT" ;;
-    self_update_policy) printf '%s\n' "$SELF_UPDATE_POLICY" ;;
     agent) printf '%s\n' "$AGENT" ;;
     smoke) printf '%s\n' "$SMOKE" ;;
     service_unit) printf '%s\n' "$AGENT_SERVICE_UNIT" ;;
@@ -602,7 +601,7 @@ for key in agent smoke service_unit timer_unit env fence; do
   restore_artifact "$key" || restore_rc=1
 done
 if [[ "$schema_version" == 3 ]]; then
-  for key in self_update_helper self_update_service self_update_timer self_update_policy; do
+  for key in self_update_helper self_update_service self_update_timer; do
     restore_artifact "$key" || restore_rc=1
   done
 fi

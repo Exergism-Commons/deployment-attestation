@@ -58,6 +58,7 @@ internal static class AgentActionParser
         {
             0 => AgentAction.Run,
             1 => Parse(args[0]),
+            3 when args[0] == "self-update" && args[1] == "--admit" => AgentAction.SelfUpdate,
             _ => throw new AgentException(
                 $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_VALIDATE_CONFIG}|{ACTION_SELF_TEST}|self-update|package-version]")
         };

@@ -257,36 +257,37 @@ class SelfUpdateTests(unittest.TestCase):
              self.assertRaises(subprocess.CalledProcessError):
             updater.install_snapshot(stage, self.tag, self.hashes)
 
-    def test_real_recovery_restores_helper_units_and_policy(self):
+    def test_real_recovery_restores_package_and_preserves_revoked_policy(self):
         text = (ROOT/"install/recover-id-exergism-install.sh").read_text()
         def function(name):
             return re.search(r"^" + name + r"\(\) \{.*?^\}", text, re.M | re.S)[0]
         mapping = {"AGENT": "agent", "SMOKE": "smoke", "AGENT_SERVICE_UNIT": "service_unit",
                    "AGENT_TIMER_UNIT": "timer_unit", "ENV_FILE": "env", "FENCE_DROPIN": "fence",
                    "SELF_UPDATE_HELPER": "self_update_helper", "SELF_UPDATE_SERVICE_UNIT": "self_update_service",
-                   "SELF_UPDATE_TIMER_UNIT": "self_update_timer", "SELF_UPDATE_POLICY": "self_update_policy"}
+                   "SELF_UPDATE_TIMER_UNIT": "self_update_timer"}
         journal = self.root / "journal"
         (journal/"backups").mkdir(parents=True)
         lines = ["set -euo pipefail", "TXN_DIR=" + str(journal)]
+        policy = self.policy({"enabled": False})
+        (journal/"backups"/"self_update_policy").write_text('{"enabled": true}')
+        (journal/"self_update_policy_present").write_text("1")
         keys = []
         for variable, key in mapping.items():
             path = self.root / key
             path.write_text("new")
             lines.append(variable + "=" + str(path))
-            # A newly introduced policy had no previous file; restore that absence.
-            (journal/(key+"_present")).write_text("0" if key=="self_update_policy" else "1")
-            if key != "self_update_policy":
-                (journal/"backups"/key).write_text("old-"+key)
+            (journal/(key+"_present")).write_text("1")
+            (journal/"backups"/key).write_text("old-"+key)
             keys.append(key)
         lines += ['read_value() { cat "$TXN_DIR/$1"; }', function("path_exists_any"),
                   function("artifact_path"), function("restore_artifact"),
                   "for key in " + " ".join(keys) + '; do restore_artifact "$key"; done']
         subprocess.run(["bash", "-c", "\n".join(lines)], check=True)
         for key in keys:
-            if key=="self_update_policy":
-                self.assertFalse((self.root/key).exists())
-            else:
-                self.assertEqual("old-"+key, (self.root/key).read_text())
+            self.assertEqual("old-"+key, (self.root/key).read_text())
+        self.assertFalse(updater.read_policy(policy))
+        self.assertNotIn("self_update_policy)", text)
+        self.assertIn("for key in self_update_helper self_update_service self_update_timer; do", text)
 
     def test_installer_policy_is_preserved_and_timer_is_never_enabled(self):
         text = (ROOT/"install/install-id-exergism.sh").read_text()
@@ -300,6 +301,28 @@ class SelfUpdateTests(unittest.TestCase):
         validated = text.index("\nmark_generation_validated\n", published)
         self.assertLess(begin, published)
         self.assertLess(published, validated)
+
+    def test_admission_under_installer_lock_rejects_completed_concurrent_upgrade(self):
+        with mock.patch.object(updater, "read_policy", return_value=True), \
+             mock.patch.object(updater, "no_pending_transactions"), \
+             mock.patch.object(updater.subprocess, "check_output", return_value=b"0.1.11"):
+            self.assertEqual(2, updater.admit_candidate("v0.1.10"))
+
+    def test_admission_rechecks_opt_in_before_version_or_mutation(self):
+        with mock.patch.object(updater, "read_policy", return_value=False), \
+             mock.patch.object(updater.subprocess, "check_output") as run:
+            self.assertEqual(2, updater.admit_candidate("v0.1.10"))
+            run.assert_not_called()
+
+    def test_admission_allows_only_a_newer_authorized_candidate(self):
+        with mock.patch.object(updater, "read_policy", return_value=True), \
+             mock.patch.object(updater, "no_pending_transactions"), \
+             mock.patch.object(updater.subprocess, "check_output", return_value=b"0.1.9"):
+            self.assertEqual(0, updater.admit_candidate("v0.1.10"))
+        text = (ROOT/"install/install-id-exergism.sh").read_text()
+        self.assertLess(text.index("flock -n 9"), text.index('"$AGENT" self-update --admit'))
+        self.assertLess(text.index('"$AGENT" self-update --admit'),
+                        text.index('atomic_install_root_file "$REPO_INPUT_STAGE/install/validate-id-exergism-generation.sh"'))
 
     def test_legacy_and_new_journal_schemas_supported(self):
         for filename in ("recover-id-exergism-install.sh", "finalize-id-exergism-recovery.sh"):

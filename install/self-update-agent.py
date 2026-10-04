@@ -266,7 +266,8 @@ def install_snapshot(stage, tag, hashes):
                        EC_INSTALLER_SOURCE_ROOT=str(source),
                        EC_INSTALLER_SHA256=hashes[ASSETS["installer"]],
                        EC_NATIVE_AGENT_BINARY=str(agent),
-                       EC_NATIVE_AGENT_SHA256=hashes[ASSETS["amd64"]])
+                       EC_NATIVE_AGENT_SHA256=hashes[ASSETS["amd64"]],
+                       EC_PACKAGE_AUTO_UPDATE_TAG=tag)
     # Recheck after candidate execution too: preflight can take up to 30 seconds.
     if not read_policy():
         print("Self-update opt-in was withdrawn during preflight; package discarded.")
@@ -275,8 +276,11 @@ def install_snapshot(stage, tag, hashes):
     # This is the EXISTING installer transaction, including rollback and boot recovery.
     subprocess.run([str(installer)], env=environment, check=True)
     installed = subprocess.check_output([AGENT, "package-version"], env=ENVIRONMENT, timeout=30).decode().strip()
-    require(version(installed) == version(tag), "Installed package version mismatch")
-    print("Updated deployment-attestation package to " + tag)
+    if not read_policy() and version(installed) < version(tag):
+        print("Self-update opt-in withdrawn while waiting for installer admission.")
+        return
+    require(version(installed) >= version(tag), "Installed package version mismatch")
+    print("Installed deployment-attestation package: v" + installed)
 
 
 def main():
@@ -318,8 +322,26 @@ def main():
         os.close(descriptor)
 
 
+def admit_candidate(tag):
+    """Called by the installer AFTER acquiring its global mutation lock."""
+    require(os.geteuid() == 0, "Package admission must run as root")
+    version(tag)
+    if not read_policy():
+        print("Self-update opt-in withdrawn; installer admission skipped.")
+        return 2
+    no_pending_transactions()
+    installed = subprocess.check_output([AGENT, "package-version"], env=ENVIRONMENT, timeout=30).decode().strip()
+    if version(installed) >= version(tag):
+        print("Installed package is already equal or newer; installer admission skipped.")
+        return 2
+    return 0
+
+
 if __name__ == "__main__":
     try:
+        if len(sys.argv) == 3 and sys.argv[1] == "--admit":
+            sys.exit(admit_candidate(sys.argv[2]))
+        require(len(sys.argv) == 1, "Unsupported helper arguments")
         sys.exit(main())
     except Exception as error:
         print("ERROR: self-update: " + str(error), file=sys.stderr)
