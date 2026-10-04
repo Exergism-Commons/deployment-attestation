@@ -88,6 +88,31 @@ internal static class AgentActionParser
     };
 }
 
+internal static class AgentExceptionDiagnostics
+{
+    internal static string Format(Exception exception)
+    {
+        var messages = new List<string>();
+        Append(exception, messages);
+        return string.Join(" | caused by: ", messages);
+    }
+
+    private static void Append(Exception exception, ICollection<string> messages)
+    {
+        if (exception is AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.Flatten().InnerExceptions)
+                Append(inner, messages);
+            return;
+        }
+
+        messages.Add($"{exception.GetType().Name}: {exception.Message}");
+
+        if (exception.InnerException is not null)
+            Append(exception.InnerException, messages);
+    }
+}
+
 internal static class DeploymentFailureFlow
 {
     internal static async Task ThrowAfterRollbackAndReportAsync(

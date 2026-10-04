@@ -87,3 +87,30 @@ There is intentionally no Bash fallback. This prevents security fixes, recovery 
 ## C# conventions
 
 The executable uses top-level statements for the entry point. Closed domains use enums internally; persisted/wire values and other repeated contract strings are centralized as `SNAKE_CASE` constants. This keeps protocol spellings reviewable in one place and avoids magic strings across the state machine.
+
+## Running Linux tests
+
+Run the same test split used by the Native AOT and release workflows:
+
+```sh
+bash .github/scripts/test-agent.sh
+```
+
+The normal suite runs as the current user. Tests tagged `PrivilegedLinux`
+then run via `sudo`, using the already-built assemblies (`--no-build
+--no-restore`) and a temporary CLI/results directory. These regressions
+exercise real immutable-checkout sealing, which requires
+`CAP_LINUX_IMMUTABLE` and a filesystem supporting the Linux immutable flag.
+The hosted Ubuntu VM provides that environment; an unprivileged container
+or user account cannot replace this coverage. A failure to seal remains a
+test failure, and the production seal is never bypassed for testing.
+
+The migration regression covers both legacy `0600`/`0700` and group-readable
+`0640`/`0750` modes, verifies the exact published `0644`/`0755` contract, and
+checks that the resulting checkout is fully sealed.
+
+Bootstrap regressions exercise first adoption without a recorded current state
+for both legacy modes, including the exact source/runtime preparation used by
+bootstrap. They also check that altered source bytes, a non-executable runtime,
+and a mismatched revision are rejected before publication modes are changed.
+State is written only after the subsequent live-runtime and strict-source checks.

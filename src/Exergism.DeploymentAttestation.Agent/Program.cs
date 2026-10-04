@@ -71,8 +71,9 @@ static async Task<int> RunAsync(string[] args)
     }
     catch (AgentException ex)
     {
-        RecordHealthFailure(healthStore, ex.Message);
-        Console.Error.WriteLine($"ERROR: {ex.Message}");
+        var diagnostic = AgentExceptionDiagnostics.Format(ex);
+        RecordHealthFailure(healthStore, diagnostic);
+        Console.Error.WriteLine($"ERROR: {diagnostic}");
         return 1;
     }
     catch (Exception ex)
