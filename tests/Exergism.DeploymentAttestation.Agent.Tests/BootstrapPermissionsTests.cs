@@ -89,6 +89,29 @@ public sealed class BootstrapPermissionsTests
         Assert.IsFalse(File.Exists(fixture.Environment.Config.CurrentStateFile));
     }
 
+    [TestMethod]
+    [TestCategory("PrivilegedLinux")]
+    public async Task MissingTargetIsFetchedBeforeTargetTraversalAndFetchFailureCanRollback()
+    {
+        using var fixture = await BootstrapFixture.CreateAsync(groupReadable: false);
+        var repository = new GitRepository(fixture.Environment.Config);
+        var configure = await ProcessRunner.RunAsync("git",
+            ["remote", "add", "origin", "/unavailable-test-origin.git"],
+            workingDirectory: fixture.Environment.Config.AppDirectory);
+        Assert.IsTrue(configure.Success, configure.StdErr);
+        await repository.NormalizeVerifiedPublishedPermissionsAsync(fixture.Commit);
+        var unavailableTarget = new string('1', 40);
+        var error = await Assert.ThrowsExactlyAsync<AgentException>(() =>
+            repository.SwitchSourceAsync(unavailableTarget, fetchFirst: true));
+        StringAssert.Contains(error.Message, "transport 'file' not allowed",
+            "The target must reach the restricted fetch instead of premature ls-tree.");
+        await repository.SwitchSourceAsync(fixture.Commit, fetchFirst: false);
+        Assert.AreEqual(fixture.Commit, await repository.HeadAsync());
+        await repository.VerifySourceTreeExactAsync(fixture.Commit);
+        Assert.AreEqual(CheckoutSealState.FullySealed,
+            CheckoutWriteExclusion.InspectTreeSealState(fixture.Environment.Config.AppDirectory));
+    }
+
     private sealed class BootstrapFixture : IDisposable
     {
         private BootstrapFixture(
