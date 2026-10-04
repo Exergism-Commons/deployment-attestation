@@ -2,6 +2,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</Version>
     <AssemblyName>ec-deployment-agent</AssemblyName>
     <RootNamespace>Exergism.DeploymentAttestation.Agent</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>

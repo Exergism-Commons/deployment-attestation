@@ -13,7 +13,9 @@ internal enum AgentAction
     Status,
     Recover,
     ValidateConfig,
-    SelfTest
+    SelfTest,
+    SelfUpdate,
+    PackageVersion
 }
 
 
@@ -56,8 +58,9 @@ internal static class AgentActionParser
         {
             0 => AgentAction.Run,
             1 => Parse(args[0]),
+            3 when args[0] == "self-update" && args[1] == "--admit" => AgentAction.SelfUpdate,
             _ => throw new AgentException(
-                $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_VALIDATE_CONFIG}|{ACTION_SELF_TEST}]")
+                $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_VALIDATE_CONFIG}|{ACTION_SELF_TEST}|self-update|package-version]")
         };
 
     internal static AgentAction Parse(string value) => value switch
@@ -70,8 +73,10 @@ internal static class AgentActionParser
         ACTION_RECOVER => AgentAction.Recover,
         ACTION_VALIDATE_CONFIG => AgentAction.ValidateConfig,
         ACTION_SELF_TEST => AgentAction.SelfTest,
+        "self-update" => AgentAction.SelfUpdate,
+        "package-version" => AgentAction.PackageVersion,
         _ => throw new AgentException(
-            $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_VALIDATE_CONFIG}|{ACTION_SELF_TEST}]")
+            $"Usage: ec-deployment-agent [{ACTION_RUN}|{ACTION_UPDATE}|{ACTION_ATTEST}|{ACTION_HEALTH}|{ACTION_STATUS}|{ACTION_RECOVER}|{ACTION_VALIDATE_CONFIG}|{ACTION_SELF_TEST}|self-update|package-version]")
     };
 
     internal static string ToWireValue(AgentAction action) => action switch
@@ -84,6 +89,8 @@ internal static class AgentActionParser
         AgentAction.Recover => ACTION_RECOVER,
         AgentAction.ValidateConfig => ACTION_VALIDATE_CONFIG,
         AgentAction.SelfTest => ACTION_SELF_TEST,
+        AgentAction.SelfUpdate => "self-update",
+        AgentAction.PackageVersion => "package-version",
         _ => throw new AgentException("Unsupported agent action")
     };
 }

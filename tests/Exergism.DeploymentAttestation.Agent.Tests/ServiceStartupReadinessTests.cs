@@ -77,7 +77,7 @@ public sealed class ServiceStartupReadinessTests
         var clock = Stopwatch.StartNew();
         Assert.IsFalse(await ServiceStartupReadiness.WaitAsync(
             _ => Task.FromResult(true),
-            async budget => { budgets.Add(budget); await Task.Delay(budget); return false; },
+            async budget => { budgets.Add(budget); await Task.Delay(TimeSpan.FromMilliseconds(Math.Ceiling(budget.TotalMilliseconds))); return false; },
             timeout, TimeSpan.FromSeconds(10)));
         Assert.AreEqual(1, budgets.Count);
         Assert.IsTrue(budgets[0] > TimeSpan.Zero && budgets[0] <= timeout);

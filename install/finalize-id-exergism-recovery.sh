@@ -72,7 +72,7 @@ read_value() {
 }
 
 schema_version="$(read_value schema_version)"
-[[ "$schema_version" == 2 ]] || {
+[[ "$schema_version" == 2 || "$schema_version" == 3 ]] || {
   echo "Unsupported recovered journal schema: $schema_version" >&2
   exit 1
 }

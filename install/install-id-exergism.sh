@@ -24,6 +24,7 @@ INSTALLER_SOURCE_ROOT="${EC_INSTALLER_SOURCE_ROOT:-}"
 EXPECTED_INSTALLER_SHA256="${EC_INSTALLER_SHA256:-}"
 EXPECTED_AGENT_SHA256="${EC_NATIVE_AGENT_SHA256:-}"
 AGENT_SOURCE_PATH="${EC_NATIVE_AGENT_BINARY:-}"
+AUTO_UPDATE_TAG="${EC_PACKAGE_AUTO_UPDATE_TAG:-}"
 
 case "$INSTALLER_TRUSTED_STAGE" in
   "$TRUSTED_STAGE_PARENT"/installer.*) ;;
@@ -208,9 +209,9 @@ repo_inputs = (
     ("install/verify-id-exergism-artifact-fence.sh", 0o500, "66e8acd18d064b8bc35f9c0e6d4a38fd4f00e552b95f0a08514477598a94a755"),
     ("agent/validate-release-manifest.py", 0o500, "1d9c3f889e89b8ff5acb8659504655e7237ad32f5e3e4c4bd29fb719150ab481"),
     ("spec/release-manifest-v0.1.schema.json", 0o400, "53338bbdbb822c8a94bfbc45246af56017165a0af14d1fea818c6fc9d23120b2"),
-    ("install/finalize-id-exergism-recovery.sh", 0o500, "2667cc94cf281f94ba91e2910ef6da760c05bf70bd36a58332496f5c9a4326f9"),
+    ("install/finalize-id-exergism-recovery.sh", 0o500, "35ae323db524d87dd3b2ee6c8bc4584cd367f8fd068039ebd0dbdb72da7c2ef6"),
     ("packaging/id-exergism-install-recovery-finalize.service", 0o400, "758f1921d2f344d071a141fdd7611ba72f44dcaa71288e1fe07c7868278552b0"),
-    ("install/recover-id-exergism-install.sh", 0o500, "79890531158810456562c374cc1fe0ebb5a35505f2014e750cca764a9dbdfe1a"),
+    ("install/recover-id-exergism-install.sh", 0o500, "17e4271527a3a7dc7fa5576258da98e80d3ecd21ed315e77a45dc8dae69d3b7c"),
     ("packaging/id-exergism-install-recovery.service", 0o400, "6b4590d37a30c8f8567b07ee69e2f9f74454f9f7e39e5fd102ff4dbe9a732d6c"),
     ("packaging/id-exergism-install-recovery-interlock.conf", 0o400, "fed104865dbd437dbb9397f5e9982942ab691ec8befc6a2d693dd2e6f73001fd"),
     ("packaging/id-exergism-agent-recovery-interlock.conf", 0o400, "9a132fe45b037d2082ebec87948743180ffc19d1588a1d128937ddda912440d9"),
@@ -219,6 +220,10 @@ repo_inputs = (
     ("packaging/ec-deployment-attestation@.service", 0o400, "9c2f627a589dfa418f3334d6fe68722cc1c3f50d5324b331497e7676de93ff94"),
     ("packaging/ec-deployment-attestation@.timer", 0o400, "a27cdffdd9e4e8d4cfeebc78f7c83836d3944314ba0c0559229670c5dbfa5b56"),
     ("packaging/id-exergism-artifact-fence.conf", 0o400, "3c0eeb7e8ce627d199b6093a3f0a267a64f23bd73875ec779c1a7d9bebcda42e"),
+    ("install/self-update-agent.py", 0o500, "6af038f86ea405c3802d0d338395523f7a2e5a93f49a12ae92b90bc1c8f22b61"),
+    ("packaging/ec-deployment-agent-self-update.service", 0o400, "02933ca454c96d3c6e266e5e747dbd19726ee0d51d5504361327cee16d10a8eb"),
+    ("packaging/ec-deployment-agent-self-update.timer", 0o400, "8a90bf7508db1ab9d98ed7435aef770a47b364beeca3b7fe3a2a77068b59db30"),
+    ("packaging/self-update.json", 0o400, "937b9ffefa7acb8eb7e47b84cb689cfe9febccb8ad115a2393a280815f6131d4"),
 )
 
 repo_stage = os.path.join(stage, "repo")
@@ -299,6 +304,10 @@ TIMER_UNIT="ec-deployment-attestation@${SERVICE}.timer"
 RECOVERY_UNIT="id-exergism-install-recovery.service"
 
 AGENT="/usr/local/libexec/ec-deployment-agent"
+SELF_UPDATE_HELPER="/usr/local/libexec/ec-deployment-agent-self-update"
+SELF_UPDATE_SERVICE_UNIT="/etc/systemd/system/ec-deployment-agent-self-update.service"
+SELF_UPDATE_TIMER_UNIT="/etc/systemd/system/ec-deployment-agent-self-update.timer"
+SELF_UPDATE_POLICY="/etc/ec-deployment-attestation/self-update.json"
 AGENT_SOURCE="$INSTALLER_TRUSTED_STAGE/native-agent"
 AGENT_INSTALL_SOURCE="$AGENT_SOURCE"
 NATIVE_AGENT_STAGE="$INSTALLER_TRUSTED_STAGE/work"
@@ -405,6 +414,18 @@ flock -n 9 || {
   echo "Another Deployment Attestation installation/recovery is already running." >&2
   exit 1
 }
+# Automatic updates recheck authorization/version under the installer mutation
+# lock. A concurrently completed manual install must never be downgraded.
+if [[ -n "$AUTO_UPDATE_TAG" ]]; then
+  admission_rc=0
+  "$AGENT" self-update --admit "$AUTO_UPDATE_TAG" || admission_rc=$?
+  case "$admission_rc" in
+    0) ;;
+    2) exit 0 ;;
+    *) echo "Automatic package update admission failed." >&2; exit 1 ;;
+  esac
+fi
+
 
 durable_sync_paths() {
   /usr/bin/python3 -I - "$@" <<'PY'
@@ -858,6 +879,9 @@ wait_target_healthy() {
 
 artifact_path() {
   case "$1" in
+    self_update_helper) printf '%s\n' "$SELF_UPDATE_HELPER" ;;
+    self_update_service) printf '%s\n' "$SELF_UPDATE_SERVICE_UNIT" ;;
+    self_update_timer) printf '%s\n' "$SELF_UPDATE_TIMER_UNIT" ;;
     agent) printf '%s\n' "$AGENT" ;;
     smoke) printf '%s\n' "$SMOKE" ;;
     service_unit) printf '%s\n' "$AGENT_SERVICE_UNIT" ;;
@@ -877,13 +901,13 @@ create_install_transaction() {
   stage="$(mktemp -d "${INSTALL_STATE_ROOT}/.${SERVICE}.pending.XXXXXX")"
   install -d -o root -g root -m 0700 "$stage/backups"
 
-  printf '2\n' > "$stage/schema_version"
+  printf '3\n' > "$stage/schema_version"
   printf '%s\n' "$current_boot_id" > "$stage/origin_boot_id"
   printf '%s\n' "$timer_enablement_state" > "$stage/timer_enablement_state"
   printf '%s\n' "$timer_was_active" > "$stage/timer_was_active"
   printf '%s\n' "$target_was_active" > "$stage/target_was_active"
 
-  for key in agent smoke service_unit timer_unit env fence; do
+  for key in agent smoke service_unit timer_unit env fence self_update_helper self_update_service self_update_timer; do
     path="$(artifact_path "$key")"
     present=0
     if path_exists_any "$path"; then
@@ -935,7 +959,7 @@ PY
 
 persist_installed_generation() {
   local timer_wants="/etc/systemd/system/timers.target.wants"
-  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
+  durable_sync_paths     "$AGENT" "$SMOKE" "$AGENT_SERVICE_UNIT" "$AGENT_TIMER_UNIT"     "$ENV_FILE" "$FENCE_DROPIN"     "$SELF_UPDATE_HELPER" "$SELF_UPDATE_SERVICE_UNIT" "$SELF_UPDATE_TIMER_UNIT" "$SELF_UPDATE_POLICY"     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR"     /etc/systemd/system "$timer_wants"
   durable_sync_ancestor_chain     /usr/local/libexec /etc/ec-deployment-attestation "$FENCE_DROPIN_DIR" "$timer_wants"
 }
 
@@ -980,7 +1004,20 @@ stop_and_wait_quiescent "$TIMER_UNIT"
 stop_and_wait_quiescent "$AGENT_RUN_UNIT"
 stop_and_wait_quiescent "$TARGET_UNIT"
 
-install -o root -g root -m 0755 "$AGENT_INSTALL_SOURCE" "$AGENT"
+atomic_install_root_file "$AGENT_INSTALL_SOURCE" "$AGENT" 0755
+atomic_install_root_file "$REPO_INPUT_STAGE/install/self-update-agent.py" "$SELF_UPDATE_HELPER" 0755
+atomic_install_root_file "$REPO_INPUT_STAGE/packaging/ec-deployment-agent-self-update.service" "$SELF_UPDATE_SERVICE_UNIT" 0644
+atomic_install_root_file "$REPO_INPUT_STAGE/packaging/ec-deployment-agent-self-update.timer" "$SELF_UPDATE_TIMER_UNIT" 0644
+if [[ ! -e "$SELF_UPDATE_POLICY" && ! -L "$SELF_UPDATE_POLICY" ]]; then
+  atomic_install_root_file "$REPO_INPUT_STAGE/packaging/self-update.json" "$SELF_UPDATE_POLICY" 0600
+fi
+# Compile before committing the transaction; the policy/timer remains opt-in.
+/usr/bin/python3 -I - "$SELF_UPDATE_HELPER" <<'PY'
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+compile(path.read_bytes(), str(path), "exec")
+PY
 install -o root -g root -m 0755 "$REPO_INPUT_STAGE/examples/id.exergism.org-smoke.sh" "$SMOKE"
 install -o root -g root -m 0644 "$REPO_INPUT_STAGE/packaging/ec-deployment-attestation@.service" "$AGENT_SERVICE_UNIT"
 install -o root -g root -m 0644 "$REPO_INPUT_STAGE/packaging/ec-deployment-attestation@.timer" "$AGENT_TIMER_UNIT"
@@ -990,7 +1027,7 @@ if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
 fi
 
 systemctl daemon-reload
-systemd-analyze verify "$TARGET_UNIT" "$AGENT_RUN_UNIT" "$TIMER_UNIT" >/dev/null
+systemd-analyze verify "$TARGET_UNIT" "$AGENT_RUN_UNIT" "$TIMER_UNIT" ec-deployment-agent-self-update.service ec-deployment-agent-self-update.timer >/dev/null
 
 # Validate the pending generation without starting any interlocked production
 # unit. A transient resolver gets the same user, source, binary and read-only
@@ -1029,4 +1066,5 @@ printf 'Config: /etc/ec-deployment-attestation/%s.env\n' "$SERVICE"
 printf 'Manual run: systemctl start ec-deployment-attestation@%s.service\n' "$SERVICE"
 printf 'Logs: journalctl -u ec-deployment-attestation@%s.service -n 100 --no-pager\n' "$SERVICE"
 printf 'Timer: systemctl status ec-deployment-attestation@%s.timer\n' "$SERVICE"
+printf '\nPackage self-updates are opt-in; see /etc/ec-deployment-attestation/self-update.json.\n'
 printf '\nThe updater is active. Attestations remain local journal output until EC_ATTESTATION_ENDPOINT and EC_HMAC_SECRET_FILE are configured.\n'

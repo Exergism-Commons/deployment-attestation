@@ -30,7 +30,9 @@ internal static class ServiceStartupReadiness
             var remaining = Remaining();
             if (remaining <= TimeSpan.Zero)
                 return false;
-            await Task.Delay(remaining < retryInterval ? remaining : retryInterval);
+            var delay = remaining < retryInterval ? remaining : retryInterval;
+            // Task.Delay truncates fractional milliseconds; avoid a busy loop near the deadline.
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Ceiling(delay.TotalMilliseconds)));
         }
         return false;
     }
