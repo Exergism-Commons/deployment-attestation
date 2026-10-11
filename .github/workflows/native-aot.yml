@@ -52,7 +52,7 @@ jobs:
         run: EC_ATTESTATION_CONFIG="$PWD/examples/id.exergism.org.env.example" ./artifacts/linux-x64/ec-deployment-agent validate-config
 
       - name: Upload Native AOT binary
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ec-deployment-agent-linux-x64
           path: artifacts/linux-x64/ec-deployment-agent
